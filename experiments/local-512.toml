@@ -1,0 +1,28 @@
+run_id = "local-512"
+run_timeout_secs = 120
+
+validator_count = 512
+subnet_count = 1
+local_aggregators_per_subnet = 32
+global_aggregator_count = 0
+
+local_threshold = 0.9
+global_proof_target = 0.66
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 3072
+proof_payload_bytes = 131072
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 50
+latency_ms = 50

@@ -1,0 +1,7 @@
+/target/
+/shadow.data/
+/shadow.yaml
+/shadow.log
+/configs/
+*.toml.tmp
+/experiments/runs/

@@ -1,0 +1,4 @@
+avg_duplicates_per_unique,global_proof_latency_ms,local_aggregation_latency_ms,local_proof_latencies,missed_thresholds,param_signature_payload_bytes,run_id,total_bytes_transferred,total_duplicate_sigs,total_sigs_sent,total_unique_sigs,wall_clock_secs
+0.0,,4011,"{'0': [4104, 4101, 4102, 4011]}",[],1024,sweep-signature_payload_bytes-1024,3276800,0,32,1120,2.0
+0.0,,4037,"{'0': [4111, 4105, 4137, 4037]}",[],3072,sweep-signature_payload_bytes-3072,5636096,0,32,1120,2.1
+0.0,,4037,"{'0': [4112, 4118, 4145, 4037]}",[],4096,sweep-signature_payload_bytes-4096,6815744,0,32,1120,2.3

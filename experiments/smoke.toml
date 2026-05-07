@@ -1,0 +1,28 @@
+run_id = "smoke-test"
+run_timeout_secs = 30
+
+validator_count = 4
+subnet_count = 1
+local_aggregators_per_subnet = 1
+global_aggregator_count = 1
+
+local_threshold = 0.75
+global_proof_target = 0.75
+burst_time_ms = 2000
+burst_jitter_ms = 500
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 3072
+proof_payload_bytes = 1024
+
+gossipsub_mesh_n_low = 2
+gossipsub_mesh_n = 3
+gossipsub_mesh_n_high = 5
+gossipsub_mesh_outbound_min = 1
+gossipsub_heartbeat_interval_ms = 1000
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 50
+latency_ms = 50

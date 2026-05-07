@@ -1,0 +1,29 @@
+# Single-subnet local aggregation experiment — optimized for network benchmarks
+run_id = "local-bench"
+run_timeout_secs = 60
+
+validator_count = 128
+subnet_count = 1
+local_aggregators_per_subnet = 8
+global_aggregator_count = 0
+
+local_threshold = 0.9
+global_proof_target = 0.66
+burst_time_ms = 200
+burst_jitter_ms = 200
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 3072
+proof_payload_bytes = 131072
+
+gossipsub_mesh_n_low = 3
+gossipsub_mesh_n = 5
+gossipsub_mesh_n_high = 8
+gossipsub_mesh_outbound_min = 1
+gossipsub_heartbeat_interval_ms = 300
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 50
+latency_ms = 50
