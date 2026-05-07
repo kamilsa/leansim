@@ -27,6 +27,12 @@ fn test_config() -> ExperimentConfig {
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
         network_defaults: NetworkDefaults::default(),
+        use_geo_latency: false,
+        geo_seed: 0,
+        geo_jitter: 0.0,
+        supernode_fraction: 0.0,
+        supernode_uplink_mbps: 1000,
+        supernode_downlink_mbps: 1000,
     }
 }
 
