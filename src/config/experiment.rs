@@ -110,6 +110,11 @@ pub struct ExperimentConfig {
     /// Download bandwidth for supernodes in Mbps.
     #[serde(default = "default_supernode_bw")]
     pub supernode_downlink_mbps: u64,
+
+    /// Number of peers each node connects to in the topology graph.
+    /// 0 = full mesh (complete graph, default for backward compat).
+    #[serde(default)]
+    pub topology_degree: usize,
 }
 
 impl ExperimentConfig {

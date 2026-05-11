@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -8,6 +9,8 @@ use std::path::Path;
 
 use crate::config::experiment::{ExperimentConfig, NodeConfig, NodeRole};
 use crate::geo::latency::{CountryLatencyModel, CountryWeights};
+
+const SEED_PEER_COUNT: usize = 50;
 
 /// Shadow YAML top-level structure.
 #[derive(Serialize)]
@@ -210,12 +213,21 @@ fn assign_nodes(experiment: &ExperimentConfig) -> Vec<NodeConfig> {
     }
 
     let all_addrs: Vec<String> = nodes.iter().map(|n| n.listen_addr.clone()).collect();
+    let seed = if experiment.geo_seed != 0 {
+        experiment.geo_seed
+    } else {
+        42
+    };
     for node in &mut nodes {
-        node.seed_addrs = all_addrs
+        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(node.node_id as u64));
+        let mut candidates: Vec<String> = all_addrs
             .iter()
             .filter(|a| **a != node.listen_addr)
             .cloned()
             .collect();
+        candidates.shuffle(&mut rng);
+        candidates.truncate(SEED_PEER_COUNT.min(candidates.len()));
+        node.seed_addrs = candidates;
     }
 
     nodes
@@ -229,7 +241,11 @@ fn global_aggregator_ip(node_id: u32) -> String {
     format!("10.255.{}.{}", node_id / 254, node_id % 254 + 1)
 }
 
-/// Generate a complete-graph GML topology.
+/// Generate a GML topology.
+/// When `topology_degree > 0`, produces a sparse random regular-ish graph
+/// where each node connects to that many peers. Otherwise falls back to
+/// the complete graph (full mesh).
+///
 /// When geo mode is enabled, uses per-country-pair latencies with optional jitter.
 fn generate_gml(
     nodes: &[NodeConfig],
@@ -238,6 +254,7 @@ fn generate_gml(
     rng: &mut impl Rng,
 ) -> String {
     let uniform_ms = experiment.network_defaults.latency_ms;
+    let degree = experiment.topology_degree;
 
     let mut gml = String::from("graph [\n");
     gml.push_str("  directed 0\n");
@@ -257,30 +274,57 @@ fn generate_gml(
         ));
     }
 
-    // Complete graph edges with per-pair latency
-    for i in 0..nodes.len() {
-        for j in (i + 1)..nodes.len() {
-            let latency_ms = match geo {
-                Some(ref ctx) => {
-                    let from = &ctx.node_countries[i];
-                    let to = &ctx.node_countries[j];
-                    let params = ctx.model.get_latency(from, to);
-                    let ms = if experiment.geo_jitter > 0.0 {
-                        let spread = params.base_ms * experiment.geo_jitter;
-                        params.base_ms + rng.gen_range(-spread..spread)
-                    } else {
-                        params.base_ms
-                    };
-                    ms.max(0.5)
-                }
-                None => uniform_ms as f64,
-            };
-
-            gml.push_str(&format!(
-                "  edge [\n    source {}\n    target {}\n    latency \"{:.0} ms\"\n  ]\n",
-                nodes[i].node_id, nodes[j].node_id, latency_ms
-            ));
+    // Build edge set
+    let edges: Vec<(usize, usize)> = if degree > 0 && degree < nodes.len() - 1 {
+        // Sparse random graph: each node picks `degree` random neighbours.
+        // Collect undirected edges (i < j) into a set to avoid duplicates.
+        let mut edge_set = std::collections::HashSet::new();
+        for i in 0..nodes.len() {
+            let mut candidates: Vec<usize> = (0..nodes.len()).filter(|&j| j != i).collect();
+            // Fisher-Yates shuffle to pick `degree` random peers
+            for k in 0..degree.min(candidates.len()) {
+                let swap_idx = rng.gen_range(k..candidates.len());
+                candidates.swap(k, swap_idx);
+                let (a, b) = (i, candidates[k]);
+                let (lo, hi) = (a.min(b), a.max(b));
+                edge_set.insert((lo, hi));
+            }
         }
+        let mut edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+        edges.sort();
+        edges
+    } else {
+        // Complete graph (original behaviour)
+        let mut edges = Vec::new();
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                edges.push((i, j));
+            }
+        }
+        edges
+    };
+
+    for (i, j) in &edges {
+        let latency_ms = match geo {
+            Some(ref ctx) => {
+                let from = &ctx.node_countries[*i];
+                let to = &ctx.node_countries[*j];
+                let params = ctx.model.get_latency(from, to);
+                let ms = if experiment.geo_jitter > 0.0 {
+                    let spread = params.base_ms * experiment.geo_jitter;
+                    params.base_ms + rng.gen_range(-spread..spread)
+                } else {
+                    params.base_ms
+                };
+                ms.max(0.5)
+            }
+            None => uniform_ms as f64,
+        };
+
+        gml.push_str(&format!(
+            "  edge [\n    source {}\n    target {}\n    latency \"{:.0} ms\"\n  ]\n",
+            nodes[*i].node_id, nodes[*j].node_id, latency_ms
+        ));
     }
 
     gml.push_str("]\n");
@@ -391,6 +435,7 @@ mod tests {
             supernode_fraction: 0.0,
             supernode_uplink_mbps: 1000,
             supernode_downlink_mbps: 1000,
+            topology_degree: 0,
         }
     }
 
@@ -419,6 +464,18 @@ mod tests {
         let nodes = assign_nodes(&exp);
         for node in &nodes {
             assert!(!node.seed_addrs.contains(&node.listen_addr));
+        }
+    }
+
+    #[test]
+    fn seed_addrs_are_capped_at_50() {
+        let mut exp = test_experiment();
+        exp.validator_count = 128;
+        exp.subnet_count = 1;
+        exp.local_aggregators_per_subnet = 1;
+        let nodes = assign_nodes(&exp);
+        for node in &nodes {
+            assert_eq!(node.seed_addrs.len(), SEED_PEER_COUNT);
         }
     }
 

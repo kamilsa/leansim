@@ -33,6 +33,7 @@ fn test_config() -> ExperimentConfig {
         supernode_fraction: 0.0,
         supernode_uplink_mbps: 1000,
         supernode_downlink_mbps: 1000,
+        topology_degree: 0,
     }
 }
 
