@@ -81,6 +81,40 @@ pub struct ExperimentConfig {
 
     #[serde(default)]
     pub network_defaults: NetworkDefaults,
+
+    // --- Geographical latency settings ---
+
+    /// Enable country-based per-edge latencies (uses country_latencies.json + weights.json).
+    #[serde(default = "default_false")]
+    pub use_geo_latency: bool,
+
+    /// Random seed for country assignment and latency jitter (0 = use random).
+    #[serde(default = "default_geo_seed")]
+    pub geo_seed: u64,
+
+    /// Jitter factor for per-edge latency. 0 = no jitter, 1 = ±100%.
+    /// Overrides the built-in thresholds from the latency model when > 0.
+    #[serde(default)]
+    pub geo_jitter: f64,
+
+    // --- Supernode settings ---
+
+    /// Fraction of nodes that get supernode bandwidth (e.g. 0.05 = 5%).
+    #[serde(default = "default_supernode_fraction")]
+    pub supernode_fraction: f64,
+
+    /// Upload bandwidth for supernodes in Mbps.
+    #[serde(default = "default_supernode_bw")]
+    pub supernode_uplink_mbps: u64,
+
+    /// Download bandwidth for supernodes in Mbps.
+    #[serde(default = "default_supernode_bw")]
+    pub supernode_downlink_mbps: u64,
+
+    /// Number of peers each node connects to in the topology graph.
+    /// 0 = full mesh (complete graph, default for backward compat).
+    #[serde(default)]
+    pub topology_degree: usize,
 }
 
 impl ExperimentConfig {
@@ -156,4 +190,20 @@ fn default_local_aggregators() -> usize {
 
 fn default_global_aggregators() -> usize {
     1
+}
+
+fn default_false() -> bool {
+    false
+}
+
+fn default_geo_seed() -> u64 {
+    42
+}
+
+fn default_supernode_fraction() -> f64 {
+    0.05
+}
+
+fn default_supernode_bw() -> u64 {
+    1000
 }

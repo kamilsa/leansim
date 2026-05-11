@@ -5,3 +5,6 @@
 /configs/
 *.toml.tmp
 /experiments/runs/
+/.claude/
+metrics.json
+topology.gml
