@@ -136,13 +136,13 @@ pub fn generate_shadow_config(experiment: &ExperimentConfig, output: &Path) -> R
 }
 
 /// Context for geo-distributed latency generation.
-struct GeoContext {
-    model: CountryLatencyModel,
-    node_countries: Vec<String>,
+pub struct GeoContext {
+    pub model: CountryLatencyModel,
+    pub node_countries: Vec<String>,
 }
 
 impl GeoContext {
-    fn new(experiment: &ExperimentConfig, seed: u64) -> Self {
+    pub fn new(experiment: &ExperimentConfig, seed: u64) -> Self {
         let model = CountryLatencyModel::load();
         let weights = CountryWeights::load();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -162,7 +162,7 @@ impl GeoContext {
 }
 
 /// Assign roles and addresses to every node.
-fn assign_nodes(experiment: &ExperimentConfig) -> Vec<NodeConfig> {
+pub fn assign_nodes(experiment: &ExperimentConfig) -> Vec<NodeConfig> {
     let mut nodes = Vec::new();
     let mut node_id = 0u32;
     let validators_per_subnet = experiment.validators_per_subnet();

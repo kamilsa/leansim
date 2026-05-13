@@ -5,6 +5,11 @@ use std::io::{self, Write};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum JsonlEvent {
+    /// Emitted by each node at startup to map PeerId → node index.
+    NodePeerId {
+        node_id: u32,
+        peer_id: String,
+    },
     SigSent {
         node_id: u32,
         subnet_id: u32,
@@ -15,6 +20,8 @@ pub enum JsonlEvent {
     SigReceived {
         node_id: u32,
         from_id: u32,
+        #[serde(default)]
+        from_peer_id: String,
         subnet_id: u32,
         duplicate: bool,
         ts_ms: u64,
@@ -30,6 +37,8 @@ pub enum JsonlEvent {
     LocalProofReceived {
         node_id: u32,
         from_id: u32,
+        #[serde(default)]
+        from_peer_id: String,
         subnet_id: u32,
         covered_sigs: usize,
         duplicate: bool,

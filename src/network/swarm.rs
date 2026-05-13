@@ -104,14 +104,23 @@ pub fn publish(
     }
 }
 
+/// Result from `next_message`: the decoded WireMessage, the forwarding PeerId,
+/// and whether this message is a duplicate (already seen by gossipsub).
+pub struct ReceivedMessage {
+    pub wire_msg: WireMessage,
+    pub from_peer: libp2p::PeerId,
+    pub is_duplicate: bool,
+}
+
 /// Runs the main event loop until the swarm is done or timeout.
-/// Returns on gossipsub messages, forwarding deserialized WireMessages.
-pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<WireMessage> {
+/// Returns on gossipsub messages, forwarding deserialized WireMessages and the
+/// propagation source PeerId (the immediate mesh peer that forwarded the message).
+pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<ReceivedMessage> {
     loop {
         let event = swarm.next().await?;
         match event {
             SwarmEvent::Behaviour(gossipsub::Event::Message {
-                propagation_source: _peer_id,
+                propagation_source: peer_id,
                 message_id: _id,
                 message,
             }) => {
@@ -119,18 +128,44 @@ pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<WireM
                     Ok(wire_msg) => {
                         let _ = swarm.behaviour_mut().report_message_validation_result(
                             &_id,
-                            &_peer_id,
+                            &peer_id,
                             MessageAcceptance::Accept,
                         );
-                        return Some(wire_msg);
+                        return Some(ReceivedMessage {
+                            wire_msg,
+                            from_peer: peer_id,
+                            is_duplicate: false,
+                        });
                     }
                     Err(_) => {
                         let _ = swarm.behaviour_mut().report_message_validation_result(
                             &_id,
-                            &_peer_id,
+                            &peer_id,
                             MessageAcceptance::Reject,
                         );
                     }
+                }
+            }
+            SwarmEvent::Behaviour(gossipsub::Event::DuplicateMessage {
+                propagation_source: peer_id,
+                message_id: _id,
+                raw_data,
+                ..
+            }) => {
+                // Decode the raw data to count the duplicate.
+                // Use `Ignore` to prevent re-forwarding — the message was already
+                // forwarded when first seen. Accepting duplicates causes a storm.
+                if let Ok(wire_msg) = WireMessage::decode(&raw_data) {
+                    let _ = swarm.behaviour_mut().report_message_validation_result(
+                        &_id,
+                        &peer_id,
+                        MessageAcceptance::Ignore,
+                    );
+                    return Some(ReceivedMessage {
+                        wire_msg,
+                        from_peer: peer_id,
+                        is_duplicate: true,
+                    });
                 }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
