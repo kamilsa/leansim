@@ -1,0 +1,15 @@
+services:
+  leansim:
+    build:
+      context: ..
+      dockerfile: leansim/Dockerfile
+    image: leansim-shadow:latest
+    platform: linux/arm64
+    security_opt:
+      - seccomp=unconfined
+    shm_size: "1g"
+    command: experiments/local-bench.toml
+    environment:
+      - OUTPUT_DIR=/mnt/output
+    volumes:
+      - ./docker-output:/mnt/output

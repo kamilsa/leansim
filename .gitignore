@@ -8,3 +8,4 @@
 /.claude/
 metrics.json
 topology.gml
+/docker-output/
