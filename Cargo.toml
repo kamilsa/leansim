@@ -26,3 +26,4 @@ bytes = "1.0"
 
 [patch.crates-io]
 quinn-udp = { path = "patch/quinn-udp" }
+libp2p-gossipsub = { path = "patch/libp2p-gossipsub" }

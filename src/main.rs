@@ -37,6 +37,15 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Generate a netviz-compatible trace file from an experiment and Shadow run.
+    Netviz {
+        #[arg(long)]
+        experiment: PathBuf,
+        #[arg(long)]
+        shadow_data: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -62,6 +71,11 @@ async fn main() -> Result<()> {
         Command::Summarize { shadow_data, out } => {
             leansim::metrics::summary::summarize(&shadow_data, &out)
         }
+        Command::Netviz {
+            experiment,
+            shadow_data,
+            out,
+        } => leansim::netviz::generate(&experiment, &shadow_data, &out),
     }
 }
 
@@ -90,6 +104,12 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         node_config.subnet_id,
         &node_config.experiment.run_id,
     )?;
+
+    // Emit peer ID for mesh edge reconstruction
+    emit(&JsonlEvent::NodePeerId {
+        node_id: state.node_id,
+        peer_id: swarm.local_peer_id().to_base58(),
+    });
 
     // Dial seed peers
     leansim::network::swarm::dial_seeds(&mut swarm, &node_config.seed_addrs).await?;
@@ -123,10 +143,17 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         .await;
 
         match msg {
-            Ok(Some(wire_msg)) => {
+            Ok(Some(received)) => {
+                let wire_msg = received.wire_msg;
+                let from_peer_str = received.from_peer.to_base58();
                 let msg_id = wire_msg.message_id();
-                let is_dup = state.is_duplicate(&msg_id);
-                state.mark_seen(msg_id);
+                // Use gossipsub's duplicate detection (from the DuplicateMessage event)
+                // instead of our local DashMap which never fires because gossipsub
+                // deduplicates at the protocol level before delivering to us.
+                let is_dup = received.is_duplicate;
+                if !is_dup {
+                    state.mark_seen(msg_id);
+                }
 
                 // Emit receive event based on message type
                 match &wire_msg {
@@ -139,6 +166,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         emit(&JsonlEvent::SigReceived {
                             node_id: state.node_id,
                             from_id: *sender_id,
+                            from_peer_id: from_peer_str,
                             subnet_id: *subnet_id,
                             duplicate: is_dup,
                             ts_ms: state.elapsed_ms(),
@@ -155,6 +183,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         emit(&JsonlEvent::LocalProofReceived {
                             node_id: state.node_id,
                             from_id: *sender_id,
+                            from_peer_id: from_peer_str,
                             subnet_id: *subnet_id,
                             covered_sigs: *covered_validator_count,
                             duplicate: is_dup,
