@@ -176,7 +176,7 @@ pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<Recei
     }
 }
 
-/// Dial all seed peers (fire and forget), then wait for connections and mesh to form.
+/// Dial all seed peers, then poll for connections and mesh formation.
 pub async fn dial_seeds(swarm: &mut Swarm<GossipsubBehaviour>, seeds: &[String]) -> Result<()> {
     for seed in seeds {
         let ma: Multiaddr = seed.parse()?;
@@ -186,9 +186,12 @@ pub async fn dial_seeds(swarm: &mut Swarm<GossipsubBehaviour>, seeds: &[String])
         }
     }
 
+    if seeds.is_empty() {
+        tracing::info!("no seeds to dial");
+        return Ok(());
+    }
+
     // Poll for connection events and mesh formation.
-    // Mesh needs GRAFT/PRUNE exchange across diameter of the network.
-    // Base time covers connection establishment + 2 heartbeat cycles.
     let warmup_ms = if seeds.len() > 200 { 3000 } else { 1500 };
     let warmup = tokio::time::Instant::now()
         + std::time::Duration::from_millis(warmup_ms);

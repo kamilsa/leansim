@@ -105,16 +105,13 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &node_config.experiment.run_id,
     )?;
 
-    // Emit peer ID for mesh edge reconstruction
     emit(&JsonlEvent::NodePeerId {
         node_id: state.node_id,
         peer_id: swarm.local_peer_id().to_base58(),
     });
 
-    // Dial seed peers
     leansim::network::swarm::dial_seeds(&mut swarm, &node_config.seed_addrs).await?;
 
-    // Role-specific init
     if node_config.role == NodeRole::Validator {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
         emit(&JsonlEvent::SigSent {
@@ -126,7 +123,6 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         });
     }
 
-    // Main event loop with timeout
     let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);
     let end = tokio::time::Instant::now() + timeout;
 
@@ -147,15 +143,11 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 let wire_msg = received.wire_msg;
                 let from_peer_str = received.from_peer.to_base58();
                 let msg_id = wire_msg.message_id();
-                // Use gossipsub's duplicate detection (from the DuplicateMessage event)
-                // instead of our local DashMap which never fires because gossipsub
-                // deduplicates at the protocol level before delivering to us.
                 let is_dup = received.is_duplicate;
                 if !is_dup {
                     state.mark_seen(msg_id);
                 }
 
-                // Emit receive event based on message type
                 match &wire_msg {
                     WireMessage::ValidatorSignature {
                         sender_id,
@@ -194,7 +186,6 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                     _ => {}
                 }
 
-                // Dispatch to role handler based on node role
                 match state.role {
                     NodeRole::LocalAggregator => {
                         leansim::node::local_aggregator::handle_message(
@@ -208,9 +199,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         )
                         .await?;
                     }
-                    NodeRole::Validator => {
-                        // Validators ignore incoming messages in v1
-                    }
+                    NodeRole::Validator => {}
                 }
             }
             Ok(None) => {
@@ -222,7 +211,6 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Emit final node stats
     emit(&JsonlEvent::NodeStats {
         node_id: state.node_id,
         bytes_sent: 0,
