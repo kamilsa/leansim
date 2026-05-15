@@ -1,0 +1,7 @@
+target/
+.git/
+.dockerignore
+Dockerfile*
+docker-compose.yml
+docker-output/
+README.md

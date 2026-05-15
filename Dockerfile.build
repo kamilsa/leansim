@@ -1,0 +1,4 @@
+FROM --platform=linux/arm64 rust:slim-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
