@@ -1,15 +1,16 @@
 services:
   leansim:
-    build:
-      context: ..
-      dockerfile: leansim/Dockerfile
-    image: leansim-shadow:latest
+    image: kamilsa/shadow-arm:latest
     platform: linux/arm64
     security_opt:
       - seccomp=unconfined
     shm_size: "1g"
-    command: experiments/local-bench.toml
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh"]
+    command: ["experiments/geo-128.toml"]
     environment:
       - OUTPUT_DIR=/mnt/output
     volumes:
       - ./docker-output:/mnt/output
+      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+      - ./target/release/leansim:/root/leansim/target/release/leansim:ro
+      - ./experiments:/root/leansim/experiments:ro

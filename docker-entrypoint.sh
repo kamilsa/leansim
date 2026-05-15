@@ -26,19 +26,17 @@ echo "==> Generating Shadow config..."
     --out "${SHADOW_YAML}"
 
 # Fix binary path in shadow.yaml if gen-shadow picked up wrong path
-sed -i 's|/netviz/target/release/leansim|/root/leansim/target/release/leansim|g' "${SHADOW_YAML}"
+sed -i 's|/target/release/leansim|/root/leansim/target/release/leansim|g' "${SHADOW_YAML}"
 
-# Copy topology.gml to output dir (shadow.yaml references it via relative path)
-if [ -f topology.gml ]; then
-    cp topology.gml "${OUT_DIR}/"
-fi
+# Clean previous shadow data
+rm -rf "${OUT_DIR}/shadow.data"
 
 # Shadow writes shadow.data into CWD, so run from output dir
 cd "${OUT_DIR}"
 
 echo "==> Shadow config: ${SHADOW_YAML}"
 echo "==> Starting Shadow simulation..."
-~/.local/bin/shadow "${SHADOW_YAML}"
+shadow "${SHADOW_YAML}"
 
 echo "==> Simulation complete. Data in ${OUT_DIR}/shadow.data/"
 
