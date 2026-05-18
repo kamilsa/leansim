@@ -1,7 +1,7 @@
-SCENARIO ?= experiments/local-64.toml
+SCENARIO ?= experiments/geo-128.toml
 OUTPUT_DIR ?= output
 NETVIZ_OUT ?= netviz-trace.bctrace
-PARALLELISM ?= 0
+PARALLELISM ?= 10
 
 .PHONY: build run netviz docker-build docker-run docker-netviz
 
@@ -31,6 +31,12 @@ docker-build:
 
 docker-run:
 	docker compose run --rm -e SHADOW_FLAGS="--progress true --parallelism $(PARALLELISM)" leansim "$(SCENARIO)"
+
+stats: build
+	./target/release/leansim stats --shadow-data "$(OUTPUT_DIR)/shadow.data"
+
+docker-stats: build
+	./target/release/leansim stats --shadow-data docker-output/shadow.data
 
 docker-netviz:
 	docker compose run --rm --entrypoint /root/leansim/target/release/leansim leansim netviz \

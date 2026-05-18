@@ -46,6 +46,11 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Print formatted stats table from a Shadow data directory.
+    Stats {
+        #[arg(long)]
+        shadow_data: PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -76,6 +81,10 @@ async fn main() -> Result<()> {
             shadow_data,
             out,
         } => leansim::netviz::generate(&experiment, &shadow_data, &out),
+        Command::Stats { shadow_data } => {
+            leansim::metrics::stats::print_stats(&shadow_data);
+            Ok(())
+        }
     }
 }
 
