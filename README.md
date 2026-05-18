@@ -2,25 +2,30 @@
 
 Hierarchical signature aggregation network simulator. Runs real `rust-libp2p` (QUIC + gossipsub) binaries inside the [Shadow](https://shadow.github.io/) discrete-event network simulator.
 
-## Install
+## Prerequisites
 
-```bash
-# Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+### Natively
+- Rust toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- Shadow 3.3+ ([download](https://github.com/shadow/shadow/releases) or build from source — needs cmake, glib2, libclang, python3)
 
-# Shadow 3.3+
-# Download from https://github.com/shadow/shadow/releases
-# Or build from source (needs cmake, glib2, libclang, python3)
-```
+### Via Docker
+- Docker + Docker Compose
 
 ## Build
 
+### Natively
 ```bash
-git checkout netviz-compatibility
-cargo build --release
+make build
 ```
 
-## Run a single-subnet simulation and generate netviz trace
+### Via Docker (multi-stage cross-compile)
+```bash
+make docker-build
+```
+
+Builds inside `kamilsa/shadow-arm` image, then copies the binary out to `target/release/leansim`.
+
+## Run a simulation
 
 Pick an experiment from `experiments/`:
 
@@ -33,6 +38,33 @@ Pick an experiment from `experiments/`:
 | `local-512.toml` | 512 | 32 | 544 | uniform 50ms |
 | `local-1024.toml` | 1024 | 64 | 1088 | uniform 50ms |
 | `geo-bench.toml` | 128 | 8 | 136 | country-based geo |
+| `128-validators.toml` | 128 | 1 | 129 | uniform 50ms |
+
+### Quick start with Make
+
+```bash
+# Run a simulation (generates config, runs it, produces shadow.data)
+make run        # uses experiments/geo-128.toml by default
+
+# Pick a different experiment
+make run SCENARIO=experiments/smoke.toml                 # native
+make docker-run SCENARIO=experiments/smoke.toml          # Docker
+
+# Generate netviz trace from completed simulation output
+make netviz                                              # native
+make docker-netviz                                       # Docker
+```
+
+Configurable variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCENARIO` | `experiments/geo-128.toml` | Experiment config |
+| `OUTPUT_DIR` | `output` | Working directory for `shadow.yaml` + `shadow.data` |
+| `NETVIZ_OUT` | `netviz-trace.bctrace` | Output trace filename |
+| `PARALLELISM` | `10` | Number of parallel Shadow threads |
+
+### Manual steps
 
 ```bash
 # 1. Generate Shadow config and per-node TOMLs
