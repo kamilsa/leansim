@@ -1,7 +1,26 @@
-SCENARIO ?= experiments/geo-128.toml
+SCENARIO ?= experiments/local-64.toml
+OUTPUT_DIR ?= output
 NETVIZ_OUT ?= netviz-trace.bctrace
+PARALLELISM ?= 0
 
-.PHONY: docker-build docker-run docker-netviz
+.PHONY: build run netviz docker-build docker-run docker-netviz
+
+build:
+	cargo build --release
+
+run: build
+	mkdir -p "$(OUTPUT_DIR)"
+	./target/release/leansim gen-shadow \
+		--experiment "$(SCENARIO)" \
+		--out "$(OUTPUT_DIR)/shadow.yaml"
+	rm -rf "$(OUTPUT_DIR)/shadow.data"
+	cd "$(OUTPUT_DIR)" && shadow --progress true --parallelism "$(PARALLELISM)" shadow.yaml
+
+netviz:
+	./target/release/leansim netviz \
+		--experiment "$(SCENARIO)" \
+		--shadow-data "$(OUTPUT_DIR)/shadow.data" \
+		--out "$(NETVIZ_OUT)"
 
 docker-build:
 	docker build --platform linux/arm64 -f Dockerfile.build -t leansim-builder .
@@ -11,7 +30,7 @@ docker-build:
 	docker rm leansim-tmp
 
 docker-run:
-	docker compose run --rm leansim "$(SCENARIO)"
+	docker compose run --rm -e SHADOW_FLAGS="--progress true --parallelism $(PARALLELISM)" leansim "$(SCENARIO)"
 
 docker-netviz:
 	docker compose run --rm --entrypoint /root/leansim/target/release/leansim leansim netviz \

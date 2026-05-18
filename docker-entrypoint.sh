@@ -36,7 +36,7 @@ cd "${OUT_DIR}"
 
 echo "==> Shadow config: ${SHADOW_YAML}"
 echo "==> Starting Shadow simulation..."
-shadow "${SHADOW_YAML}"
+shadow ${SHADOW_FLAGS:-} "${SHADOW_YAML}"
 
 echo "==> Simulation complete. Data in ${OUT_DIR}/shadow.data/"
 
