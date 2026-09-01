@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,6 +124,9 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 
     if node_config.role == NodeRole::Validator {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
+        let sig_size = node_config.experiment.signature_payload_bytes as u64;
+        state.bytes_sent_sig.fetch_add(sig_size, Ordering::Relaxed);
+        state.msgs_sent_sig.fetch_add(1, Ordering::Relaxed);
         emit(&JsonlEvent::SigSent {
             node_id: state.node_id,
             subnet_id: state.subnet_id,
@@ -164,6 +168,9 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         ..
                     } => {
                         let size = wire_msg.encode().len() as u64;
+                        // Track download bandwidth (both unique and duplicate)
+                        state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
+                        state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
                         emit(&JsonlEvent::SigReceived {
                             node_id: state.node_id,
                             from_id: *sender_id,
@@ -173,6 +180,15 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                             ts_ms: state.elapsed_ms(),
                             byte_size: size,
                         });
+                        // Gossipsub forwards all non-duplicate messages to mesh peers.
+                        // Estimate forwarded bytes: ceil(sqrt(mesh_n)) × byte_size for lazy push.
+                        // For mesh_n=8, D_lazy=3. Approximate full-message forward count.
+                        if !is_dup {
+                            // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
+                            let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil() as u64).max(1);
+                            state.bytes_sent_sig.fetch_add(size * d_lazy, Ordering::Relaxed);
+                            state.msgs_sent_sig.fetch_add(d_lazy, Ordering::Relaxed);
+                        }
                     }
                     WireMessage::LocalProof {
                         sender_id,
@@ -181,6 +197,8 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         ..
                     } => {
                         let size = wire_msg.encode().len() as u64;
+                        state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
+                        state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
                         emit(&JsonlEvent::LocalProofReceived {
                             node_id: state.node_id,
                             from_id: *sender_id,
@@ -222,10 +240,10 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 
     emit(&JsonlEvent::NodeStats {
         node_id: state.node_id,
-        bytes_sent: 0,
-        bytes_received: 0,
-        msgs_sent: 0,
-        msgs_received: 0,
+        bytes_sent: state.bytes_sent_sig.load(Ordering::Relaxed),
+        bytes_received: state.bytes_recv_sig.load(Ordering::Relaxed),
+        msgs_sent: state.msgs_sent_sig.load(Ordering::Relaxed),
+        msgs_received: state.msgs_recv_sig.load(Ordering::Relaxed),
     });
 
     tracing::info!("node {} exiting", state.node_id);

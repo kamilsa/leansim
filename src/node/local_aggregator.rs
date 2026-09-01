@@ -59,6 +59,9 @@ pub async fn handle_message(
 
                 let latency_ms = state.elapsed_ms();
                 let byte_size = proof.encode().len() as u64;
+                // Track upload bandwidth for proof publication
+                state.bytes_sent_sig.fetch_add(byte_size, Ordering::Relaxed);
+                state.msgs_sent_sig.fetch_add(1, Ordering::Relaxed);
                 emit(&JsonlEvent::LocalProofGenerated {
                     node_id: state.node_id,
                     subnet_id: state.subnet_id,

@@ -34,6 +34,12 @@ pub struct NodeState {
 
     /// Per-node message sequence counter.
     pub seq_counter: AtomicU64,
+
+    /// Per-node bandwidth counters for signature messages (including duplicates).
+    pub bytes_sent_sig: AtomicU64,
+    pub bytes_recv_sig: AtomicU64,
+    pub msgs_sent_sig: AtomicU64,
+    pub msgs_recv_sig: AtomicU64,
 }
 
 impl NodeState {
@@ -51,6 +57,10 @@ impl NodeState {
             received_proofs: DashMap::new(),
             snark2_completed: AtomicBool::new(false),
             seq_counter: AtomicU64::new(0),
+            bytes_sent_sig: AtomicU64::new(0),
+            bytes_recv_sig: AtomicU64::new(0),
+            msgs_sent_sig: AtomicU64::new(0),
+            msgs_recv_sig: AtomicU64::new(0),
         }
     }
 
