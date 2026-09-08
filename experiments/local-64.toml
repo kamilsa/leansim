@@ -27,3 +27,16 @@ gossipsub_heartbeat_interval_ms = 1000
 uplink_mbps = 50
 downlink_mbps = 50
 latency_ms = 50
+
+[run]
+runner = "docker" # docker | native
+runs = 1
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output"

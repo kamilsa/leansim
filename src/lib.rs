@@ -5,4 +5,3 @@ pub mod metrics;
 pub mod netviz;
 pub mod network;
 pub mod node;
-pub mod shadow;
