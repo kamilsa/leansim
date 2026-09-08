@@ -94,7 +94,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 
     leansim::network::swarm::dial_seeds(&mut swarm, &node_config.seed_addrs).await?;
 
-    if node_config.role == NodeRole::Validator {
+    if node_config.role != NodeRole::GlobalAggregator {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
         let sig_size = node_config.experiment.signature_payload_bytes as u64;
         state.bytes_sent_sig.fetch_add(sig_size, Ordering::Relaxed);
@@ -106,6 +106,9 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             ts_ms: state.elapsed_ms(),
             byte_size: node_config.experiment.signature_payload_bytes as u64,
         });
+    }
+    if node_config.role == NodeRole::LocalAggregator {
+        leansim::node::local_aggregator::record_own_signature(&state, &mut swarm).await?;
     }
 
     let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);

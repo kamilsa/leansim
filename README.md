@@ -83,6 +83,11 @@ directory. The launcher snapshots the resulting metrics immediately, so a
 multi-run campaign is retained in `runs-history.json` even though Shadow's raw
 logs are replaced on the next run.
 
+`validator_count` is the number of signing nodes. In each subnet, the first
+`local_aggregators_per_subnet` validators also collect signatures and publish
+local proofs; they are not additional hosts. Global aggregators remain
+dedicated hosts, so total nodes equal `validator_count + global_aggregator_count`.
+
 The launcher validates experiment counts and thresholds before building. In
 particular, `validator_count` must be divisible by `subnet_count`.
 

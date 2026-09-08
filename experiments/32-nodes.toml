@@ -2,7 +2,7 @@
 run_id = "32-nodes-geo"
 run_timeout_secs = 120
 
-validator_count = 28
+validator_count = 32
 subnet_count = 1
 local_aggregators_per_subnet = 4
 global_aggregator_count = 0

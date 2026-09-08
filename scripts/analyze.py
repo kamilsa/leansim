@@ -127,6 +127,7 @@ def build_snapshot(output_dir):
     metadata = metadata_for(output_dir)
     peer_ids = {}
     sent_times = []
+    sent_by_node = {}
     sent_sources_by_subnet = defaultdict(set)
     received_by_node_subnet = defaultdict(dict)
     validator_arrivals = {}
@@ -177,6 +178,8 @@ def build_snapshot(output_dir):
                     sent_times.append(timestamp)
                 if node_id is not None and subnet_id is not None:
                     sent_sources_by_subnet[subnet_id].add("node:" + str(node_id))
+                    if timestamp is not None:
+                        sent_by_node[node_id] = (subnet_id, timestamp)
             elif name == "SigReceived":
                 total_sig_received += 1
                 duplicate = event.get("duplicate") is True
@@ -241,7 +244,10 @@ def build_snapshot(output_dir):
         for node_id, subnet_id, proof_time in local_proofs:
             if node_id is None:
                 continue
-            received = received_by_node_subnet.get((node_id, subnet_id), {})
+            received = dict(received_by_node_subnet.get((node_id, subnet_id), {}))
+            own_signature = sent_by_node.get(node_id)
+            if own_signature is not None and own_signature[0] == subnet_id:
+                received.setdefault("node:" + str(node_id), own_signature[1])
             expected = len(sent_sources_by_subnet.get(subnet_id, set()))
             if not expected:
                 expected = len(received)
@@ -491,6 +497,21 @@ def self_test():
         assert metrics["unique_validators"] == 2
         assert metrics["stage_medians_ms"]["threshold_reached"] == 150
         assert metrics["stage_medians_ms"]["aggregation_compute"] == 20
+        overlay_dir = root / "overlay-self-signature"
+        stdout = overlay_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        stdout.write_text("\n".join((
+            '{"event":"SigSent","node_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
+            '{"event":"SigSent","node_id":1,"subnet_id":0,"seq":0,"ts_ms":110,"byte_size":10}',
+            '{"event":"SigReceived","node_id":0,"from_id":1,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":10}',
+            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":2,"latency_ms":170,"byte_size":50}',
+        )), encoding="utf-8")
+        (overlay_dir / "run-manifest.json").write_text(
+            json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8"
+        )
+        overlay_metrics = build_snapshot(overlay_dir)["metrics"]
+        assert overlay_metrics["stage_medians_ms"]["threshold_reached"] == 150
+        assert overlay_metrics["stage_medians_ms"]["aggregation_compute"] == 20
         history = merge_history([], [primary, overlay], append=False)
         assert len(history) == 2
         assert len(merge_history(history, [primary, overlay], append=False)) == 2

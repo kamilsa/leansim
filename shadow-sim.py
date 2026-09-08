@@ -66,7 +66,13 @@ def validate_experiment(config: dict) -> None:
     if validators % subnets:
         die("validator_count must be divisible by subnet_count")
     as_int(setting(config, "run_timeout_secs", 120), "run_timeout_secs", minimum=1)
-    as_int(setting(config, "local_aggregators_per_subnet", 1), "local_aggregators_per_subnet", minimum=0)
+    local_aggregators = as_int(
+        setting(config, "local_aggregators_per_subnet", 1),
+        "local_aggregators_per_subnet",
+        minimum=0,
+    )
+    if local_aggregators > validators // subnets:
+        die("local_aggregators_per_subnet must not exceed validators_per_subnet")
     as_int(setting(config, "global_aggregator_count", 1), "global_aggregator_count", minimum=0)
     as_number(setting(config, "local_threshold", 0.9), "local_threshold", minimum=0.0000001, maximum=1)
     as_number(setting(config, "global_proof_target", 0.66), "global_proof_target", minimum=0.0000001, maximum=1)
@@ -235,9 +241,8 @@ def assign_nodes(experiment: dict) -> list[dict]:
     validators_per_subnet = experiment["validator_count"] // experiment["subnet_count"]
     for subnet in range(experiment["subnet_count"]):
         for validator in range(validators_per_subnet):
-            nodes.append({"node_id": len(nodes), "role": "validator", "subnet_id": subnet, "ip": subnet_ip(subnet, validator)})
-        for local in range(experiment["local_aggregators_per_subnet"]):
-            nodes.append({"node_id": len(nodes), "role": "local_aggregator", "subnet_id": subnet, "ip": subnet_ip(subnet, validators_per_subnet + local)})
+            role = "local_aggregator" if validator < experiment["local_aggregators_per_subnet"] else "validator"
+            nodes.append({"node_id": len(nodes), "role": role, "subnet_id": subnet, "ip": subnet_ip(subnet, validator)})
     for _ in range(experiment["global_aggregator_count"]):
         nodes.append({"node_id": len(nodes), "role": "global_aggregator", "subnet_id": 0, "ip": global_aggregator_ip(len(nodes))})
     for node in nodes:

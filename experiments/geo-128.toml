@@ -1,4 +1,4 @@
-# Single-subnet geo-latency experiment: 128 validators, 8 local aggregators, supernodes
+# Single-subnet geo-latency experiment: 128 validators, including 8 local aggregators, supernodes
 run_id = "geo-128"
 run_timeout_secs = 120
 
