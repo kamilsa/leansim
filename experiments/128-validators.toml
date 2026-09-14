@@ -1,25 +1,25 @@
 run_id = "128-validators-single-subnet"
 run_timeout_secs = 600
 
-validator_count = 128
+validator_count = 512
 subnet_count = 1
-local_aggregators_per_subnet = 1
+local_aggregators_per_subnet = 4
 global_aggregator_count = 1
 
-local_threshold = 0.75
+local_threshold = 0.95
 global_proof_target = 0.75
 burst_time_ms = 2000
-burst_jitter_ms = 500
+burst_jitter_ms = 100
 signature_aggregation_rate = 1000
 global_aggregation_rate = 10
-signature_payload_bytes = 3072
-proof_payload_bytes = 1024
+signature_payload_bytes = 1024
+proof_payload_bytes = 131072
 gossipsub_mesh_n_low = 4
 gossipsub_mesh_n = 6
 gossipsub_mesh_n_high = 12
 gossipsub_mesh_outbound_min = 2
 gossipsub_heartbeat_interval_ms = 1000
-use_geo_latency = false
+use_geo_latency = true
 geo_seed = 42
 geo_jitter = 0.0
 supernode_fraction = 0.05
@@ -31,3 +31,16 @@ topology_degree = 0
 uplink_mbps = 50
 downlink_mbps = 50
 latency_ms = 50
+
+[run]
+runner = "docker" # docker | native
+runs = 1
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output"

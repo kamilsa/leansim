@@ -34,6 +34,7 @@ pub struct ExperimentConfig {
     pub validator_count: usize,
     pub subnet_count: usize,
 
+    /// Validators per subnet that also act as local aggregators.
     #[serde(default = "default_local_aggregators")]
     pub local_aggregators_per_subnet: usize,
 
@@ -83,7 +84,6 @@ pub struct ExperimentConfig {
     pub network_defaults: NetworkDefaults,
 
     // --- Geographical latency settings ---
-
     /// Enable country-based per-edge latencies (uses country_latencies.json + weights.json).
     #[serde(default = "default_false")]
     pub use_geo_latency: bool,
@@ -98,7 +98,6 @@ pub struct ExperimentConfig {
     pub geo_jitter: f64,
 
     // --- Supernode settings ---
-
     /// Fraction of nodes that get supernode bandwidth (e.g. 0.05 = 5%).
     #[serde(default = "default_supernode_fraction")]
     pub supernode_fraction: f64,
@@ -128,6 +127,14 @@ impl ExperimentConfig {
         if self.validator_count == 0 {
             return Err("validator_count must be > 0".into());
         }
+        if self.validator_count < self.subnet_count {
+            return Err("validator_count must be >= subnet_count".into());
+        }
+        if self.local_aggregators_per_subnet > self.validators_per_subnet() {
+            return Err(
+                "local_aggregators_per_subnet must not exceed validators_per_subnet".into(),
+            );
+        }
         if self.local_threshold <= 0.0 || self.local_threshold > 1.0 {
             return Err("local_threshold must be in (0.0, 1.0]".into());
         }
@@ -150,9 +157,7 @@ impl ExperimentConfig {
     }
 
     pub fn total_nodes(&self) -> usize {
-        self.validator_count
-            + self.subnet_count * self.local_aggregators_per_subnet
-            + self.global_aggregator_count
+        self.validator_count + self.global_aggregator_count
     }
 
     pub fn validators_per_subnet(&self) -> usize {

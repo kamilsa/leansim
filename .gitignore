@@ -9,3 +9,8 @@
 metrics.json
 topology.gml
 /docker-output/
+/output/
+/.venv/
+__pycache__/
+*.pyc
+*.bctrace

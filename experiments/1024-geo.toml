@@ -1,10 +1,10 @@
-# Single-subnet experiment with geographical latencies and supernodes
-run_id = "geo-bench"
-run_timeout_secs = 120
+# 1024 validators, 32 local aggregators, single subnet with geographical latencies
+run_id = "1024-geo"
+run_timeout_secs = 300
 
-validator_count = 128
+validator_count = 1024
 subnet_count = 1
-local_aggregators_per_subnet = 8
+local_aggregators_per_subnet = 32
 global_aggregator_count = 0
 
 local_threshold = 0.9
@@ -14,12 +14,12 @@ burst_jitter_ms = 100
 
 signature_aggregation_rate = 1000
 global_aggregation_rate = 10
-signature_payload_bytes = 3072
+signature_payload_bytes = 1024
 proof_payload_bytes = 131072
 
 gossipsub_mesh_n_low = 4
-gossipsub_mesh_n = 6
-gossipsub_mesh_n_high = 10
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
 gossipsub_mesh_outbound_min = 2
 gossipsub_heartbeat_interval_ms = 300
 
@@ -30,6 +30,9 @@ geo_jitter = 0.0
 supernode_fraction = 0.05
 supernode_uplink_mbps = 1000
 supernode_downlink_mbps = 1000
+
+# Avoid a 1,056-node physical full mesh; matches the geo-128 scenario.
+topology_degree = 50
 
 [network_defaults]
 uplink_mbps = 50
