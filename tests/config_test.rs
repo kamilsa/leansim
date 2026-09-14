@@ -68,6 +68,21 @@ fn zero_validator_count_rejected() {
 }
 
 #[test]
+fn fewer_validators_than_subnets_rejected() {
+    let mut exp = base_config();
+    exp.validator_count = 3;
+    exp.subnet_count = 4;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
+fn too_many_local_aggregators_rejected() {
+    let mut exp = base_config();
+    exp.local_aggregators_per_subnet = 26;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
 fn invalid_local_threshold_rejected() {
     let mut exp = base_config();
     exp.local_threshold = 0.0;
@@ -119,6 +134,6 @@ fn validators_per_subnet_rounds_down() {
 #[test]
 fn total_nodes_count() {
     let exp = base_config();
-    // 100 validators + 4*2 local + 5 global = 113
-    assert_eq!(exp.total_nodes(), 113);
+    // 100 validators, including 2 local aggregators in each subnet, + 5 global = 105
+    assert_eq!(exp.total_nodes(), 105);
 }

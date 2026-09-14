@@ -1,4 +1,4 @@
-# Single-subnet geo-latency experiment: 128 validators, 8 local aggregators, supernodes
+# Single-subnet geo-latency experiment: 128 validators, including 8 local aggregators, supernodes
 run_id = "geo-128"
 run_timeout_secs = 120
 
@@ -14,7 +14,7 @@ burst_jitter_ms = 100
 
 signature_aggregation_rate = 1000
 global_aggregation_rate = 10
-signature_payload_bytes = 3072
+signature_payload_bytes = 1024
 proof_payload_bytes = 131072
 
 gossipsub_mesh_n_low = 4
@@ -37,3 +37,16 @@ topology_degree = 50
 uplink_mbps = 50
 downlink_mbps = 50
 latency_ms = 50
+
+[run]
+runner = "docker" # docker | native
+runs = 1
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output"

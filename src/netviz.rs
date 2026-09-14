@@ -1,13 +1,31 @@
 use anyhow::Result;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::config::experiment::{ExperimentConfig, NodeRole};
+use crate::geo::latency::CountryLatencyModel;
 use crate::metrics::events::JsonlEvent;
-use crate::shadow::generator::{assign_nodes, GeoContext};
+
+#[derive(Deserialize)]
+struct RunManifest {
+    experiment: ExperimentConfig,
+    nodes: Vec<ManifestNode>,
+}
+
+#[derive(Deserialize)]
+struct ManifestNode {
+    node_id: u32,
+    role: NodeRole,
+    subnet_id: u32,
+    #[serde(default)]
+    country: Option<String>,
+    supernode: bool,
+    uplink_mbps: u64,
+    downlink_mbps: u64,
+}
 
 /// Topology node as written to the netviz header.
 #[derive(Serialize)]
@@ -48,78 +66,58 @@ struct TraceTopology {
     edges: Vec<TopoEdge>,
 }
 
-/// Generate a netviz-compatible `.bctrace` file from an experiment config and Shadow data dir.
-pub fn generate(experiment_path: &Path, shadow_data_path: &Path, out_path: &Path) -> Result<()> {
-    let experiment: ExperimentConfig = toml::from_str(
-        &std::fs::read_to_string(experiment_path)
-            .map_err(|e| anyhow::anyhow!("reading experiment: {e}"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("invalid experiment: {e}"))?;
+/// Generate a netviz-compatible `.bctrace` file from a run manifest and Shadow data dir.
+pub fn generate(manifest_path: &Path, shadow_data_path: &Path, out_path: &Path) -> Result<()> {
+    let manifest = read_manifest(manifest_path)?;
+    let experiment = &manifest.experiment;
     experiment
         .validate()
-        .map_err(|e| anyhow::anyhow!("validation: {e}"))?;
-
-    let nodes = assign_nodes(&experiment);
-    let total = nodes.len();
-
-    // Deterministic RNG for supernodes (match generator.rs seed logic)
-    let rng_seed = if experiment.geo_seed != 0 {
-        experiment.geo_seed
-    } else {
-        42
-    };
-    let mut rng = StdRng::seed_from_u64(rng_seed.wrapping_add(1));
-    let supernode_ids = supernode_set(&nodes, &experiment, &mut rng);
-
-    // Geo context (latency per country pair)
-    let geo = if experiment.use_geo_latency {
-        let seed = if experiment.geo_seed != 0 {
-            experiment.geo_seed
-        } else {
-            rand::thread_rng().gen()
-        };
-        Some(GeoContext::new(&experiment, seed))
-    } else {
-        None
-    };
+        .map_err(|e| anyhow::anyhow!("invalid manifest experiment: {e}"))?;
+    let total = manifest.nodes.len();
+    let countries: HashMap<u32, Option<&str>> = manifest
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, node.country.as_deref()))
+        .collect();
+    let mut rng = StdRng::seed_from_u64(experiment.geo_seed.wrapping_add(1));
+    let country_latency = manifest
+        .nodes
+        .iter()
+        .any(|node| node.country.is_some())
+        .then(CountryLatencyModel::load);
 
     // Read all events and build peer-id → node map
     let raw_events = read_all_events(shadow_data_path)?;
     let peer_to_node = build_peer_map(&raw_events);
-    let mesh_edges = build_mesh_edges(&raw_events, &peer_to_node, &experiment, geo.as_ref(), &mut rng);
+    let mesh_edges = build_mesh_edges(
+        &raw_events,
+        &peer_to_node,
+        experiment,
+        &countries,
+        country_latency.as_ref(),
+        &mut rng,
+    );
 
     // Header
     let header = TraceHeader {
         v: 1,
         t0: None,
-        nodes: nodes.iter().map(|n| format!("n{}", n.node_id)).collect(),
+        nodes: manifest
+            .nodes
+            .iter()
+            .map(|node| format!("n{}", node.node_id))
+            .collect(),
         topology: TraceTopology {
-            nodes: nodes
+            nodes: manifest
+                .nodes
                 .iter()
-                .map(|n| {
-                    let (up, down) = if supernode_ids.contains(&n.node_id) {
-                        (
-                            experiment.supernode_uplink_mbps,
-                            experiment.supernode_downlink_mbps,
-                        )
-                    } else {
-                        (
-                            experiment.network_defaults.uplink_mbps,
-                            experiment.network_defaults.downlink_mbps,
-                        )
-                    };
-                    let country = geo.as_ref().map(|g| {
-                        let idx = nodes.iter().position(|x| x.node_id == n.node_id).unwrap();
-                        g.node_countries[idx].clone()
-                    });
-                    TopoNode {
-                        num: n.node_id,
-                        upload_bw_mbps: up,
-                        download_bw_mbps: down,
-                        role: role_str(n.role).to_string(),
-                        subnet: n.subnet_id,
-                        country,
-                    }
+                .map(|node| TopoNode {
+                    num: node.node_id,
+                    upload_bw_mbps: node.uplink_mbps,
+                    download_bw_mbps: node.downlink_mbps,
+                    role: role_str(node.role).to_string(),
+                    subnet: node.subnet_id,
+                    country: node.country.clone(),
                 })
                 .collect(),
             edges: mesh_edges,
@@ -158,27 +156,59 @@ pub fn generate(experiment_path: &Path, shadow_data_path: &Path, out_path: &Path
     Ok(())
 }
 
+fn read_manifest(path: &Path) -> Result<RunManifest> {
+    let manifest: RunManifest = serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading run manifest {}: {e}", path.display()))?,
+    )
+    .map_err(|e| anyhow::anyhow!("invalid run manifest {}: {e}", path.display()))?;
+
+    if manifest.nodes.is_empty() {
+        anyhow::bail!(
+            "invalid run manifest {}: nodes must not be empty",
+            path.display()
+        );
+    }
+
+    let mut node_ids = HashSet::new();
+    for node in &manifest.nodes {
+        if !node_ids.insert(node.node_id) {
+            anyhow::bail!(
+                "invalid run manifest {}: duplicate node_id {}",
+                path.display(),
+                node.node_id
+            );
+        }
+        let node_kind = if node.supernode { "supernode" } else { "node" };
+        if node.uplink_mbps == 0 || node.downlink_mbps == 0 {
+            anyhow::bail!(
+                "invalid run manifest {}: {node_kind} {} must have positive uplink_mbps and downlink_mbps",
+                path.display(),
+                node.node_id
+            );
+        }
+        if node
+            .country
+            .as_deref()
+            .is_some_and(|country| country.trim().is_empty())
+        {
+            anyhow::bail!(
+                "invalid run manifest {}: node {} country must not be empty",
+                path.display(),
+                node.node_id
+            );
+        }
+    }
+
+    Ok(manifest)
+}
+
 fn role_str(role: NodeRole) -> &'static str {
     match role {
         NodeRole::Validator => "validator",
         NodeRole::LocalAggregator => "local_aggregator",
         NodeRole::GlobalAggregator => "global_aggregator",
     }
-}
-
-fn supernode_set(
-    nodes: &[crate::config::experiment::NodeConfig],
-    experiment: &ExperimentConfig,
-    rng: &mut StdRng,
-) -> HashSet<u32> {
-    let count = (nodes.len() as f64 * experiment.supernode_fraction).ceil() as usize;
-    if count == 0 {
-        return HashSet::new();
-    }
-    rand::seq::index::sample(rng, nodes.len(), count)
-        .into_iter()
-        .map(|i| nodes[i].node_id)
-        .collect()
 }
 
 /// Read all JSONL events from shadow.data, returning (event, timestamp_us).
@@ -192,21 +222,27 @@ fn read_all_events(shadow_data: &Path) -> Result<Vec<(JsonlEvent, u64)>> {
         ));
     }
 
-    for entry in std::fs::read_dir(&hosts_dir)? {
-        let host_path = entry?.path();
+    let mut host_paths: Vec<_> = std::fs::read_dir(&hosts_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<_>>()?;
+    host_paths.sort();
+
+    for host_path in host_paths {
         if !host_path.is_dir() {
             continue;
         }
-        for file_entry in std::fs::read_dir(&host_path)? {
-            let file_path = file_entry?.path();
-            let file_name = file_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+        let mut file_paths: Vec<_> = std::fs::read_dir(&host_path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<_>>()?;
+        file_paths.sort();
+
+        for file_path in file_paths {
+            let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if !file_name.contains("stdout") {
                 continue;
             }
-            let content = std::fs::read_to_string(&file_path)?;
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| anyhow::anyhow!("reading event log {}: {e}", file_path.display()))?;
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -253,7 +289,8 @@ fn build_mesh_edges(
     events: &[(JsonlEvent, u64)],
     peer_to_node: &HashMap<String, u32>,
     experiment: &ExperimentConfig,
-    geo: Option<&GeoContext>,
+    countries: &HashMap<u32, Option<&str>>,
+    country_latency: Option<&CountryLatencyModel>,
     rng: &mut StdRng,
 ) -> Vec<TopoEdge> {
     const MIN_EDGE_USES: u32 = 3;
@@ -289,11 +326,13 @@ fn build_mesh_edges(
         .into_iter()
         .filter(|(_, count)| *count >= MIN_EDGE_USES)
         .map(|((s, t), _)| {
-            let lat = match geo {
-                Some(ctx) => {
-                    let from = &ctx.node_countries[s as usize];
-                    let to = &ctx.node_countries[t as usize];
-                    let params = ctx.model.get_latency(from, to);
+            let lat = match (
+                country_latency,
+                countries.get(&s).and_then(|country| *country),
+                countries.get(&t).and_then(|country| *country),
+            ) {
+                (Some(model), Some(from), Some(to)) => {
+                    let params = model.get_latency(from, to);
                     if experiment.geo_jitter > 0.0 {
                         let spread = params.base_ms * experiment.geo_jitter;
                         (params.base_ms + rng.gen_range(-spread..spread)).max(0.5)
@@ -301,7 +340,7 @@ fn build_mesh_edges(
                         params.base_ms.max(0.5)
                     }
                 }
-                None => uniform_ms,
+                _ => uniform_ms,
             };
             TopoEdge {
                 source: s,
@@ -310,7 +349,11 @@ fn build_mesh_edges(
             }
         })
         .collect();
-    edges.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.target.cmp(&b.target)));
+    edges.sort_by(|a, b| {
+        a.source
+            .cmp(&b.source)
+            .then_with(|| a.target.cmp(&b.target))
+    });
     edges
 }
 

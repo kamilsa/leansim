@@ -5,3 +5,12 @@ Dockerfile*
 docker-compose.yml
 docker-output/
 README.md
+output/
+.venv/
+__pycache__/
+*.pyc
+*.bctrace
+scripts/
+shadow-sim.py
+pyproject.toml
+uv.lock
