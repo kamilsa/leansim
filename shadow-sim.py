@@ -73,6 +73,13 @@ def validate_experiment(config: dict) -> None:
     )
     if local_aggregators > validators // subnets:
         die("local_aggregators_per_subnet must not exceed validators_per_subnet")
+    explicit_aggregators = as_int(
+        setting(config, "gossipsub_explicit_aggregator_count", 0),
+        "gossipsub_explicit_aggregator_count",
+        minimum=0,
+    )
+    if explicit_aggregators and explicit_aggregators >= local_aggregators:
+        die("gossipsub_explicit_aggregator_count must be less than local_aggregators_per_subnet")
     as_int(setting(config, "global_aggregator_count", 1), "global_aggregator_count", minimum=0)
     as_number(setting(config, "local_threshold", 0.9), "local_threshold", minimum=0.0000001, maximum=1)
     as_number(setting(config, "global_proof_target", 0.66), "global_proof_target", minimum=0.0000001, maximum=1)
@@ -102,6 +109,8 @@ def validate_experiment(config: dict) -> None:
         die("signature_payload_bytes must be greater than zero")
     if as_int(setting(config, "proof_payload_bytes", 131072), "proof_payload_bytes") == 0:
         die("proof_payload_bytes must be greater than zero")
+    if not isinstance(setting(config, "gossipsub_flood_publish", False), bool):
+        die("gossipsub_flood_publish must be a boolean")
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -164,6 +173,8 @@ def experiment_defaults(experiment: dict) -> dict:
         "gossipsub_mesh_n_high": 8,
         "gossipsub_mesh_outbound_min": 1,
         "gossipsub_heartbeat_interval_ms": 1000,
+        "gossipsub_explicit_aggregator_count": 0,
+        "gossipsub_flood_publish": False,
         "use_geo_latency": False,
         "geo_seed": 42,
         "geo_jitter": 0.0,
@@ -247,12 +258,38 @@ def assign_nodes(experiment: dict) -> list[dict]:
         nodes.append({"node_id": len(nodes), "role": "global_aggregator", "subnet_id": 0, "ip": global_aggregator_ip(len(nodes))})
     for node in nodes:
         node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
+
+    explicit_count = experiment["gossipsub_explicit_aggregator_count"]
+    for node in nodes:
+        node["explicit_peer_addrs"] = set()
+        node["selected_aggregator_ids"] = []
+
+    if explicit_count:
+        for subnet in range(experiment["subnet_count"]):
+            signing_nodes = [node for node in nodes if node["subnet_id"] == subnet and node["role"] != "global_aggregator"]
+            aggregators = [node for node in signing_nodes if node["role"] == "local_aggregator"]
+            for node in signing_nodes:
+                candidates = [aggregator for aggregator in aggregators if aggregator["node_id"] != node["node_id"]]
+                rng = random.Random(experiment["geo_seed"] + node["node_id"])
+                rng.shuffle(candidates)
+                selected = candidates[:explicit_count]
+                node["selected_aggregator_ids"] = [aggregator["node_id"] for aggregator in selected]
+                for aggregator in selected:
+                    node["explicit_peer_addrs"].add(aggregator["listen_addr"])
+                    # Explicit peers must be configured on both ends to avoid mesh GRAFT/PRUNE churn.
+                    aggregator["explicit_peer_addrs"].add(node["listen_addr"])
+
     all_addresses = [node["listen_addr"] for node in nodes]
     for node in nodes:
-        candidates = [address for address in all_addresses if address != node["listen_addr"]]
+        explicit_addrs = sorted(node["explicit_peer_addrs"])
+        candidates = [
+            address for address in all_addresses
+            if address != node["listen_addr"] and address not in node["explicit_peer_addrs"]
+        ]
         rng = random.Random(experiment["geo_seed"] + node["node_id"])
         rng.shuffle(candidates)
-        node["seed_addrs"] = candidates[:SEED_PEER_COUNT]
+        node["explicit_peer_addrs"] = explicit_addrs
+        node["seed_addrs"] = explicit_addrs + candidates[:max(0, SEED_PEER_COUNT - len(explicit_addrs))]
     return nodes
 
 
@@ -358,6 +395,8 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
                 "subnet_id": node["subnet_id"],
                 "listen_addr": node["listen_addr"],
                 "seed_addrs": node["seed_addrs"],
+                "explicit_peer_addrs": node["explicit_peer_addrs"],
+                "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
                 "experiment": experiment,
             },
         )

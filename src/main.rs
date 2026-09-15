@@ -73,6 +73,10 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         node_config.subnet_id,
         node_config.experiment.clone(),
     ));
+    let mut explicit_peers = leansim::network::swarm::ExplicitPeerManager::new(
+        &node_config.explicit_peer_addrs,
+        &node_config.selected_aggregator_addrs,
+    )?;
 
     let mut swarm = leansim::network::swarm::build_swarm(
         node_config.node_id,
@@ -92,7 +96,19 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         peer_id: swarm.local_peer_id().to_base58(),
     });
 
-    leansim::network::swarm::dial_seeds(&mut swarm, &node_config.seed_addrs).await?;
+    let selected_aggregator_topic = (node_config.role != NodeRole::GlobalAggregator).then(|| {
+        libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(
+            &node_config.experiment.run_id,
+            node_config.subnet_id,
+        ))
+    });
+    leansim::network::swarm::dial_seeds(
+        &mut swarm,
+        &node_config.seed_addrs,
+        &mut explicit_peers,
+        selected_aggregator_topic.as_ref(),
+    )
+    .await?;
 
     if node_config.role != NodeRole::GlobalAggregator {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
@@ -120,9 +136,11 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             break;
         }
 
-        let msg =
-            tokio::time::timeout(remaining, leansim::network::swarm::next_message(&mut swarm))
-                .await;
+        let msg = tokio::time::timeout(
+            remaining,
+            leansim::network::swarm::next_message(&mut swarm, &mut explicit_peers),
+        )
+        .await;
 
         match msg {
             Ok(Some(received)) => {
@@ -153,9 +171,8 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                             ts_ms: state.elapsed_ms(),
                             byte_size: size,
                         });
-                        // Gossipsub forwards all non-duplicate messages to mesh peers.
-                        // Estimate forwarded bytes: ceil(sqrt(mesh_n)) × byte_size for lazy push.
-                        // For mesh_n=8, D_lazy=3. Approximate full-message forward count.
+                        // Approximate lazy gossip traffic. Full-message forwarding to mesh and
+                        // explicit peers is not observable at this layer.
                         if !is_dup {
                             // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
                             let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil()

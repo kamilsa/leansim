@@ -517,6 +517,13 @@ where
             .map(|(peer_id, topic_set)| (peer_id, topic_set.iter().collect()))
     }
 
+    /// Returns whether a connected peer is subscribed to a topic.
+    pub fn is_peer_subscribed(&self, peer_id: &PeerId, topic: &TopicHash) -> bool {
+        self.peer_topics
+            .get(peer_id)
+            .is_some_and(|topics| topics.contains(topic))
+    }
+
     /// Lists all known peers and their associated protocol.
     pub fn peer_protocol(&self) -> impl Iterator<Item = (&PeerId, &PeerKind)> {
         self.connected_peers.iter().map(|(k, v)| (k, &v.kind))

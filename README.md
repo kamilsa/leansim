@@ -91,6 +91,23 @@ dedicated hosts, so total nodes equal `validator_count + global_aggregator_count
 The launcher validates experiment counts and thresholds before building. In
 particular, `validator_count` must be divisible by `subnet_count`.
 
+Gossipsub publication uses the normal mesh by default:
+
+```toml
+# Set to a positive value to choose this many remote local aggregators in each
+# signing node's subnet. They become reciprocal gossipsub explicit peers.
+gossipsub_explicit_aggregator_count = 0
+
+# false sends local publications to mesh peers and explicit peers only. Set true
+# to also publish directly to every connected subscribed peer.
+gossipsub_flood_publish = false
+```
+
+The explicit aggregator count must be smaller than
+`local_aggregators_per_subnet`, because local aggregators also sign and cannot
+select themselves. Explicit peers are additional direct forwarding links and do
+not count toward `gossipsub_mesh_n`.
+
 ## Output
 
 For an output directory such as `output/`, a run produces:

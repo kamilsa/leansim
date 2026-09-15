@@ -1,0 +1,53 @@
+# 1024 signing nodes, 16 local aggregators, and two explicit aggregators per signer.
+run_id = "1024-explicit-aggregators-2"
+run_timeout_secs = 300
+
+validator_count = 1024
+subnet_count = 1
+local_aggregators_per_subnet = 16
+global_aggregator_count = 0
+
+local_threshold = 1.0
+global_proof_target = 0.66
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 1024
+proof_payload_bytes = 131072
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+gossipsub_explicit_aggregator_count = 2
+gossipsub_flood_publish = false
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_fraction = 0.05
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 50
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output/explicit-aggregators-2"

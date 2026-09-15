@@ -4,8 +4,9 @@ use libp2p::{
     gossipsub::{self, IdentTopic, MessageAcceptance},
     identity,
     swarm::SwarmEvent,
-    Multiaddr, Swarm,
+    Multiaddr, PeerId, Swarm,
 };
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use crate::config::experiment::{ExperimentConfig, NodeRole};
@@ -14,6 +15,111 @@ use crate::network::topics;
 
 /// The concrete behaviour type used throughout the simulator.
 pub type GossipsubBehaviour = gossipsub::Behaviour;
+
+/// Tracks address-based explicit peers because generated configs do not know PeerIds in advance.
+pub struct ExplicitPeerManager {
+    explicit_addrs: HashSet<Multiaddr>,
+    selected_aggregator_addrs: HashSet<Multiaddr>,
+    peers_by_addr: HashMap<Multiaddr, PeerId>,
+    addrs_by_peer: HashMap<PeerId, Multiaddr>,
+}
+
+impl ExplicitPeerManager {
+    pub fn new(
+        explicit_peer_addrs: &[String],
+        selected_aggregator_addrs: &[String],
+    ) -> Result<Self> {
+        let explicit_addrs = parse_addrs(explicit_peer_addrs)?;
+        let selected_aggregator_addrs = parse_addrs(selected_aggregator_addrs)?;
+        if !selected_aggregator_addrs.is_subset(&explicit_addrs) {
+            anyhow::bail!("selected aggregator addresses must also be explicit peers");
+        }
+        Ok(Self {
+            explicit_addrs,
+            selected_aggregator_addrs,
+            peers_by_addr: HashMap::new(),
+            addrs_by_peer: HashMap::new(),
+        })
+    }
+
+    pub fn all_addrs(&self) -> impl Iterator<Item = &Multiaddr> {
+        self.explicit_addrs.iter()
+    }
+
+    fn dial_missing_selected_aggregators(&self, swarm: &mut Swarm<GossipsubBehaviour>) {
+        for addr in &self.selected_aggregator_addrs {
+            if self.peers_by_addr.contains_key(addr) {
+                continue;
+            }
+            match swarm.dial(addr.clone()) {
+                Ok(()) => tracing::info!(address = %addr, "retrying selected explicit aggregator"),
+                Err(error) => {
+                    tracing::warn!(address = %addr, "retry selected explicit aggregator failed: {error}")
+                }
+            }
+        }
+    }
+
+    fn register_connection(
+        &mut self,
+        swarm: &mut Swarm<GossipsubBehaviour>,
+        peer_id: PeerId,
+        remote_addr: &Multiaddr,
+    ) {
+        if !self.explicit_addrs.contains(remote_addr) {
+            return;
+        }
+
+        if let Some(previous_addr) = self.addrs_by_peer.insert(peer_id, remote_addr.clone()) {
+            self.peers_by_addr.remove(&previous_addr);
+        }
+        self.peers_by_addr.insert(remote_addr.clone(), peer_id);
+        swarm.behaviour_mut().add_explicit_peer(&peer_id);
+        tracing::info!(peer = %peer_id, address = %remote_addr, "registered explicit peer");
+    }
+
+    fn handle_disconnection(
+        &mut self,
+        swarm: &mut Swarm<GossipsubBehaviour>,
+        peer_id: PeerId,
+        remaining_connections: u32,
+    ) {
+        if remaining_connections != 0 {
+            return;
+        }
+        let Some(addr) = self.addrs_by_peer.remove(&peer_id) else {
+            return;
+        };
+        self.peers_by_addr.remove(&addr);
+        swarm.behaviour_mut().remove_explicit_peer(&peer_id);
+        match swarm.dial(addr.clone()) {
+            Ok(()) => tracing::info!(peer = %peer_id, address = %addr, "redialing explicit peer"),
+            Err(error) => {
+                tracing::warn!(peer = %peer_id, address = %addr, "redial explicit peer failed: {error}")
+            }
+        }
+    }
+
+    fn selected_aggregators_ready(
+        &self,
+        behaviour: &GossipsubBehaviour,
+        topic: &IdentTopic,
+    ) -> bool {
+        let topic_hash = topic.hash();
+        self.selected_aggregator_addrs.iter().all(|addr| {
+            self.peers_by_addr
+                .get(addr)
+                .is_some_and(|peer_id| behaviour.is_peer_subscribed(peer_id, &topic_hash))
+        })
+    }
+}
+
+fn parse_addrs(addrs: &[String]) -> Result<HashSet<Multiaddr>> {
+    addrs
+        .iter()
+        .map(|addr| addr.parse::<Multiaddr>().map_err(anyhow::Error::from))
+        .collect()
+}
 
 /// Builds a libp2p Swarm with QUIC transport and gossipsub.
 pub fn build_swarm(
@@ -29,9 +135,7 @@ pub fn build_swarm(
         .with_tokio()
         .with_quic()
         .with_behaviour(|_key| gossipsub_behaviour)?
-        .with_swarm_config(|cfg| {
-            cfg.with_idle_connection_timeout(Duration::from_secs(120))
-        })
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
 
     let addr: Multiaddr = listen_addr.parse()?;
@@ -41,13 +145,19 @@ pub fn build_swarm(
 }
 
 /// Builds the gossipsub behaviour with experiment-configured mesh parameters.
-fn build_gossipsub(key: &identity::Keypair, config: &ExperimentConfig) -> Result<GossipsubBehaviour> {
+fn build_gossipsub(
+    key: &identity::Keypair,
+    config: &ExperimentConfig,
+) -> Result<GossipsubBehaviour> {
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .mesh_n_low(config.gossipsub_mesh_n_low)
         .mesh_n(config.gossipsub_mesh_n)
         .mesh_n_high(config.gossipsub_mesh_n_high)
         .mesh_outbound_min(config.gossipsub_mesh_outbound_min)
-        .heartbeat_interval(Duration::from_millis(config.gossipsub_heartbeat_interval_ms))
+        .heartbeat_interval(Duration::from_millis(
+            config.gossipsub_heartbeat_interval_ms,
+        ))
+        .flood_publish(config.gossipsub_flood_publish)
         .max_transmit_size(2 * 1024 * 1024) // 2 MiB for large proof messages
         .validate_messages()
         .build()
@@ -115,7 +225,10 @@ pub struct ReceivedMessage {
 /// Runs the main event loop until the swarm is done or timeout.
 /// Returns on gossipsub messages, forwarding deserialized WireMessages and the
 /// propagation source PeerId (the immediate mesh peer that forwarded the message).
-pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<ReceivedMessage> {
+pub async fn next_message(
+    swarm: &mut Swarm<GossipsubBehaviour>,
+    explicit_peers: &mut ExplicitPeerManager,
+) -> Option<ReceivedMessage> {
     loop {
         let event = swarm.next().await?;
         match event {
@@ -123,29 +236,27 @@ pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<Recei
                 propagation_source: peer_id,
                 message_id: _id,
                 message,
-            }) => {
-                match WireMessage::decode(&message.data) {
-                    Ok(wire_msg) => {
-                        let _ = swarm.behaviour_mut().report_message_validation_result(
-                            &_id,
-                            &peer_id,
-                            MessageAcceptance::Accept,
-                        );
-                        return Some(ReceivedMessage {
-                            wire_msg,
-                            from_peer: peer_id,
-                            is_duplicate: false,
-                        });
-                    }
-                    Err(_) => {
-                        let _ = swarm.behaviour_mut().report_message_validation_result(
-                            &_id,
-                            &peer_id,
-                            MessageAcceptance::Reject,
-                        );
-                    }
+            }) => match WireMessage::decode(&message.data) {
+                Ok(wire_msg) => {
+                    let _ = swarm.behaviour_mut().report_message_validation_result(
+                        &_id,
+                        &peer_id,
+                        MessageAcceptance::Accept,
+                    );
+                    return Some(ReceivedMessage {
+                        wire_msg,
+                        from_peer: peer_id,
+                        is_duplicate: false,
+                    });
                 }
-            }
+                Err(_) => {
+                    let _ = swarm.behaviour_mut().report_message_validation_result(
+                        &_id,
+                        &peer_id,
+                        MessageAcceptance::Reject,
+                    );
+                }
+            },
             SwarmEvent::Behaviour(gossipsub::Event::DuplicateMessage {
                 propagation_source: peer_id,
                 message_id: _id,
@@ -171,38 +282,84 @@ pub async fn next_message(swarm: &mut Swarm<GossipsubBehaviour>) -> Option<Recei
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("listening on {address}");
             }
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => explicit_peers.register_connection(swarm, peer_id, endpoint.get_remote_address()),
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => explicit_peers.handle_disconnection(swarm, peer_id, num_established),
             _ => {}
         }
     }
 }
 
 /// Dial all seed peers, then poll for connections and mesh formation.
-pub async fn dial_seeds(swarm: &mut Swarm<GossipsubBehaviour>, seeds: &[String]) -> Result<()> {
-    for seed in seeds {
-        let ma: Multiaddr = seed.parse()?;
+pub async fn dial_seeds(
+    swarm: &mut Swarm<GossipsubBehaviour>,
+    seeds: &[String],
+    explicit_peers: &mut ExplicitPeerManager,
+    selected_aggregator_topic: Option<&IdentTopic>,
+) -> Result<()> {
+    let mut dial_addrs = parse_addrs(seeds)?;
+    dial_addrs.extend(explicit_peers.all_addrs().cloned());
+    for ma in dial_addrs.iter().cloned() {
         match swarm.dial(ma.clone()) {
-            Ok(()) => tracing::info!("dialing {seed}"),
-            Err(e) => tracing::warn!("dial {seed} failed: {e}"),
+            Ok(()) => tracing::info!("dialing {ma}"),
+            Err(e) => tracing::warn!("dial {ma} failed: {e}"),
         }
     }
 
-    if seeds.is_empty() {
+    if seeds.is_empty() && explicit_peers.explicit_addrs.is_empty() {
         tracing::info!("no seeds to dial");
         return Ok(());
     }
 
     // Poll for connection events and mesh formation.
-    let warmup_ms = if seeds.len() > 200 { 3000 } else { 1500 };
-    let warmup = tokio::time::Instant::now()
-        + std::time::Duration::from_millis(warmup_ms);
+    let warmup_ms = if dial_addrs.len() > 200 { 3000 } else { 1500 };
+    poll_warmup(swarm, explicit_peers, warmup_ms).await;
+
+    if let Some(topic) = selected_aggregator_topic {
+        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topic) {
+            explicit_peers.dial_missing_selected_aggregators(swarm);
+            poll_warmup(swarm, explicit_peers, warmup_ms).await;
+        }
+        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topic) {
+            anyhow::bail!(
+                "selected explicit aggregators were not connected and subscribed during warmup"
+            );
+        }
+    }
+
+    tracing::info!("mesh warmup complete");
+    Ok(())
+}
+
+async fn poll_warmup(
+    swarm: &mut Swarm<GossipsubBehaviour>,
+    explicit_peers: &mut ExplicitPeerManager,
+    warmup_ms: u64,
+) {
+    let warmup = tokio::time::Instant::now() + std::time::Duration::from_millis(warmup_ms);
     loop {
         let remaining = warmup.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
         match tokio::time::timeout(remaining, swarm.next()).await {
-            Ok(Some(SwarmEvent::ConnectionEstablished { peer_id, .. })) => {
+            Ok(Some(SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            })) => {
                 tracing::info!("connected to peer {peer_id}");
+                explicit_peers.register_connection(swarm, peer_id, endpoint.get_remote_address());
+            }
+            Ok(Some(SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            })) => {
+                explicit_peers.handle_disconnection(swarm, peer_id, num_established);
             }
             Ok(Some(SwarmEvent::OutgoingConnectionError { error, .. })) => {
                 tracing::warn!("outgoing connection error: {error}");
@@ -212,7 +369,4 @@ pub async fn dial_seeds(swarm: &mut Swarm<GossipsubBehaviour>, seeds: &[String])
             _ => {}
         }
     }
-
-    tracing::info!("mesh warmup complete");
-    Ok(())
 }
