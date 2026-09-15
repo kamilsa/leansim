@@ -21,6 +21,8 @@ fn base_config() -> ExperimentConfig {
         gossipsub_mesh_n_high: 12,
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
+        gossipsub_explicit_aggregator_count: 0,
+        gossipsub_flood_publish: false,
         network_defaults: NetworkDefaults::default(),
         use_geo_latency: false,
         geo_seed: 0,
@@ -44,6 +46,36 @@ fn default_network_values() {
 fn valid_config_passes_validation() {
     let exp = base_config();
     exp.validate().unwrap();
+}
+
+#[test]
+fn explicit_aggregator_and_flood_publish_defaults_deserialize() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(exp.gossipsub_explicit_aggregator_count, 0);
+    assert!(!exp.gossipsub_flood_publish);
+}
+
+#[test]
+fn flood_publish_override_deserializes() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+gossipsub_flood_publish = true
+"#,
+    )
+    .unwrap();
+
+    assert!(exp.gossipsub_flood_publish);
 }
 
 #[test]
@@ -79,6 +111,21 @@ fn fewer_validators_than_subnets_rejected() {
 fn too_many_local_aggregators_rejected() {
     let mut exp = base_config();
     exp.local_aggregators_per_subnet = 26;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
+fn too_many_explicit_aggregators_rejected() {
+    let mut exp = base_config();
+    exp.gossipsub_explicit_aggregator_count = 2;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
+fn explicit_aggregators_require_a_remote_aggregator() {
+    let mut exp = base_config();
+    exp.local_aggregators_per_subnet = 1;
+    exp.gossipsub_explicit_aggregator_count = 1;
     assert!(exp.validate().is_err());
 }
 

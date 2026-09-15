@@ -80,6 +80,14 @@ pub struct ExperimentConfig {
     #[serde(default = "defaults::default_heartbeat_interval_ms")]
     pub gossipsub_heartbeat_interval_ms: u64,
 
+    /// Same-subnet local aggregators that every signing node keeps as explicit peers.
+    #[serde(default)]
+    pub gossipsub_explicit_aggregator_count: usize,
+
+    /// Whether locally published messages are sent to every subscribed peer.
+    #[serde(default)]
+    pub gossipsub_flood_publish: bool,
+
     #[serde(default)]
     pub network_defaults: NetworkDefaults,
 
@@ -135,6 +143,14 @@ impl ExperimentConfig {
                 "local_aggregators_per_subnet must not exceed validators_per_subnet".into(),
             );
         }
+        if self.gossipsub_explicit_aggregator_count >= self.local_aggregators_per_subnet
+            && self.gossipsub_explicit_aggregator_count > 0
+        {
+            return Err(
+                "gossipsub_explicit_aggregator_count must be less than local_aggregators_per_subnet"
+                    .into(),
+            );
+        }
         if self.local_threshold <= 0.0 || self.local_threshold > 1.0 {
             return Err("local_threshold must be in (0.0, 1.0]".into());
         }
@@ -182,6 +198,12 @@ pub struct NodeConfig {
     pub subnet_id: u32,
     pub listen_addr: String,
     pub seed_addrs: Vec<String>,
+    /// All peers this node keeps as explicit gossipsub peers. This includes reciprocal links.
+    #[serde(default)]
+    pub explicit_peer_addrs: Vec<String>,
+    /// The local aggregators selected by this signing node. These must be ready before signing.
+    #[serde(default)]
+    pub selected_aggregator_addrs: Vec<String>,
     pub experiment: ExperimentConfig,
 }
 
