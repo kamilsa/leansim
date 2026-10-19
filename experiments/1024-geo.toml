@@ -7,7 +7,7 @@ subnet_count = 1
 local_aggregators_per_subnet = 32
 global_aggregator_count = 0
 
-local_threshold = 0.9
+local_threshold = 1.0
 global_proof_target = 0.66
 burst_time_ms = 100
 burst_jitter_ms = 100
