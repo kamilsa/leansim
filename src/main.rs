@@ -74,9 +74,11 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             node_config.subnet_id,
             node_config.experiment.clone(),
         )
-        .with_validator_ids(node_config.signing_validator_ids()),
+        .with_validator_ids(node_config.signing_validator_ids())
+        .with_subscribed_subnets(node_config.subscribed_subnets.clone()),
     );
     let signing_subnets = state.signing_subnets();
+    let subscribed_subnets = state.subscribed_subnets();
     let mut explicit_peers = leansim::network::swarm::ExplicitPeerManager::new(
         &node_config.explicit_peer_addrs,
         &node_config.selected_aggregator_addrs,
@@ -92,7 +94,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &mut swarm,
         node_config.role,
         node_config.subnet_id,
-        &signing_subnets,
+        &subscribed_subnets,
         &node_config.experiment.run_id,
     )?;
 
@@ -220,7 +222,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         )
                         .await?;
                     }
-                    NodeRole::Validator => {}
+                    NodeRole::Validator | NodeRole::Relay => {}
                 }
             }
             Ok(None) => {

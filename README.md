@@ -120,6 +120,33 @@ immediately. Countries, supernodes, and bandwidth are assigned per host.
 Without `validator_map`, every validator runs on its own host and runs behave as
 before.
 
+### Ethereum-style node map (nodes.csv)
+
+Set `node_map` to a nodes.csv table (`node_type, peer_key, validator_count, ...`,
+one row per physical node) for a topology closer to mainnet:
+
+```toml
+validator_count = 512
+node_map = "nodes.csv"                 # relative to the repo root
+subnet_subscriptions_per_node = 2     # default 2
+subnet_count = 8
+```
+
+`validator_count` validator slots are sampled from the map's nodes, so the
+validators-per-host distribution matches the real network (a node with 20
+validators is 20x more likely to receive validators than one with 1).
+`no_validator` nodes are sampled on top, preserving their real share of the host
+population (~20%), and run as gossip-only relays: they subscribe, forward, and
+occupy bandwidth, but never sign.
+
+Every node subscribes to `subnet_subscriptions_per_node` random subnets,
+independent of the subnets its validators publish to — as on Ethereum, a
+validator's attestations go to the subnet duty assigns, not the subnets its
+node is subscribed to. Publishing to a non-subscribed subnet works through
+gossipsub's fanout cache. Local aggregators are promoted from each subnet's
+subscribers, so an aggregator always collects a subnet it is subscribed to.
+With `node_map`, node ids are unrelated to validator ids.
+
 Gossipsub publication uses the normal mesh by default:
 
 ```toml

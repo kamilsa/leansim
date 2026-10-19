@@ -208,6 +208,7 @@ fn role_str(role: NodeRole) -> &'static str {
         NodeRole::Validator => "validator",
         NodeRole::LocalAggregator => "local_aggregator",
         NodeRole::GlobalAggregator => "global_aggregator",
+        NodeRole::Relay => "relay",
     }
 }
 
