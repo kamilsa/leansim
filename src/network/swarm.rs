@@ -6,7 +6,7 @@ use libp2p::{
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use crate::config::experiment::{ExperimentConfig, NodeRole};
@@ -100,16 +100,20 @@ impl ExplicitPeerManager {
         }
     }
 
+    /// Every selected aggregator is connected and subscribed to one of this host's
+    /// signing subnets (an aggregator is selected for a subnet it collects).
     fn selected_aggregators_ready(
         &self,
         behaviour: &GossipsubBehaviour,
-        topic: &IdentTopic,
+        topics: &[IdentTopic],
     ) -> bool {
-        let topic_hash = topic.hash();
+        let topic_hashes: Vec<_> = topics.iter().map(IdentTopic::hash).collect();
         self.selected_aggregator_addrs.iter().all(|addr| {
-            self.peers_by_addr
-                .get(addr)
-                .is_some_and(|peer_id| behaviour.is_peer_subscribed(peer_id, &topic_hash))
+            self.peers_by_addr.get(addr).is_some_and(|peer_id| {
+                topic_hashes
+                    .iter()
+                    .any(|topic_hash| behaviour.is_peer_subscribed(peer_id, topic_hash))
+            })
         })
     }
 }
@@ -157,6 +161,7 @@ fn build_gossipsub(
         .heartbeat_interval(Duration::from_millis(
             config.gossipsub_heartbeat_interval_ms,
         ))
+        .heartbeat_initial_delay(Duration::from_millis(config.heartbeat_initial_delay_ms()))
         .flood_publish(config.gossipsub_flood_publish)
         .max_transmit_size(2 * 1024 * 1024) // 2 MiB for large proof messages
         .validate_messages()
@@ -170,28 +175,26 @@ fn build_gossipsub(
     .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
 }
 
-/// Subscribes to the topics relevant to the given role.
+/// Subscribes to the topics relevant to the given role. A host joins the subnet of every
+/// validator it runs; a local aggregator also joins the subnet it collects.
 pub fn subscribe_to_topics(
     swarm: &mut Swarm<GossipsubBehaviour>,
     role: NodeRole,
     subnet_id: u32,
+    signing_subnets: &BTreeSet<u32>,
     run_id: &str,
 ) -> Result<()> {
-    match role {
-        NodeRole::Validator => {
-            let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet_id));
-            swarm.behaviour_mut().subscribe(&topic)?;
-        }
-        NodeRole::LocalAggregator => {
-            let subnet_topic = IdentTopic::new(topics::subnet_topic(run_id, subnet_id));
-            let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
-            swarm.behaviour_mut().subscribe(&subnet_topic)?;
-            swarm.behaviour_mut().subscribe(&agg_topic)?;
-        }
-        NodeRole::GlobalAggregator => {
-            let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
-            swarm.behaviour_mut().subscribe(&agg_topic)?;
-        }
+    let mut subnets = signing_subnets.clone();
+    if role == NodeRole::LocalAggregator {
+        subnets.insert(subnet_id);
+    }
+    for subnet in subnets {
+        let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
+        swarm.behaviour_mut().subscribe(&topic)?;
+    }
+    if role != NodeRole::Validator {
+        let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
+        swarm.behaviour_mut().subscribe(&agg_topic)?;
     }
     Ok(())
 }
@@ -300,7 +303,7 @@ pub async fn dial_seeds(
     swarm: &mut Swarm<GossipsubBehaviour>,
     seeds: &[String],
     explicit_peers: &mut ExplicitPeerManager,
-    selected_aggregator_topic: Option<&IdentTopic>,
+    selected_aggregator_topics: &[IdentTopic],
 ) -> Result<()> {
     let mut dial_addrs = parse_addrs(seeds)?;
     dial_addrs.extend(explicit_peers.all_addrs().cloned());
@@ -320,12 +323,13 @@ pub async fn dial_seeds(
     let warmup_ms = if dial_addrs.len() > 200 { 3000 } else { 1500 };
     poll_warmup(swarm, explicit_peers, warmup_ms).await;
 
-    if let Some(topic) = selected_aggregator_topic {
-        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topic) {
+    if !selected_aggregator_topics.is_empty() {
+        let topics = selected_aggregator_topics;
+        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topics) {
             explicit_peers.dial_missing_selected_aggregators(swarm);
             poll_warmup(swarm, explicit_peers, warmup_ms).await;
         }
-        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topic) {
+        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topics) {
             anyhow::bail!(
                 "selected explicit aggregators were not connected and subscribed during warmup"
             );

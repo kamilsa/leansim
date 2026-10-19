@@ -17,9 +17,13 @@ pub async fn record_own_signature(
     state: &Arc<NodeState>,
     swarm: &mut Swarm<GossipsubBehaviour>,
 ) -> Result<()> {
-    // Gossipsub does not deliver a published message to its source, but a validator
-    // acting as an aggregator has its own signature immediately.
-    state.received_sigs.insert(state.node_id, ());
+    // Gossipsub does not deliver a published message to its source, but a host
+    // acting as an aggregator has its own validators' signatures immediately.
+    for &validator_id in &state.validator_ids {
+        if state.config.subnet_for_validator(validator_id) == state.subnet_id {
+            state.received_sigs.insert(validator_id, ());
+        }
+    }
     maybe_publish_proof(state, swarm).await
 }
 
@@ -29,7 +33,7 @@ pub async fn handle_message(
     msg: &WireMessage,
 ) -> Result<()> {
     if let WireMessage::ValidatorSignature {
-        sender_id,
+        validator_id,
         subnet_id,
         ..
     } = msg
@@ -39,7 +43,7 @@ pub async fn handle_message(
         }
 
         // Track unique validators
-        state.received_sigs.insert(*sender_id, ());
+        state.received_sigs.insert(*validator_id, ());
 
         maybe_publish_proof(state, swarm).await?;
     }

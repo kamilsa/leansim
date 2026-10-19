@@ -26,6 +26,7 @@ fn test_config() -> ExperimentConfig {
         gossipsub_mesh_n_high: 12,
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
+        gossipsub_heartbeat_initial_delay_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
         network_defaults: NetworkDefaults::default(),
@@ -66,6 +67,7 @@ fn duplicate_suppression_by_message_id() {
     let msg = WireMessage::ValidatorSignature {
         run_id: "r".into(),
         sender_id: 10,
+        validator_id: 10,
         subnet_id: 0,
         sequence_id: 1,
         created_timestamp_ms: 100,
@@ -169,4 +171,22 @@ fn elapsed_ms_increases() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     let t2 = state.elapsed_ms();
     assert!(t2 >= t1, "elapsed_ms should be monotonic");
+}
+
+#[test]
+fn signing_subnets_cover_every_colocated_validator() {
+    // 25 validators per subnet: ids 3 and 24 are in subnet 0, 30 in 1, 99 in 3.
+    let state = NodeState::new(1, NodeRole::Validator, 0, test_config())
+        .with_validator_ids(vec![3, 24, 30, 99]);
+    assert_eq!(
+        state.signing_subnets().into_iter().collect::<Vec<_>>(),
+        vec![0, 1, 3]
+    );
+}
+
+#[test]
+fn global_aggregator_has_no_validators() {
+    let state = make_state(NodeRole::GlobalAggregator, 0);
+    assert!(state.validator_ids.is_empty());
+    assert!(state.signing_subnets().is_empty());
 }

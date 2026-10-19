@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -11,6 +12,8 @@ pub struct NodeState {
     pub node_id: u32,
     pub role: NodeRole,
     pub subnet_id: u32,
+    /// Validators run by this host; each publishes one signature.
+    pub validator_ids: Vec<u32>,
     pub start: Instant,
     pub config: ExperimentConfig,
 
@@ -48,6 +51,11 @@ impl NodeState {
             node_id,
             role,
             subnet_id,
+            validator_ids: if role == NodeRole::GlobalAggregator {
+                Vec::new()
+            } else {
+                vec![node_id]
+            },
             start: Instant::now(),
             config,
             seen_messages: DashMap::new(),
@@ -62,6 +70,19 @@ impl NodeState {
             msgs_sent_sig: AtomicU64::new(0),
             msgs_recv_sig: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_validator_ids(mut self, validator_ids: Vec<u32>) -> Self {
+        self.validator_ids = validator_ids;
+        self
+    }
+
+    /// Subnets this host signs in, one per distinct validator subnet.
+    pub fn signing_subnets(&self) -> BTreeSet<u32> {
+        self.validator_ids
+            .iter()
+            .map(|&validator_id| self.config.subnet_for_validator(validator_id))
+            .collect()
     }
 
     pub fn next_seq(&self) -> u64 {

@@ -80,6 +80,12 @@ pub struct ExperimentConfig {
     #[serde(default = "defaults::default_heartbeat_interval_ms")]
     pub gossipsub_heartbeat_interval_ms: u64,
 
+    /// Delay before the first gossipsub heartbeat; defaults to the heartbeat interval.
+    /// Until it fires the mesh only holds the first `mesh_n_low` peers to subscribe and no
+    /// IHAVE gossip is sent, so libp2p's 5 s default isolates regions during short warmups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gossipsub_heartbeat_initial_delay_ms: Option<u64>,
+
     /// Same-subnet local aggregators that every signing node keeps as explicit peers.
     #[serde(default)]
     pub gossipsub_explicit_aggregator_count: usize,
@@ -172,12 +178,25 @@ impl ExperimentConfig {
         Ok(())
     }
 
+    /// Host count when every validator runs on its own host. Hosts that run several
+    /// validators (see the launcher's `validator_map`) reduce the actual count.
     pub fn total_nodes(&self) -> usize {
         self.validator_count + self.global_aggregator_count
     }
 
+    pub fn heartbeat_initial_delay_ms(&self) -> u64 {
+        self.gossipsub_heartbeat_initial_delay_ms
+            .unwrap_or(self.gossipsub_heartbeat_interval_ms)
+    }
+
     pub fn validators_per_subnet(&self) -> usize {
         self.validator_count / self.subnet_count
+    }
+
+    /// Validators are split into contiguous, equally sized subnets by id.
+    pub fn subnet_for_validator(&self, validator_id: u32) -> u32 {
+        let subnet = validator_id as usize / self.validators_per_subnet().max(1);
+        subnet.min(self.subnet_count.saturating_sub(1)) as u32
     }
 }
 
@@ -204,7 +223,21 @@ pub struct NodeConfig {
     /// The local aggregators selected by this signing node. These must be ready before signing.
     #[serde(default)]
     pub selected_aggregator_addrs: Vec<String>,
+    /// Validators run by this host. Empty means a single validator whose id is `node_id`.
+    #[serde(default)]
+    pub validator_ids: Vec<u32>,
     pub experiment: ExperimentConfig,
+}
+
+impl NodeConfig {
+    /// Validators whose signatures this host publishes. Global aggregators sign nothing.
+    pub fn signing_validator_ids(&self) -> Vec<u32> {
+        match self.role {
+            NodeRole::GlobalAggregator => Vec::new(),
+            _ if self.validator_ids.is_empty() => vec![self.node_id],
+            _ => self.validator_ids.clone(),
+        }
+    }
 }
 
 fn default_run_timeout() -> u64 {

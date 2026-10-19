@@ -1,4 +1,4 @@
-use leansim::config::experiment::{ExperimentConfig, NetworkDefaults};
+use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole};
 
 fn base_config() -> ExperimentConfig {
     ExperimentConfig {
@@ -21,6 +21,7 @@ fn base_config() -> ExperimentConfig {
         gossipsub_mesh_n_high: 12,
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
+        gossipsub_heartbeat_initial_delay_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
         network_defaults: NetworkDefaults::default(),
@@ -183,4 +184,75 @@ fn total_nodes_count() {
     let exp = base_config();
     // 100 validators, including 2 local aggregators in each subnet, + 5 global = 105
     assert_eq!(exp.total_nodes(), 105);
+}
+
+#[test]
+fn validators_map_to_contiguous_subnets() {
+    let exp = base_config();
+    // 100 validators / 4 subnets = 25 per subnet
+    assert_eq!(exp.subnet_for_validator(0), 0);
+    assert_eq!(exp.subnet_for_validator(24), 0);
+    assert_eq!(exp.subnet_for_validator(25), 1);
+    assert_eq!(exp.subnet_for_validator(99), 3);
+}
+
+fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
+    NodeConfig {
+        node_id: 7,
+        role,
+        subnet_id: 0,
+        listen_addr: "/ip4/10.0.0.1/udp/9090/quic-v1".into(),
+        seed_addrs: vec![],
+        explicit_peer_addrs: vec![],
+        selected_aggregator_addrs: vec![],
+        validator_ids,
+        experiment: base_config(),
+    }
+}
+
+#[test]
+fn host_without_validator_ids_signs_as_its_node_id() {
+    let node = node_config(NodeRole::Validator, vec![]);
+    assert_eq!(node.signing_validator_ids(), vec![7]);
+}
+
+#[test]
+fn host_signs_for_every_colocated_validator() {
+    let node = node_config(NodeRole::LocalAggregator, vec![3, 40, 41]);
+    assert_eq!(node.signing_validator_ids(), vec![3, 40, 41]);
+}
+
+#[test]
+fn global_aggregator_never_signs() {
+    let node = node_config(NodeRole::GlobalAggregator, vec![]);
+    assert!(node.signing_validator_ids().is_empty());
+}
+
+#[test]
+fn validator_ids_default_to_empty_in_node_toml() {
+    let node: NodeConfig = toml::from_str(
+        r#"
+node_id = 2
+role = "validator"
+subnet_id = 0
+listen_addr = "/ip4/10.0.0.3/udp/9090/quic-v1"
+seed_addrs = []
+
+[experiment]
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert!(node.validator_ids.is_empty());
+    assert_eq!(node.signing_validator_ids(), vec![2]);
+}
+
+#[test]
+fn heartbeat_initial_delay_defaults_to_interval() {
+    let mut exp = base_config();
+    assert_eq!(exp.heartbeat_initial_delay_ms(), 1000);
+    exp.gossipsub_heartbeat_initial_delay_ms = Some(5000);
+    assert_eq!(exp.heartbeat_initial_delay_ms(), 5000);
 }

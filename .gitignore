@@ -10,6 +10,7 @@ metrics.json
 topology.gml
 /docker-output/
 /output/
+/output-*/
 /.venv/
 __pycache__/
 *.pyc

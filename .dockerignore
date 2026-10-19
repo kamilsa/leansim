@@ -14,3 +14,4 @@ scripts/
 shadow-sim.py
 pyproject.toml
 uv.lock
+located-map.csv

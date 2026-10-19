@@ -368,6 +368,7 @@ fn convert_event(event: &JsonlEvent, peer_to_node: &HashMap<String, u32>) -> Opt
             seq,
             ts_ms,
             byte_size,
+            ..
         } => Some(format!(
             "[{}, {}, \"ss\", {}, {}, {}]",
             ts_ms * 1000,
@@ -384,6 +385,7 @@ fn convert_event(event: &JsonlEvent, peer_to_node: &HashMap<String, u32>) -> Opt
             duplicate,
             ts_ms,
             byte_size,
+            ..
         } => {
             let code = if *duplicate { "sd" } else { "sr" };
             let peer_idx = peer_to_node.get(from_peer_id).copied().unwrap_or(*from_id);

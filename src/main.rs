@@ -67,12 +67,16 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         .validate()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let state = Arc::new(leansim::node::state::NodeState::new(
-        node_config.node_id,
-        node_config.role,
-        node_config.subnet_id,
-        node_config.experiment.clone(),
-    ));
+    let state = Arc::new(
+        leansim::node::state::NodeState::new(
+            node_config.node_id,
+            node_config.role,
+            node_config.subnet_id,
+            node_config.experiment.clone(),
+        )
+        .with_validator_ids(node_config.signing_validator_ids()),
+    );
+    let signing_subnets = state.signing_subnets();
     let mut explicit_peers = leansim::network::swarm::ExplicitPeerManager::new(
         &node_config.explicit_peer_addrs,
         &node_config.selected_aggregator_addrs,
@@ -88,6 +92,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &mut swarm,
         node_config.role,
         node_config.subnet_id,
+        &signing_subnets,
         &node_config.experiment.run_id,
     )?;
 
@@ -96,32 +101,25 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         peer_id: swarm.local_peer_id().to_base58(),
     });
 
-    let selected_aggregator_topic = (node_config.role != NodeRole::GlobalAggregator).then(|| {
-        libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(
-            &node_config.experiment.run_id,
-            node_config.subnet_id,
-        ))
-    });
+    let selected_aggregator_topics: Vec<_> = signing_subnets
+        .iter()
+        .map(|&subnet| {
+            libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(
+                &node_config.experiment.run_id,
+                subnet,
+            ))
+        })
+        .collect();
     leansim::network::swarm::dial_seeds(
         &mut swarm,
         &node_config.seed_addrs,
         &mut explicit_peers,
-        selected_aggregator_topic.as_ref(),
+        &selected_aggregator_topics,
     )
     .await?;
 
-    if node_config.role != NodeRole::GlobalAggregator {
+    if !state.validator_ids.is_empty() {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
-        let sig_size = node_config.experiment.signature_payload_bytes as u64;
-        state.bytes_sent_sig.fetch_add(sig_size, Ordering::Relaxed);
-        state.msgs_sent_sig.fetch_add(1, Ordering::Relaxed);
-        emit(&JsonlEvent::SigSent {
-            node_id: state.node_id,
-            subnet_id: state.subnet_id,
-            seq: state.seq_counter.load(std::sync::atomic::Ordering::SeqCst),
-            ts_ms: state.elapsed_ms(),
-            byte_size: node_config.experiment.signature_payload_bytes as u64,
-        });
     }
     if node_config.role == NodeRole::LocalAggregator {
         leansim::node::local_aggregator::record_own_signature(&state, &mut swarm).await?;
@@ -155,6 +153,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 match &wire_msg {
                     WireMessage::ValidatorSignature {
                         sender_id,
+                        validator_id,
                         subnet_id,
                         ..
                     } => {
@@ -165,6 +164,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                         emit(&JsonlEvent::SigReceived {
                             node_id: state.node_id,
                             from_id: *sender_id,
+                            validator_id: Some(*validator_id),
                             from_peer_id: from_peer_str,
                             subnet_id: *subnet_id,
                             duplicate: is_dup,
