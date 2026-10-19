@@ -6,6 +6,8 @@
 """Generate and run a leansim Shadow experiment."""
 
 import argparse
+import csv
+import functools
 import json
 import math
 import os
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
 
@@ -111,6 +114,14 @@ def validate_experiment(config: dict) -> None:
         die("proof_payload_bytes must be greater than zero")
     if not isinstance(setting(config, "gossipsub_flood_publish", False), bool):
         die("gossipsub_flood_publish must be a boolean")
+    if "gossipsub_heartbeat_initial_delay_ms" in config:
+        as_int(config["gossipsub_heartbeat_initial_delay_ms"], "gossipsub_heartbeat_initial_delay_ms", minimum=0)
+    validator_map = config.get("validator_map")
+    if validator_map is not None:
+        if not isinstance(validator_map, str) or not validator_map.strip():
+            die("validator_map must be a non-empty path string")
+        if not resolve_path(validator_map).is_file():
+            die(f"validator_map file not found: {resolve_path(validator_map)}")
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -247,15 +258,110 @@ def global_aggregator_ip(node_id: int) -> str:
     return f"10.255.{node_id // 254}.{node_id % 254 + 1}"
 
 
+@functools.lru_cache(maxsize=None)
+def load_validator_map(path: Path) -> tuple[tuple[int, str], ...]:
+    """Read a located-map CSV as sorted (validator_index, peer_key) pairs.
+
+    A validator observed behind several peers is placed on the peer seen in the
+    most windows; ties keep the earliest row.
+    """
+    best: dict[int, tuple[int, str]] = {}
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+            try:
+                validator_col, peer_col, windows_col = (header.index(name) for name in ("validator_index", "peer_key", "n_windows"))
+            except ValueError:
+                die(f"{path} must have validator_index, peer_key, and n_windows columns")
+            for line, row in enumerate(reader, start=2):
+                try:
+                    validator, windows = int(row[validator_col]), int(row[windows_col])
+                except (IndexError, ValueError):
+                    die(f"{path}:{line}: malformed row")
+                current = best.get(validator)
+                if current is None or windows > current[0]:
+                    best[validator] = (windows, row[peer_col])
+    except OSError as error:
+        die(f"reading validator_map: {error}")
+    return tuple(sorted((validator, peer) for validator, (_, peer) in best.items()))
+
+
+def place_validators(experiment: dict) -> list[dict]:
+    """Group validators into physical hosts, ordered by their lowest validator id.
+
+    Without a validator_map every validator runs on its own host. With one, the
+    run samples validator_count distinct validators from the map and validators
+    sharing a peer_key share a host, so hosts can be fewer than validators.
+    """
+    count = experiment["validator_count"]
+    map_path = experiment.get("validator_map")
+    if not map_path:
+        return [{"validator_ids": [validator]} for validator in range(count)]
+    entries = load_validator_map(resolve_path(map_path))
+    if count > len(entries):
+        die(f"validator_count {count} exceeds the {len(entries)} validators in {map_path}")
+    sample = random.Random(experiment["geo_seed"] + 3).sample(entries, count)
+    hosts: dict[str, dict] = {}
+    for validator_id, (source_index, peer_key) in enumerate(sample):
+        host = hosts.setdefault(peer_key, {"peer_key": peer_key, "validator_ids": [], "source_validator_indices": []})
+        host["validator_ids"].append(validator_id)
+        host["source_validator_indices"].append(source_index)
+    return list(hosts.values())
+
+
 def assign_nodes(experiment: dict) -> list[dict]:
+    subnet_count = experiment["subnet_count"]
+    validators_per_subnet = experiment["validator_count"] // subnet_count
+    aggregators_per_subnet = experiment["local_aggregators_per_subnet"]
+    hosts = place_validators(experiment)
+    host_of = {validator: index for index, host in enumerate(hosts) for validator in host["validator_ids"]}
+
+    # Mirrors "the first local_aggregators_per_subnet validators aggregate": walk each
+    # subnet's validators in id order and promote their hosts, one subnet per host.
+    aggregated_subnet: dict[int, int] = {}
+    for subnet in range(subnet_count):
+        chosen = 0
+        for validator in range(subnet * validators_per_subnet, (subnet + 1) * validators_per_subnet):
+            if chosen == aggregators_per_subnet:
+                break
+            if host_of[validator] not in aggregated_subnet:
+                aggregated_subnet[host_of[validator]] = subnet
+                chosen += 1
+        if chosen < aggregators_per_subnet:
+            die(
+                f"subnet {subnet} has only {chosen} hosts available as local aggregators; "
+                "lower local_aggregators_per_subnet"
+            )
+
     nodes: list[dict] = []
-    validators_per_subnet = experiment["validator_count"] // experiment["subnet_count"]
-    for subnet in range(experiment["subnet_count"]):
-        for validator in range(validators_per_subnet):
-            role = "local_aggregator" if validator < experiment["local_aggregators_per_subnet"] else "validator"
-            nodes.append({"node_id": len(nodes), "role": role, "subnet_id": subnet, "ip": subnet_ip(subnet, validator)})
+    hosts_per_subnet: Counter[int] = Counter()
+    for index, host in enumerate(hosts):
+        validator_ids = host["validator_ids"]
+        signing_subnets = sorted({validator // validators_per_subnet for validator in validator_ids})
+        subnet = aggregated_subnet.get(index, signing_subnets[0])
+        node = {
+            "node_id": len(nodes),
+            "role": "local_aggregator" if index in aggregated_subnet else "validator",
+            "subnet_id": subnet,
+            "ip": subnet_ip(subnet, hosts_per_subnet[subnet]),
+            "validator_ids": validator_ids,
+            "signing_subnets": signing_subnets,
+        }
+        hosts_per_subnet[subnet] += 1
+        if "peer_key" in host:
+            node["peer_key"] = host["peer_key"]
+            node["source_validator_indices"] = host["source_validator_indices"]
+        nodes.append(node)
     for _ in range(experiment["global_aggregator_count"]):
-        nodes.append({"node_id": len(nodes), "role": "global_aggregator", "subnet_id": 0, "ip": global_aggregator_ip(len(nodes))})
+        nodes.append({
+            "node_id": len(nodes),
+            "role": "global_aggregator",
+            "subnet_id": 0,
+            "ip": global_aggregator_ip(len(nodes)),
+            "validator_ids": [],
+            "signing_subnets": [],
+        })
     for node in nodes:
         node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
 
@@ -265,15 +371,18 @@ def assign_nodes(experiment: dict) -> list[dict]:
         node["selected_aggregator_ids"] = []
 
     if explicit_count:
-        for subnet in range(experiment["subnet_count"]):
-            signing_nodes = [node for node in nodes if node["subnet_id"] == subnet and node["role"] != "global_aggregator"]
-            aggregators = [node for node in signing_nodes if node["role"] == "local_aggregator"]
-            for node in signing_nodes:
-                candidates = [aggregator for aggregator in aggregators if aggregator["node_id"] != node["node_id"]]
-                rng = random.Random(experiment["geo_seed"] + node["node_id"])
+        aggregators_by_subnet: defaultdict[int, list[dict]] = defaultdict(list)
+        for node in nodes:
+            if node["role"] == "local_aggregator":
+                aggregators_by_subnet[node["subnet_id"]].append(node)
+        for node in nodes:
+            rng = random.Random(experiment["geo_seed"] + node["node_id"])
+            # A host selects aggregators in every subnet its validators sign in.
+            for subnet in node["signing_subnets"]:
+                candidates = [aggregator for aggregator in aggregators_by_subnet[subnet] if aggregator["node_id"] != node["node_id"]]
                 rng.shuffle(candidates)
                 selected = candidates[:explicit_count]
-                node["selected_aggregator_ids"] = [aggregator["node_id"] for aggregator in selected]
+                node["selected_aggregator_ids"].extend(aggregator["node_id"] for aggregator in selected)
                 for aggregator in selected:
                     node["explicit_peer_addrs"].add(aggregator["listen_addr"])
                     # Explicit peers must be configured on both ends to avoid mesh GRAFT/PRUNE churn.
@@ -375,6 +484,12 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     shutil.rmtree(configs_dir, ignore_errors=True)
     configs_dir.mkdir()
     nodes = assign_nodes(experiment)
+    if experiment.get("validator_map"):
+        per_host = [len(node["validator_ids"]) for node in nodes if node["validator_ids"]]
+        log(
+            f"placed {sum(per_host)} validators on {len(per_host)} physical hosts "
+            f"(max {max(per_host)} per host, {sum(1 for n in per_host if n > 1)} hosts with several)"
+        )
     countries: list[str] | None = None
     latency: dict | None = None
     if experiment["use_geo_latency"]:
@@ -397,6 +512,7 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
                 "seed_addrs": node["seed_addrs"],
                 "explicit_peer_addrs": node["explicit_peer_addrs"],
                 "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
+                "validator_ids": node["validator_ids"],
                 "experiment": experiment,
             },
         )

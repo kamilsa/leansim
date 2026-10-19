@@ -9,7 +9,10 @@ pub type MessageId = [u8; 32];
 pub enum WireMessage {
     ValidatorSignature {
         run_id: String,
+        /// Host (physical node) that published the signature.
         sender_id: u32,
+        /// Logical validator that signed. A host may run several validators.
+        validator_id: u32,
         subnet_id: u32,
         sequence_id: u64,
         created_timestamp_ms: u64,
@@ -55,6 +58,7 @@ impl WireMessage {
             Self::ValidatorSignature {
                 run_id,
                 sender_id,
+                validator_id,
                 subnet_id,
                 sequence_id,
                 created_timestamp_ms,
@@ -62,6 +66,7 @@ impl WireMessage {
             } => Self::ValidatorSignature {
                 run_id,
                 sender_id,
+                validator_id,
                 subnet_id,
                 sequence_id,
                 created_timestamp_ms,
@@ -136,6 +141,7 @@ mod tests {
         let a = WireMessage::ValidatorSignature {
             run_id: "test".into(),
             sender_id: 1,
+            validator_id: 1,
             subnet_id: 0,
             sequence_id: 1,
             created_timestamp_ms: 100,
@@ -150,6 +156,7 @@ mod tests {
         let a = WireMessage::ValidatorSignature {
             run_id: "test".into(),
             sender_id: 1,
+            validator_id: 1,
             subnet_id: 0,
             sequence_id: 1,
             created_timestamp_ms: 100,
@@ -158,10 +165,34 @@ mod tests {
         let b = WireMessage::ValidatorSignature {
             run_id: "test".into(),
             sender_id: 2,
+            validator_id: 2,
             subnet_id: 0,
             sequence_id: 1,
             created_timestamp_ms: 100,
             padding: vec![0u8; 16],
+        };
+        assert_ne!(a.message_id(), b.message_id());
+    }
+
+    #[test]
+    fn message_id_differs_per_validator_on_same_host() {
+        let a = WireMessage::ValidatorSignature {
+            run_id: "test".into(),
+            sender_id: 1,
+            validator_id: 10,
+            subnet_id: 0,
+            sequence_id: 1,
+            created_timestamp_ms: 100,
+            padding: vec![],
+        };
+        let b = WireMessage::ValidatorSignature {
+            run_id: "test".into(),
+            sender_id: 1,
+            validator_id: 11,
+            subnet_id: 0,
+            sequence_id: 1,
+            created_timestamp_ms: 100,
+            padding: vec![],
         };
         assert_ne!(a.message_id(), b.message_id());
     }
@@ -172,6 +203,7 @@ mod tests {
             WireMessage::ValidatorSignature {
                 run_id: "r1".into(),
                 sender_id: 0,
+                validator_id: 0,
                 subnet_id: 1,
                 sequence_id: 42,
                 created_timestamp_ms: 1000,

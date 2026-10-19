@@ -12,6 +12,9 @@ pub enum JsonlEvent {
     },
     SigSent {
         node_id: u32,
+        /// Logical validator that signed; absent in logs from before multi-validator hosts.
+        #[serde(default)]
+        validator_id: Option<u32>,
         subnet_id: u32,
         seq: u64,
         ts_ms: u64,
@@ -19,7 +22,10 @@ pub enum JsonlEvent {
     },
     SigReceived {
         node_id: u32,
+        /// Host that originally published the signature.
         from_id: u32,
+        #[serde(default)]
+        validator_id: Option<u32>,
         #[serde(default)]
         from_peer_id: String,
         subnet_id: u32,

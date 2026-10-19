@@ -111,10 +111,13 @@ def event_files(output_dir):
     return sorted(path for path in hosts_dir.glob("*/*stdout*") if path.is_file())
 
 
-def validator_key(event, peer_ids):
-    source_id = integer(event.get("from_id"))
-    if source_id is not None:
-        return "node:" + str(source_id)
+def validator_key(event, host_field):
+    """Identify the signing validator; older logs only carry the host id, which then equals it."""
+    validator_id = integer(event.get("validator_id"))
+    if validator_id is None:
+        validator_id = integer(event.get(host_field))
+    if validator_id is not None:
+        return "validator:" + str(validator_id)
     peer_id = event.get("from_peer_id")
     if isinstance(peer_id, str) and peer_id:
         return "peer:" + peer_id
@@ -127,7 +130,8 @@ def build_snapshot(output_dir):
     metadata = metadata_for(output_dir)
     peer_ids = {}
     sent_times = []
-    sent_by_node = {}
+    sent_by_node = defaultdict(list)
+    signing_hosts = set()
     sent_sources_by_subnet = defaultdict(set)
     received_by_node_subnet = defaultdict(dict)
     validator_arrivals = {}
@@ -174,12 +178,15 @@ def build_snapshot(output_dir):
                 timestamp = number(event.get("ts_ms"))
                 node_id = integer(event.get("node_id"))
                 subnet_id = integer(event.get("subnet_id"))
+                key = validator_key(event, "node_id")
                 if timestamp is not None:
                     sent_times.append(timestamp)
-                if node_id is not None and subnet_id is not None:
-                    sent_sources_by_subnet[subnet_id].add("node:" + str(node_id))
+                if node_id is not None:
+                    signing_hosts.add(node_id)
+                if node_id is not None and subnet_id is not None and key is not None:
+                    sent_sources_by_subnet[subnet_id].add(key)
                     if timestamp is not None:
-                        sent_by_node[node_id] = (subnet_id, timestamp)
+                        sent_by_node[node_id].append((subnet_id, key, timestamp))
             elif name == "SigReceived":
                 total_sig_received += 1
                 duplicate = event.get("duplicate") is True
@@ -190,7 +197,7 @@ def build_snapshot(output_dir):
                 timestamp = number(event.get("ts_ms"))
                 node_id = integer(event.get("node_id"))
                 subnet_id = integer(event.get("subnet_id"))
-                key = validator_key(event, peer_ids)
+                key = validator_key(event, "from_id")
                 if timestamp is not None and key is not None:
                     previous = validator_arrivals.get(key)
                     if previous is None or timestamp < previous:
@@ -245,9 +252,10 @@ def build_snapshot(output_dir):
             if node_id is None:
                 continue
             received = dict(received_by_node_subnet.get((node_id, subnet_id), {}))
-            own_signature = sent_by_node.get(node_id)
-            if own_signature is not None and own_signature[0] == subnet_id:
-                received.setdefault("node:" + str(node_id), own_signature[1])
+            # An aggregating host holds its own validators' signatures without gossip.
+            for own_subnet, key, own_time in sent_by_node.get(node_id, ()):
+                if own_subnet == subnet_id:
+                    received.setdefault(key, own_time)
             expected = len(sent_sources_by_subnet.get(subnet_id, set()))
             if not expected:
                 expected = len(received)
@@ -262,6 +270,38 @@ def build_snapshot(output_dir):
             proof_times.append(proof_time)
     else:
         proof_times = [proof_time for _, _, proof_time in local_proofs]
+
+    # Per signing host: time from the first signature sent until the host holds at
+    # least threshold_fraction of its subnet's signatures, its own validators included.
+    node_threshold = None
+    if threshold_fraction is not None and sent_times:
+        slot_start = min(sent_times)
+        reached = []
+        population = 0
+        for node_id, own_signatures in sent_by_node.items():
+            for subnet_id in sorted({subnet for subnet, _, _ in own_signatures}):
+                population += 1
+                held = dict(received_by_node_subnet.get((node_id, subnet_id), {}))
+                for own_subnet, key, own_time in own_signatures:
+                    if own_subnet == subnet_id:
+                        held.setdefault(key, own_time)
+                needed = math.ceil(len(sent_sources_by_subnet[subnet_id]) * threshold_fraction - 1e-9)
+                if needed and len(held) >= needed:
+                    reached.append(sorted(held.values())[needed - 1] - slot_start)
+        reached.sort()
+
+        def node_percentile(percent):
+            # Hosts that never reached the threshold count as infinitely late.
+            index = math.ceil(population * percent / 100) - 1
+            return reached[index] if 0 <= index < len(reached) else None
+
+        node_threshold = {
+            "nodes": population,
+            "reached": len(reached),
+            "p50": node_percentile(50),
+            "p95": node_percentile(95),
+            "max": node_percentile(100),
+        }
 
     local_by_subnet = {str(subnet): latency_stats(values) for subnet, values in sorted(local_latencies.items())}
     nodes = []
@@ -288,6 +328,7 @@ def build_snapshot(output_dir):
             "duplicate_signature_events": duplicate_sigs,
             "duplicate_to_unique_ratio": ratio,
             "unique_validators": unique_validators,
+            "signing_hosts": len(signing_hosts),
             "signature_arrival_ms": {"p50": arrival_at(50), "p90": arrival_at(90), "p95": arrival_at(95), "p99": arrival_at(99)},
             "local_proof_latency_ms_by_subnet": local_by_subnet,
             "global_proof_latency_ms": latency_stats(global_latencies),
@@ -298,6 +339,7 @@ def build_snapshot(output_dir):
                 "local_proof_published": median(proof_times),
             },
             "threshold_fraction": threshold_fraction,
+            "node_threshold_ms": node_threshold,
         },
         "cdf": cdf,
         "node_stats": nodes,
@@ -384,9 +426,10 @@ function draw(snapshot) {
   const metrics = snapshot.metrics;
   card('run-name', label(snapshot));
   card('bytes', bytes(metrics.total_bytes));
-  card('validators', number(metrics.unique_validators));
+  card('validators', number(metrics.unique_validators) + (metrics.signing_hosts ? ' on ' + number(metrics.signing_hosts) + ' hosts' : ''));
   card('duplicates', number(metrics.duplicate_signature_events) + ' / ' + number(metrics.duplicate_to_unique_ratio));
   card('arrival', number(metrics.signature_arrival_ms.p90) + ' ms');
+  card('node-threshold', metrics.node_threshold_ms ? number(metrics.node_threshold_ms.p95) + ' ms' : '-');
   const cdf = snapshot.cdf || [];
   Plotly.react('cdf', [{mode: 'lines+markers', x: cdf.map(point => point.time_ms), y: cdf.map(point => point.percent), line: {color: '#e07a4f'}, marker: {size: 5}}], {
     title: 'Unique validator signature arrival', xaxis: {title: 'time (ms)'}, yaxis: {title: 'validators reached (%)', range: [0, 100]}, margin: {t: 42, l: 65, r: 15, b: 55}, paper_bgcolor: '#fffdf8', plot_bgcolor: '#fffdf8'
@@ -441,7 +484,7 @@ body { max-width: 1400px; margin: 0 auto; padding: 28px; } h1 { margin: 0 0 5px;
 table { width: 100%; border-collapse: collapse; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .86rem; } th, td { padding: 9px; text-align: left; border-bottom: 1px solid #e6dfd1; } th { color: #665f52; } tbody tr { cursor: pointer; } tbody tr:hover, tbody tr.selected { background: #f1e5c6; }
 select { margin: 10px 10px 0; padding: 5px; } @media (max-width: 780px) { body { padding: 14px; } .cards, .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .table-wrap { overflow-x: auto; } }
 </style></head><body><h1>leanSim run analysis</h1><p class="sub" id="run-name"></p>
-<section class="cards"><div class="card"><span class="label">Event bytes</span><b id="bytes"></b></div><div class="card"><span class="label">Unique validators</span><b id="validators"></b></div><div class="card"><span class="label">Duplicates / ratio</span><b id="duplicates"></b></div><div class="card"><span class="label">90% arrival</span><b id="arrival"></b></div><div class="card"><span class="label">History snapshots</span><b>""" + str(len(views)) + """</b></div></section>
+<section class="cards"><div class="card"><span class="label">Event bytes</span><b id="bytes"></b></div><div class="card"><span class="label">Unique validators</span><b id="validators"></b></div><div class="card"><span class="label">Duplicates / ratio</span><b id="duplicates"></b></div><div class="card"><span class="label">90% arrival</span><b id="arrival"></b></div><div class="card"><span class="label">p95 node at threshold</span><b id="node-threshold"></b></div><div class="card"><span class="label">History snapshots</span><b>""" + str(len(views)) + """</b></div></section>
 <section class="grid"><div class="panel"><div id="cdf"></div></div><div class="panel"><div id="local"></div></div><div class="panel wide"><label for="node-field">Per-node measure</label><select id="node-field"><option value="bytes_total">total bytes</option><option value="bytes_sent">bytes sent</option><option value="bytes_received">bytes received</option><option value="msgs_total">total messages</option><option value="msgs_sent">messages sent</option><option value="msgs_received">messages received</option></select><div id="nodes"></div></div>
 <div class="panel wide table-wrap"><table><thead><tr><th>Run</th><th>Seed</th><th>Index</th><th>Validators</th><th>90% arrival</th><th>Event bytes</th></tr></thead><tbody id="history-body"></tbody></table></div></section>
 <script id="snapshot-data" type="application/json">""" + report_data + """</script><script>""" + plotly_js + """</script><script>""" + INTERACTIVE_JS + """</script></body></html>"""
@@ -512,6 +555,30 @@ def self_test():
         overlay_metrics = build_snapshot(overlay_dir)["metrics"]
         assert overlay_metrics["stage_medians_ms"]["threshold_reached"] == 150
         assert overlay_metrics["stage_medians_ms"]["aggregation_compute"] == 20
+        colocated_dir = root / "colocated"
+        stdout = colocated_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        # Host 0 runs validators 0 and 1 and aggregates; host 1 runs validator 2.
+        stdout.write_text("\n".join((
+            '{"event":"SigSent","node_id":0,"validator_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
+            '{"event":"SigSent","node_id":0,"validator_id":1,"subnet_id":0,"seq":1,"ts_ms":101,"byte_size":10}',
+            '{"event":"SigSent","node_id":1,"validator_id":2,"subnet_id":0,"seq":0,"ts_ms":110,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":140,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":1,"subnet_id":0,"duplicate":false,"ts_ms":141,"byte_size":10}',
+            '{"event":"SigReceived","node_id":0,"from_id":1,"validator_id":2,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":10}',
+            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":3,"latency_ms":170,"byte_size":50}',
+        )), encoding="utf-8")
+        (colocated_dir / "run-manifest.json").write_text(
+            json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8"
+        )
+        colocated_metrics = build_snapshot(colocated_dir)["metrics"]
+        assert colocated_metrics["unique_validators"] == 3
+        assert colocated_metrics["signing_hosts"] == 2
+        assert colocated_metrics["stage_medians_ms"]["threshold_reached"] == 150
+        # Host 0 holds 0 and 1 at once and gets 2 at 150; host 1 gets 0 and 1 by 141.
+        node_threshold = colocated_metrics["node_threshold_ms"]
+        assert node_threshold["nodes"] == 2 and node_threshold["reached"] == 2
+        assert node_threshold["p50"] == 41 and node_threshold["max"] == 50
         history = merge_history([], [primary, overlay], append=False)
         assert len(history) == 2
         assert len(merge_history(history, [primary, overlay], append=False)) == 2
