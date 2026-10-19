@@ -175,16 +175,17 @@ fn build_gossipsub(
     .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
 }
 
-/// Subscribes to the topics relevant to the given role. A host joins the subnet of every
-/// validator it runs; a local aggregator also joins the subnet it collects.
+/// Subscribes to the topics relevant to the given role. A host joins every subnet in
+/// `subscribed_subnets` (its gossip membership, independent of what it publishes);
+/// aggregating or globally-aggregating roles also join the aggregation topic.
 pub fn subscribe_to_topics(
     swarm: &mut Swarm<GossipsubBehaviour>,
     role: NodeRole,
     subnet_id: u32,
-    signing_subnets: &BTreeSet<u32>,
+    subscribed_subnets: &BTreeSet<u32>,
     run_id: &str,
 ) -> Result<()> {
-    let mut subnets = signing_subnets.clone();
+    let mut subnets = subscribed_subnets.clone();
     if role == NodeRole::LocalAggregator {
         subnets.insert(subnet_id);
     }
@@ -192,7 +193,7 @@ pub fn subscribe_to_topics(
         let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
         swarm.behaviour_mut().subscribe(&topic)?;
     }
-    if role != NodeRole::Validator {
+    if matches!(role, NodeRole::LocalAggregator | NodeRole::GlobalAggregator) {
         let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
         swarm.behaviour_mut().subscribe(&agg_topic)?;
     }

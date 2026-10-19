@@ -124,5 +124,101 @@ class ValidatorMapPlacementTests(unittest.TestCase):
             shadow_sim.assign_nodes(self.experiment(validator_count=12, local_aggregators_per_subnet=12))
 
 
+class NodeMapPlacementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.map_path = Path(directory.name) / "nodes.csv"
+        rows = ["node_type,peer_key,validator_count,validator_indices,routes,max_windows,source_file,receipts,first_seen_s,last_seen_s"]
+        # 6 validator nodes with 4/2/1/1/1/1 validators, and 3 no_validator relays:
+        # 9 hosts, 4 subnets, 2 subscriptions each, so every subnet has enough
+        # distinct subscribers to promote one aggregator from.
+        rows.append("validator,A,4,0;1;2;3,agg;att,5,roster.json,100,1,2")
+        rows.append("validator,B,2,4;5,agg,3,roster.json,100,1,2")
+        rows.append("validator,C,1,6,att,2,roster.json,100,1,2")
+        rows.append("validator,D,1,7,att,2,roster.json,100,1,2")
+        rows.append("validator,E,1,8,att,2,roster.json,100,1,2")
+        rows.append("validator,F,1,9,att,2,roster.json,100,1,2")
+        rows.append("no_validator,R1,0,,,0,roster.json,500,1,2")
+        rows.append("no_validator,R2,0,,,0,roster.json,500,1,2")
+        rows.append("no_validator,R3,0,,,0,roster.json,500,1,2")
+        self.map_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        shadow_sim.load_node_map.cache_clear()
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {
+            "run_id": "test",
+            "validator_count": 10,
+            "subnet_count": 4,
+            "local_aggregators_per_subnet": 1,
+            "global_aggregator_count": 0,
+            "geo_seed": 7,
+            "node_map": str(self.map_path),
+            "subnet_subscriptions_per_node": 2,
+        }
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_all_validators_placed_on_map_hosts(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        placed = sorted(v for node in nodes for v in node["validator_ids"])
+        self.assertEqual(placed, list(range(10)))
+        by_peer = {node["peer_key"]: node for node in nodes}
+        self.assertEqual(sum(len(node["validator_ids"]) for node in nodes), 10)
+        # Slot sampling can split a node's slots, but never exceeds its capacity.
+        for peer, capacity in (("A", 4), ("B", 2), ("C", 1)):
+            self.assertLessEqual(len(by_peer[peer]["validator_ids"]), capacity)
+        self.assertEqual(len({node["ip"] for node in nodes}), len(nodes))
+
+    def test_relay_hosts_carry_no_validators(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        relays = [node for node in nodes if node["role"] == "relay"]
+        self.assertTrue(relays)
+        for node in relays:
+            self.assertEqual(node["validator_ids"], [])
+            self.assertEqual(node["source_node_type"], "no_validator")
+            self.assertTrue(node["subscribed_subnets"])
+
+    def test_every_node_subscribes_to_two_subnets(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        for node in nodes:
+            if node["role"] in ("validator", "relay"):
+                self.assertEqual(len(node["subscribed_subnets"]), 2, node)
+            # Aggregators subscribe to their 2 random subnets plus the collected one.
+            if node["role"] == "local_aggregator":
+                self.assertLessEqual(len(node["subscribed_subnets"]), 3)
+                self.assertIn(node["subnet_id"], node["subscribed_subnets"])
+
+    def test_aggregators_are_subscribed_to_their_subnet(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        for subnet in range(4):
+            aggregators = [node for node in nodes if node["role"] == "local_aggregator" and node["subnet_id"] == subnet]
+            self.assertEqual(len(aggregators), 1)
+            self.assertIn(subnet, aggregators[0]["subscribed_subnets"])
+
+    def test_subscription_set_is_seeded(self) -> None:
+        first = shadow_sim.assign_nodes(self.experiment())
+        second = shadow_sim.assign_nodes(self.experiment())
+        self.assertEqual(first, second)
+
+    def test_publishing_subnets_are_independent_of_subscriptions(self) -> None:
+        experiment = self.experiment(validator_count=7, subnet_count=4)
+        nodes = shadow_sim.assign_nodes(experiment)
+        signing = [node for node in nodes if node["validator_ids"]]
+        self.assertTrue(signing)
+        # With 4 subnets and 2 random subscriptions, some host must publish to a
+        # subnet it is not subscribed to.
+        publishing_outside = any(
+            subnet not in node["subscribed_subnets"]
+            for node in signing
+            for subnet in node["signing_subnets"]
+        )
+        self.assertTrue(publishing_outside)
+
+    def test_too_few_subscribers_for_aggregators_fails(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.assign_nodes(self.experiment(local_aggregators_per_subnet=100))
+
+
 if __name__ == "__main__":
     unittest.main()

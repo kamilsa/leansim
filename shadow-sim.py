@@ -122,6 +122,17 @@ def validate_experiment(config: dict) -> None:
             die("validator_map must be a non-empty path string")
         if not resolve_path(validator_map).is_file():
             die(f"validator_map file not found: {resolve_path(validator_map)}")
+    node_map = config.get("node_map")
+    if node_map is not None:
+        if not isinstance(node_map, str) or not node_map.strip():
+            die("node_map must be a non-empty path string")
+        if not resolve_path(node_map).is_file():
+            die(f"node_map file not found: {resolve_path(node_map)}")
+        subscriptions = as_int(setting(config, "subnet_subscriptions_per_node", 2), "subnet_subscriptions_per_node", minimum=1)
+        if subscriptions > config["subnet_count"]:
+            die("subnet_subscriptions_per_node must not exceed subnet_count")
+    if config.get("subnet_subscriptions_per_node") is not None and node_map is None:
+        die("subnet_subscriptions_per_node requires node_map")
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -310,10 +321,81 @@ def place_validators(experiment: dict) -> list[dict]:
     return list(hosts.values())
 
 
+@functools.lru_cache(maxsize=None)
+def load_node_map(path: Path) -> tuple[tuple[str, int], ...]:
+    """Read a nodes.csv node map as (peer_key, validator_slots) pairs, one per node.
+
+    Each validator-hosting node contributes validator_count slots, so sampling
+    slots reproduces the real validators-per-node distribution; no_validator
+    nodes contribute zero slots and can only be picked as relays.
+    """
+    nodes: list[tuple[str, int]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            # validator_indices lists can exceed the default 128 KiB field limit
+            # (the largest node holds 19,524 validators).
+            csv.field_size_limit(sys.maxsize)
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames
+            if fieldnames is None or not {"peer_key", "node_type", "validator_count"}.issubset(fieldnames):
+                die(f"{path} must have peer_key, node_type, and validator_count columns")
+            for line, row in enumerate(reader, start=2):
+                try:
+                    slots = int(row["validator_count"])
+                except (TypeError, ValueError):
+                    die(f"{path}:{line}: validator_count must be an integer")
+                if slots < 0:
+                    die(f"{path}:{line}: validator_count must not be negative")
+                if (row["node_type"] or "").strip() == "no_validator":
+                    slots = 0
+                nodes.append(((row["peer_key"] or "").strip(), slots))
+    except OSError as error:
+        die(f"reading node_map: {error}")
+    return tuple(nodes)
+
+
+def place_nodes(experiment: dict) -> list[dict]:
+    """Ethereum-style host placement from a nodes.csv node map.
+
+    validator_count validator slots are sampled from the map's nodes, so the
+    validators-per-host distribution matches the real network; nodes that got
+    no slot are dropped, except no_validator nodes, which are sampled on top to
+    preserve their real share of the host population as gossip-only relays.
+    """
+    count = experiment["validator_count"]
+    entries = load_node_map(resolve_path(experiment["node_map"]))
+    total_slots = sum(slots for _, slots in entries)
+    if count > total_slots:
+        die(f"validator_count {count} exceeds the {total_slots} validator slots in {experiment['node_map']}")
+    rng = random.Random(experiment["geo_seed"] + 3)
+    slot_owners: list[str] = []
+    hosts: dict[str, dict] = {}
+    for peer_key, slots in entries:
+        for _ in range(slots):
+            slot_owners.append(peer_key)
+        hosts.setdefault(peer_key, {"peer_key": peer_key, "validator_ids": [], "relay": slots == 0})
+    for validator_id, peer_key in enumerate(rng.sample(slot_owners, count)):
+        host = hosts[peer_key]
+        host["validator_ids"].append(validator_id)
+    # Keep hosts that got validators, plus a proportional sample of no_validator relays.
+    kept = [host for host in hosts.values() if host["validator_ids"]]
+    relay_pool = [host for host in hosts.values() if host["relay"]]
+    if kept and relay_pool:
+        relay_target = len(kept) * len(relay_pool) // max(1, len(hosts) - len(relay_pool))
+        if relay_target:
+            kept.extend(rng.sample(relay_pool, min(relay_target, len(relay_pool))))
+    if not kept:
+        die(f"node_map {experiment['node_map']} has no validator-hosting nodes")
+    return kept
+
+
 def assign_nodes(experiment: dict) -> list[dict]:
     subnet_count = experiment["subnet_count"]
     validators_per_subnet = experiment["validator_count"] // subnet_count
     aggregators_per_subnet = experiment["local_aggregators_per_subnet"]
+    node_map = experiment.get("node_map")
+    if node_map:
+        return assign_nodes_from_node_map(experiment)
     hosts = place_validators(experiment)
     host_of = {validator: index for index, host in enumerate(hosts) for validator in host["validator_ids"]}
 
@@ -361,6 +443,114 @@ def assign_nodes(experiment: dict) -> list[dict]:
             "ip": global_aggregator_ip(len(nodes)),
             "validator_ids": [],
             "signing_subnets": [],
+        })
+    for node in nodes:
+        node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
+
+    explicit_count = experiment["gossipsub_explicit_aggregator_count"]
+    for node in nodes:
+        node["explicit_peer_addrs"] = set()
+        node["selected_aggregator_ids"] = []
+
+    if explicit_count:
+        aggregators_by_subnet: defaultdict[int, list[dict]] = defaultdict(list)
+        for node in nodes:
+            if node["role"] == "local_aggregator":
+                aggregators_by_subnet[node["subnet_id"]].append(node)
+        for node in nodes:
+            rng = random.Random(experiment["geo_seed"] + node["node_id"])
+            # A host selects aggregators in every subnet its validators sign in.
+            for subnet in node["signing_subnets"]:
+                candidates = [aggregator for aggregator in aggregators_by_subnet[subnet] if aggregator["node_id"] != node["node_id"]]
+                rng.shuffle(candidates)
+                selected = candidates[:explicit_count]
+                node["selected_aggregator_ids"].extend(aggregator["node_id"] for aggregator in selected)
+                for aggregator in selected:
+                    node["explicit_peer_addrs"].add(aggregator["listen_addr"])
+                    # Explicit peers must be configured on both ends to avoid mesh GRAFT/PRUNE churn.
+                    aggregator["explicit_peer_addrs"].add(node["listen_addr"])
+
+    all_addresses = [node["listen_addr"] for node in nodes]
+    for node in nodes:
+        explicit_addrs = sorted(node["explicit_peer_addrs"])
+        candidates = [
+            address for address in all_addresses
+            if address != node["listen_addr"] and address not in node["explicit_peer_addrs"]
+        ]
+        rng = random.Random(experiment["geo_seed"] + node["node_id"])
+        rng.shuffle(candidates)
+        node["explicit_peer_addrs"] = explicit_addrs
+        node["seed_addrs"] = explicit_addrs + candidates[:max(0, SEED_PEER_COUNT - len(explicit_addrs))]
+    return nodes
+
+
+def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
+    """Ethereum-style assignment: hosts and validator co-location come from a
+    nodes.csv node map; every node subscribes to subnet_subscriptions_per_node
+    random subnets, independent of the subnets its validators publish to; local
+    aggregators are promoted among the nodes subscribed to each subnet.
+    """
+    subnet_count = experiment["subnet_count"]
+    subscriptions_per_node = as_int(experiment["subnet_subscriptions_per_node"], "subnet_subscriptions_per_node", minimum=1)
+    if subscriptions_per_node > subnet_count:
+        die(f"subnet_subscriptions_per_node {subscriptions_per_node} exceeds subnet_count {subnet_count}")
+    hosts = place_nodes(experiment)
+    rng = random.Random(experiment["geo_seed"] + 5)
+
+    # Random gossip subscriptions, drawn per host so co-located validators share them.
+    subscribed: list[set[int]] = []
+    for host in hosts:
+        subscribed.append(set(rng.sample(range(subnet_count), subscriptions_per_node)))
+
+    # Local aggregators: for each subnet, promote hosts among its subscribers.
+    aggregator_for: dict[int, int] = {}  # host index -> subnet it aggregates
+    subscribers_by_subnet: dict[int, list[int]] = defaultdict(list)
+    for index in range(len(hosts)):
+        for subnet in subscribed[index]:
+            subscribers_by_subnet[subnet].append(index)
+    # Promote one subscribed host per subnet, scarcest subnet first so greedy
+    # selection does not strand a subnet whose subscribers were taken elsewhere.
+    for subnet in sorted(range(subnet_count), key=lambda s: len(subscribers_by_subnet.get(s, []))):
+        candidates = sorted(index for index in subscribers_by_subnet.get(subnet, []) if index not in aggregator_for)
+        if len(candidates) < experiment["local_aggregators_per_subnet"]:
+            die(
+                f"subnet {subnet} has only {len(candidates)} subscribed hosts available as local "
+                f"aggregators; lower local_aggregators_per_subnet or raise subnet_subscriptions_per_node"
+            )
+        for index in rng.sample(candidates, experiment["local_aggregators_per_subnet"]):
+            aggregator_for[index] = subnet
+
+    nodes: list[dict] = []
+    subnet_counter: Counter[int] = Counter()
+    for index, host in enumerate(hosts):
+        validator_ids = host["validator_ids"]
+        signing_subnets = sorted({validator // (experiment["validator_count"] // subnet_count) for validator in validator_ids})
+        role = "local_aggregator" if index in aggregator_for else ("relay" if not validator_ids else "validator")
+        subscriptions = sorted(subscribed[index])
+        subnet_id = aggregator_for.get(index, subscriptions[0] if subscriptions else 0)
+        node = {
+            "node_id": len(nodes),
+            "role": role,
+            "subnet_id": subnet_id,
+            "ip": subnet_ip(subnet_id, subnet_counter[subnet_id]),
+            "validator_ids": validator_ids,
+            "signing_subnets": signing_subnets,
+            "subscribed_subnets": sorted(subscribed[index] | ({subnet_id} if index in aggregator_for else set())),
+            "source_node_type": "no_validator" if host["relay"] else "validator",
+        }
+        subnet_counter[subnet_id] += 1
+        if "peer_key" in host:
+            node["peer_key"] = host["peer_key"]
+        nodes.append(node)
+    for _ in range(experiment["global_aggregator_count"]):
+        nodes.append({
+            "node_id": len(nodes),
+            "role": "global_aggregator",
+            "subnet_id": 0,
+            "ip": global_aggregator_ip(len(nodes)),
+            "validator_ids": [],
+            "signing_subnets": [],
+            "subscribed_subnets": [],
         })
     for node in nodes:
         node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
@@ -484,12 +674,15 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     shutil.rmtree(configs_dir, ignore_errors=True)
     configs_dir.mkdir()
     nodes = assign_nodes(experiment)
-    if experiment.get("validator_map"):
+    if experiment.get("validator_map") or experiment.get("node_map"):
         per_host = [len(node["validator_ids"]) for node in nodes if node["validator_ids"]]
         log(
             f"placed {sum(per_host)} validators on {len(per_host)} physical hosts "
             f"(max {max(per_host)} per host, {sum(1 for n in per_host if n > 1)} hosts with several)"
         )
+    if experiment.get("node_map"):
+        relays = [node for node in nodes if node["role"] == "relay"]
+        log(f"added {len(relays)} gossip-only relay hosts (no validators)")
     countries: list[str] | None = None
     latency: dict | None = None
     if experiment["use_geo_latency"]:
@@ -513,6 +706,7 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
                 "explicit_peer_addrs": node["explicit_peer_addrs"],
                 "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
                 "validator_ids": node["validator_ids"],
+                "subscribed_subnets": node.get("subscribed_subnets", []),
                 "experiment": experiment,
             },
         )

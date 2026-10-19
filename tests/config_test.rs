@@ -206,8 +206,22 @@ fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
         explicit_peer_addrs: vec![],
         selected_aggregator_addrs: vec![],
         validator_ids,
+        subscribed_subnets: vec![],
         experiment: base_config(),
     }
+}
+
+#[test]
+fn relay_signs_nothing_and_defaults_to_no_subscriptions() {
+    let node = node_config(NodeRole::Relay, vec![1, 2]);
+    assert!(node.signing_validator_ids().is_empty());
+}
+
+#[test]
+fn validator_less_local_aggregator_signs_nothing() {
+    // An aggregator-only host (e.g. a no_validator node promoted from the node map).
+    let node = node_config(NodeRole::LocalAggregator, vec![]);
+    assert!(node.signing_validator_ids().is_empty());
 }
 
 #[test]

@@ -207,6 +207,8 @@ pub enum NodeRole {
     Validator,
     LocalAggregator,
     GlobalAggregator,
+    /// Gossip-only node: subscribes to its assigned subnets and relays, signs nothing.
+    Relay,
 }
 
 /// Per-node configuration (generated or hand-written).
@@ -226,15 +228,22 @@ pub struct NodeConfig {
     /// Validators run by this host. Empty means a single validator whose id is `node_id`.
     #[serde(default)]
     pub validator_ids: Vec<u32>,
+    /// Subnets this host subscribes to (gossip membership), independent of the
+    /// subnets its validators publish to. Local aggregators add `subnet_id`, the
+    /// subnet they collect. Other roles default to the signing subnets.
+    #[serde(default)]
+    pub subscribed_subnets: Vec<u32>,
     pub experiment: ExperimentConfig,
 }
 
 impl NodeConfig {
-    /// Validators whose signatures this host publishes. Global aggregators sign nothing.
+    /// Validators whose signatures this host publishes. Global aggregators and relays
+    /// sign nothing; a validator-less local aggregator (an aggregator-only host) signs
+    /// nothing too. The node_id fallback exists for plain validator configs.
     pub fn signing_validator_ids(&self) -> Vec<u32> {
         match self.role {
-            NodeRole::GlobalAggregator => Vec::new(),
-            _ if self.validator_ids.is_empty() => vec![self.node_id],
+            NodeRole::GlobalAggregator | NodeRole::Relay => Vec::new(),
+            NodeRole::Validator if self.validator_ids.is_empty() => vec![self.node_id],
             _ => self.validator_ids.clone(),
         }
     }
