@@ -1,0 +1,60 @@
+# Scaling counterpart of the 5 s-heartbeat-delay run: same config as
+# experiments/located-1024-sig1200.toml (1200-byte signatures, validators sampled from
+# located-map.csv onto shared hosts, 50/100 Mbps non-supernodes, 5% supernodes at 1 Gbps)
+# but 512 validators in one subnet, with libp2p's 5 s first-heartbeat delay reproduced.
+# Seeds 42, 43, 44.
+run_id = "located-512-sig1200-initial-delay-5s"
+run_timeout_secs = 60
+
+validator_count = 512
+# Sample validators and their physical peers from this map (path relative to the repo root).
+validator_map = "located-map.csv"
+subnet_count = 1
+local_aggregators_per_subnet = 32
+global_aggregator_count = 0
+
+local_threshold = 0.9
+global_proof_target = 0.66
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 1200
+proof_payload_bytes = 131072
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+# libp2p's default: no heartbeat (and no IHAVE gossip) until 5 s after start.
+gossipsub_heartbeat_initial_delay_ms = 5000
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_fraction = 0.05
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 3
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output-located-512-sig1200-initial-delay-5s"
