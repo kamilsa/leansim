@@ -48,14 +48,9 @@ downlink_mbps = 100
 latency_ms = 50
 
 [run]
-runner = "docker"
+runner = "native"  # local cargo build + shadow on PATH
 runs = 1
 parallelism = 0  # all cores of the machine running Shadow
-
-[docker]
-shadow_image = "kamilsa/shadow-arm:latest"
-image_name = "leansim-shadow:local"
-rebuild = false
 
 [output]
 dir = "output-nodemap-131k-allhosts-sub64"
