@@ -133,6 +133,10 @@ def validate_experiment(config: dict) -> None:
             die("subnet_subscriptions_per_node must not exceed subnet_count")
     if config.get("subnet_subscriptions_per_node") is not None and node_map is None:
         die("subnet_subscriptions_per_node requires node_map")
+    if config.get("supernode_by_validator_count") is not None:
+        if node_map is None:
+            die("supernode_by_validator_count requires node_map")
+        as_int(config["supernode_by_validator_count"], "supernode_by_validator_count", minimum=1)
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -380,6 +384,10 @@ def place_nodes(experiment: dict) -> list[dict]:
     # Keep hosts that got validators, plus a proportional sample of no_validator relays.
     kept = [host for host in hosts.values() if host["validator_ids"]]
     relay_pool = [host for host in hosts.values() if host["relay"]]
+    for host in hosts.values():
+        host["source_validator_slots"] = 0
+    for peer_key, slots in entries:
+        hosts[peer_key]["source_validator_slots"] = slots
     if kept and relay_pool:
         relay_target = len(kept) * len(relay_pool) // max(1, len(hosts) - len(relay_pool))
         if relay_target:
@@ -541,6 +549,7 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
         subnet_counter[subnet_id] += 1
         if "peer_key" in host:
             node["peer_key"] = host["peer_key"]
+        node["source_validator_slots"] = host.get("source_validator_slots", 0)
         nodes.append(node)
     for _ in range(experiment["global_aggregator_count"]):
         nodes.append({
@@ -597,6 +606,24 @@ def sample_supernodes(nodes: list[dict], experiment: dict) -> set[int]:
     if not count:
         return set()
     return set(random.Random(experiment["geo_seed"] + 1).sample(range(len(nodes)), count))
+
+
+def supernode_ids(nodes: list[dict], experiment: dict) -> set[int]:
+    """Node ids that get supernode bandwidth.
+
+    With supernode_by_validator_count (a node_map threshold), every physical node
+    running at least that many real validators is a supernode, mirroring mainnet
+    where big operators run well-provisioned machines. Otherwise a
+    supernode_fraction of all hosts is sampled at random.
+    """
+    threshold = experiment.get("supernode_by_validator_count")
+    if threshold is not None:
+        return {
+            node["node_id"]
+            for node in nodes
+            if node.get("source_validator_slots", 0) >= threshold
+        }
+    return sample_supernodes(nodes, experiment)
 
 
 def gml_edges(count: int, degree: int, rng: random.Random):
@@ -687,7 +714,7 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     latency: dict | None = None
     if experiment["use_geo_latency"]:
         countries, latency = assign_countries(len(nodes), experiment["geo_seed"])
-    supernodes = sample_supernodes(nodes, experiment)
+    supernodes = supernode_ids(nodes, experiment)
     for index, node in enumerate(nodes):
         node["country"] = countries[index] if countries is not None else None
         node["supernode"] = node["node_id"] in supernodes
