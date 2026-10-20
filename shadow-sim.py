@@ -867,7 +867,8 @@ def main() -> None:
     if runner not in {"docker", "native"}:
         die(f'[run].runner must be "docker" or "native", got {runner!r}')
     runs = as_int(run.get("runs", 1), "run.runs", minimum=1)
-    parallelism = as_int(run.get("parallelism", 10), "run.parallelism", minimum=1)
+    # 0 (the default) = every logical core of the machine running Shadow.
+    parallelism = as_int(run.get("parallelism", 0), "run.parallelism", minimum=0) or os.cpu_count() or 1
     output_dir = resolve_path(str(output.get("dir", "output")))
     overlays = [resolve_path(path) for path in args.overlay]
 
