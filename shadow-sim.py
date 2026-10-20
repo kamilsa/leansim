@@ -26,6 +26,9 @@ DEFAULT_EXPERIMENT = REPO_ROOT / "experiments" / "geo-128.toml"
 LEANSIM_BIN_DOCKER = "/opt/leansim/leansim"
 LEANSIM_BIN_NATIVE = REPO_ROOT / "target" / "release" / "leansim"
 SEED_PEER_COUNT = 50
+# Peers a host needs on a subnet it only publishes to (fanout); subscribed
+# subnets need gossipsub_mesh_n instead.
+PUBLISH_SUBNET_PEER_COUNT = 2
 RUNNER_SECTIONS = {"run", "docker", "output"}
 
 
@@ -142,6 +145,10 @@ def validate_experiment(config: dict) -> None:
             die("all_hosts must be a boolean")
         if node_map is None:
             die("all_hosts requires node_map")
+    if config.get("random_peer_count") is not None:
+        if node_map is None:
+            die("random_peer_count requires node_map")
+        as_int(config["random_peer_count"], "random_peer_count", minimum=0)
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -600,6 +607,8 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
                     # Explicit peers must be configured on both ends to avoid mesh GRAFT/PRUNE churn.
                     aggregator["explicit_peer_addrs"].add(node["listen_addr"])
 
+    # random_peer_count = 0 leaves only the subnet peers added below.
+    random_peer_count = experiment.get("random_peer_count", SEED_PEER_COUNT)
     all_addresses = [node["listen_addr"] for node in nodes]
     for node in nodes:
         explicit_addrs = sorted(node["explicit_peer_addrs"])
@@ -610,8 +619,56 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
         rng = random.Random(experiment["geo_seed"] + node["node_id"])
         rng.shuffle(candidates)
         node["explicit_peer_addrs"] = explicit_addrs
-        node["seed_addrs"] = explicit_addrs + candidates[:max(0, SEED_PEER_COUNT - len(explicit_addrs))]
+        node["seed_addrs"] = explicit_addrs + candidates[:max(0, random_peer_count - len(explicit_addrs))]
+    add_subnet_peers(nodes, experiment)
     return nodes
+
+
+def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
+    """Top up random seeds until every host has at least gossipsub_mesh_n peers on
+    each subnet it subscribes to (a full mesh) and PUBLISH_SUBNET_PEER_COUNT on each
+    subnet it only publishes in (fanout), mirroring a client's subnet peer
+    discovery. Without this, a host with no peer on a subnet gets InsufficientPeers
+    and its signatures for that subnet are silently dropped.
+
+    Connections are bidirectional, so the subnet subscriber dials the short host:
+    big operators publish in every subnet and would otherwise dial many extra
+    peers, pushing them past the longer warmup in swarm::dial_seeds.
+    """
+    mesh_target = experiment["gossipsub_mesh_n"]
+    node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+    subscribed = [set(node["subscribed_subnets"]) for node in nodes]
+    subscribers: defaultdict[int, list[int]] = defaultdict(list)
+    for node in nodes:
+        for subnet in node["subscribed_subnets"]:
+            subscribers[subnet].append(node["node_id"])
+    peers: list[set[int]] = [set() for _ in nodes]
+    for node in nodes:
+        for address in node["seed_addrs"]:
+            peers[node["node_id"]].add(node_of[address])
+            peers[node_of[address]].add(node["node_id"])
+
+    rng = random.Random(experiment["geo_seed"] + 7)
+    added = 0
+    for node in nodes:
+        host = node["node_id"]
+        for subnet in sorted(subscribed[host] | set(node["signing_subnets"])):
+            target = mesh_target if subnet in subscribed[host] else PUBLISH_SUBNET_PEER_COUNT
+            missing = target - sum(1 for peer in peers[host] if subnet in subscribed[peer])
+            if missing <= 0:
+                continue
+            candidates = [peer for peer in subscribers[subnet] if peer != host and peer not in peers[host]]
+            for peer in rng.sample(candidates, min(missing, len(candidates))):
+                nodes[peer]["seed_addrs"].append(node["listen_addr"])
+                peers[host].add(peer)
+                peers[peer].add(host)
+                added += 1
+    if added:
+        log(
+            f"added {added} subnet peer connections for >= {mesh_target} peers per subscribed subnet and "
+            f">= {PUBLISH_SUBNET_PEER_COUNT} per publish-only subnet "
+            f"(max {max(len(node['seed_addrs']) for node in nodes)} dials per host)"
+        )
 
 
 def sample_supernodes(nodes: list[dict], experiment: dict) -> set[int]:
