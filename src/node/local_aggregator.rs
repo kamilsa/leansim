@@ -79,23 +79,31 @@ async fn maybe_publish_proof(
     }
     .with_payload_size(state.config.proof_payload_bytes);
 
-    let topic = IdentTopic::new(topics::aggregation_topic(&state.config.run_id));
-    swarm::publish(swarm, &topic, &proof)?;
+    // Only global aggregators subscribe to the aggregation topic; without one there
+    // is no audience for local proofs, so publishing is skipped rather than firing
+    // into a subscriber-less topic.
+    let mut published = false;
+    if state.config.global_aggregator_count > 0 {
+        let topic = IdentTopic::new(topics::aggregation_topic(&state.config.run_id));
+        swarm::publish(swarm, &topic, &proof)?;
 
+        let byte_size = proof.encode().len() as u64;
+        state.bytes_sent_sig.fetch_add(byte_size, Ordering::Relaxed);
+        state.msgs_sent_sig.fetch_add(1, Ordering::Relaxed);
+        published = true;
+    }
     let latency_ms = state.elapsed_ms();
-    let byte_size = proof.encode().len() as u64;
-    state.bytes_sent_sig.fetch_add(byte_size, Ordering::Relaxed);
-    state.msgs_sent_sig.fetch_add(1, Ordering::Relaxed);
     emit(&JsonlEvent::LocalProofGenerated {
         node_id: state.node_id,
         subnet_id: state.subnet_id,
         sig_count: count,
         latency_ms,
-        byte_size,
+        byte_size: if published { proof.encode().len() as u64 } else { 0 },
     });
     tracing::info!(
-        "local_aggregator {} published LocalProof (subnet={}, sigs={}, latency_ms={})",
+        "local_aggregator {} {} LocalProof (subnet={}, sigs={}, latency_ms={})",
         state.node_id,
+        if published { "published" } else { "completed" },
         state.subnet_id,
         count,
         latency_ms,

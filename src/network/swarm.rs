@@ -177,7 +177,8 @@ fn build_gossipsub(
 
 /// Subscribes to the topics relevant to the given role. A host joins every subnet in
 /// `subscribed_subnets` (its gossip membership, independent of what it publishes);
-/// aggregating or globally-aggregating roles also join the aggregation topic.
+/// only global aggregators join the aggregation topic, so local proofs have an
+/// audience only when global aggregation is part of the run.
 pub fn subscribe_to_topics(
     swarm: &mut Swarm<GossipsubBehaviour>,
     role: NodeRole,
@@ -193,7 +194,7 @@ pub fn subscribe_to_topics(
         let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
         swarm.behaviour_mut().subscribe(&topic)?;
     }
-    if matches!(role, NodeRole::LocalAggregator | NodeRole::GlobalAggregator) {
+    if role == NodeRole::GlobalAggregator {
         let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
         swarm.behaviour_mut().subscribe(&agg_topic)?;
     }
