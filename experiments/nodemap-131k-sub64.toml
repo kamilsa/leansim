@@ -1,0 +1,58 @@
+# 131,072 validators (2^17) across 64 subnets of 2,048 — a power-of-two scale
+# between the 512-validator smoke run and the full 728k mainnet run. Hosts,
+# validator co-location, and the no_validator relay share are sampled from
+# nodes.csv; every node subscribes to 2 random subnets; big operators
+# (>= 100 real validators) are supernodes; 16 local aggregators per subnet.
+run_id = "nodemap-131k-sub64"
+run_timeout_secs = 120
+
+validator_count = 131072
+node_map = "nodes.csv"
+subnet_subscriptions_per_node = 2
+subnet_count = 64
+local_aggregators_per_subnet = 16
+global_aggregator_count = 0
+
+local_threshold = 0.9
+global_proof_target = 0.66
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+global_aggregation_rate = 10
+signature_payload_bytes = 1200
+proof_payload_bytes = 131072
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 10
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output-nodemap-131k-sub64"
