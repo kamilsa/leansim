@@ -12,6 +12,9 @@ validator_count = 131072
 node_map = "nodes.csv"
 all_hosts = true
 subnet_subscriptions_per_node = 2
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in (~29 connections per host).
+random_peer_count = 0
 subnet_count = 64
 local_aggregators_per_subnet = 16
 global_aggregator_count = 0

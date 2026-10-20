@@ -219,6 +219,28 @@ class NodeMapPlacementTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             shadow_sim.assign_nodes(self.experiment(local_aggregators_per_subnet=100))
 
+    def test_every_host_has_mesh_n_peers_on_its_subnets(self) -> None:
+        # One random seed per host leaves most subnets without peers; the top-up
+        # must restore gossipsub_mesh_n on subscribed subnets and
+        # PUBLISH_SUBNET_PEER_COUNT on publish-only ones (or every available subscriber).
+        original = shadow_sim.SEED_PEER_COUNT
+        shadow_sim.SEED_PEER_COUNT = 1
+        self.addCleanup(setattr, shadow_sim, "SEED_PEER_COUNT", original)
+        experiment = self.experiment(gossipsub_mesh_n=3, gossipsub_mesh_n_low=2, gossipsub_mesh_n_high=4, gossipsub_mesh_outbound_min=1)
+        nodes = shadow_sim.assign_nodes(experiment)
+        node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+        peers = {node["node_id"]: set() for node in nodes}
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                peers[node["node_id"]].add(node_of[address])
+                peers[node_of[address]].add(node["node_id"])
+        for node in nodes:
+            for subnet in set(node["subscribed_subnets"]) | set(node["signing_subnets"]):
+                on_subnet = [peer for peer in peers[node["node_id"]] if subnet in nodes[peer]["subscribed_subnets"]]
+                available = sum(1 for other in nodes if other is not node and subnet in other["subscribed_subnets"])
+                target = 3 if subnet in node["subscribed_subnets"] else shadow_sim.PUBLISH_SUBNET_PEER_COUNT
+                self.assertGreaterEqual(len(on_subnet), min(target, available), (node["node_id"], subnet))
+
 
 class SupernodeByValidatorCountTests(unittest.TestCase):
     def setUp(self) -> None:
