@@ -137,6 +137,11 @@ def validate_experiment(config: dict) -> None:
         if node_map is None:
             die("supernode_by_validator_count requires node_map")
         as_int(config["supernode_by_validator_count"], "supernode_by_validator_count", minimum=1)
+    if config.get("all_hosts") is not None:
+        if not isinstance(config["all_hosts"], bool):
+            die("all_hosts must be a boolean")
+        if node_map is None:
+            die("all_hosts requires node_map")
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -365,6 +370,8 @@ def place_nodes(experiment: dict) -> list[dict]:
     validators-per-host distribution matches the real network; nodes that got
     no slot are dropped, except no_validator nodes, which are sampled on top to
     preserve their real share of the host population as gossip-only relays.
+    With all_hosts = true every node in the map runs: nodes that got no
+    validator slot relay gossip instead of being dropped.
     """
     count = experiment["validator_count"]
     entries = load_node_map(resolve_path(experiment["node_map"]))
@@ -377,21 +384,27 @@ def place_nodes(experiment: dict) -> list[dict]:
     for peer_key, slots in entries:
         for _ in range(slots):
             slot_owners.append(peer_key)
-        hosts.setdefault(peer_key, {"peer_key": peer_key, "validator_ids": [], "relay": slots == 0})
+        hosts.setdefault(peer_key, {"peer_key": peer_key, "validator_ids": [], "relay": slots == 0, "no_validator": slots == 0})
     for validator_id, peer_key in enumerate(rng.sample(slot_owners, count)):
         host = hosts[peer_key]
         host["validator_ids"].append(validator_id)
-    # Keep hosts that got validators, plus a proportional sample of no_validator relays.
-    kept = [host for host in hosts.values() if host["validator_ids"]]
-    relay_pool = [host for host in hosts.values() if host["relay"]]
     for host in hosts.values():
         host["source_validator_slots"] = 0
     for peer_key, slots in entries:
         hosts[peer_key]["source_validator_slots"] = slots
-    if kept and relay_pool:
-        relay_target = len(kept) * len(relay_pool) // max(1, len(hosts) - len(relay_pool))
-        if relay_target:
-            kept.extend(rng.sample(relay_pool, min(relay_target, len(relay_pool))))
+    if experiment.get("all_hosts"):
+        # Every observed node participates: hosts without a validator slot relay.
+        kept = list(hosts.values())
+        for host in kept:
+            host["relay"] = not host["validator_ids"]
+    else:
+        # Keep hosts that got validators, plus a proportional sample of no_validator relays.
+        kept = [host for host in hosts.values() if host["validator_ids"]]
+        relay_pool = [host for host in hosts.values() if host["relay"]]
+        if kept and relay_pool:
+            relay_target = len(kept) * len(relay_pool) // max(1, len(hosts) - len(relay_pool))
+            if relay_target:
+                kept.extend(rng.sample(relay_pool, min(relay_target, len(relay_pool))))
     if not kept:
         die(f"node_map {experiment['node_map']} has no validator-hosting nodes")
     return kept
@@ -544,7 +557,7 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
             "validator_ids": validator_ids,
             "signing_subnets": signing_subnets,
             "subscribed_subnets": sorted(subscribed[index] | ({subnet_id} if index in aggregator_for else set())),
-            "source_node_type": "no_validator" if host["relay"] else "validator",
+            "source_node_type": "no_validator" if host["no_validator"] else "validator",
         }
         subnet_counter[subnet_id] += 1
         if "peer_key" in host:
