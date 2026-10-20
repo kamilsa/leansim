@@ -51,7 +51,7 @@ latency_ms = 50
 [run]
 runner = "docker"
 runs = 1
-parallelism = 10
+parallelism = 0  # all cores of the machine running Shadow
 
 [docker]
 shadow_image = "kamilsa/shadow-arm:latest"
