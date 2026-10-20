@@ -220,5 +220,63 @@ class NodeMapPlacementTests(unittest.TestCase):
             shadow_sim.assign_nodes(self.experiment(local_aggregators_per_subnet=100))
 
 
+class SupernodeByValidatorCountTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.map_path = Path(directory.name) / "nodes.csv"
+        rows = ["node_type,peer_key,validator_count,validator_indices"]
+        rows.append("validator,BIG,150,0;1;2")
+        rows.append("validator,SMALL,2,3;4")
+        rows.append("validator,TINY,1,5")
+        rows.append("no_validator,RELAY,0,")
+        self.map_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        shadow_sim.load_node_map.cache_clear()
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {
+            "run_id": "test",
+            "validator_count": 153,
+            "subnet_count": 1,
+            "local_aggregators_per_subnet": 1,
+            "global_aggregator_count": 0,
+            "geo_seed": 7,
+            "node_map": str(self.map_path),
+            "subnet_subscriptions_per_node": 1,
+            "supernode_by_validator_count": 100,
+        }
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_nodes_with_many_real_validators_are_supernodes(self) -> None:
+        experiment = self.experiment()
+        nodes = shadow_sim.assign_nodes(experiment)
+        ids = shadow_sim.supernode_ids(nodes, experiment)
+        by_peer = {node["peer_key"]: node for node in nodes}
+        # All 153 slots are sampled, so every validator node is present.
+        self.assertIn(by_peer["BIG"]["node_id"], ids)
+        self.assertNotIn(by_peer["SMALL"]["node_id"], ids)
+        self.assertNotIn(by_peer["TINY"]["node_id"], ids)
+        relay = by_peer.get("RELAY")
+        if relay is not None:
+            self.assertNotIn(relay["node_id"], ids)
+
+    def test_threshold_uses_real_slots_not_sampled(self) -> None:
+        # BIG keeps its full 150-slot capacity even when only some slots are sampled,
+        # so it stays a supernode regardless of how many validators the run selects.
+        experiment = self.experiment(validator_count=3)
+        nodes = shadow_sim.assign_nodes(experiment)
+        ids = shadow_sim.supernode_ids(nodes, experiment)
+        big = next(node for node in nodes if node["peer_key"] == "BIG")
+        self.assertLessEqual(len(big["validator_ids"]), 150)
+        self.assertIn(big["node_id"], ids)
+
+    def test_requires_node_map(self) -> None:
+        experiment = self.experiment()
+        del experiment["node_map"]
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(experiment)
+
+
 if __name__ == "__main__":
     unittest.main()
