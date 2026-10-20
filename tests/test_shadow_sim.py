@@ -278,5 +278,66 @@ class SupernodeByValidatorCountTests(unittest.TestCase):
             shadow_sim.validate_experiment(experiment)
 
 
+class AllHostsPlacementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.map_path = Path(directory.name) / "nodes.csv"
+        # 10 slots over 3 validator nodes + 2 no_validator nodes; sample 4 slots.
+        rows = [
+            "node_type,peer_key,validator_count,validator_indices",
+            "validator,BIG,6,0;1;2;3;4;5",
+            "validator,MID,3,6;7;8",
+            "validator,SOLO,1,9",
+            "no_validator,R1,0,",
+            "no_validator,R2,0,",
+        ]
+        self.map_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        shadow_sim.load_node_map.cache_clear()
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {
+            "run_id": "test",
+            "validator_count": 4,
+            "subnet_count": 1,
+            "local_aggregators_per_subnet": 1,
+            "global_aggregator_count": 0,
+            "geo_seed": 7,
+            "node_map": str(self.map_path),
+            "subnet_subscriptions_per_node": 1,
+            "all_hosts": True,
+        }
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_every_map_node_runs(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        self.assertEqual(len(nodes), 5)
+        peers = {node["peer_key"] for node in nodes}
+        self.assertEqual(peers, {"BIG", "MID", "SOLO", "R1", "R2"})
+        self.assertEqual(sum(len(n["validator_ids"]) for n in nodes), 4)
+        # Hosts without a sampled slot relay; no_validator nodes relay too.
+        for node in nodes:
+            if node["validator_ids"]:
+                self.assertIn(node["role"], ("validator", "local_aggregator"))
+            else:
+                self.assertEqual(node["role"], "relay")
+                self.assertEqual(node["source_node_type"],
+                                 "no_validator" if node["peer_key"] in ("R1", "R2") else "validator")
+
+    def test_without_all_hosts_small_hosts_are_dropped(self) -> None:
+        # 1 slot sampled: only the host that got it plus proportional relays run.
+        nodes = shadow_sim.assign_nodes(self.experiment(all_hosts=False, validator_count=1))
+        with_slot = [node for node in nodes if node["validator_ids"]]
+        self.assertEqual(len(with_slot), 1)
+        self.assertLess(len(nodes), 5)
+
+    def test_all_hosts_requires_node_map(self) -> None:
+        experiment = self.experiment()
+        del experiment["node_map"]
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(experiment)
+
+
 if __name__ == "__main__":
     unittest.main()
