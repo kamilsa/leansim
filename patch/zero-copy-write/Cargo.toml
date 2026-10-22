@@ -1,0 +1,9 @@
+[package]
+name = "zero-copy-write"
+version = "0.1.0"
+edition = "2021"
+description = "Hands the Bytes behind an AsyncWrite buffer down to the transport that stores it"
+publish = false
+
+[dependencies]
+bytes = "1.6"

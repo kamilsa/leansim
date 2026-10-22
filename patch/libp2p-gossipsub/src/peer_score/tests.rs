@@ -36,7 +36,7 @@ fn within_variance(value: f64, expected: f64, variance: f64) -> bool {
 fn make_test_message(seq: u64) -> (MessageId, RawMessage) {
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![12, 34, 56],
+        data: vec![12, 34, 56].into(),
         sequence_number: Some(seq),
         topic: Topic::new("test").hash(),
         signature: None,
@@ -46,7 +46,7 @@ fn make_test_message(seq: u64) -> (MessageId, RawMessage) {
 
     let message = Message {
         source: raw_message.source,
-        data: raw_message.data.clone(),
+        data: raw_message.data.to_vec(),
         sequence_number: raw_message.sequence_number,
         topic: raw_message.topic.clone(),
     };

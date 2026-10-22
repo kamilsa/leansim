@@ -19,8 +19,9 @@
 // DEALINGS IN THE SOFTWARE.
 
 use std::{
+    future::Future,
     io::{self},
-    pin::Pin,
+    pin::{pin, Pin},
     task::{Context, Poll},
 };
 
@@ -67,9 +68,20 @@ impl AsyncWrite for Stream {
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.send)
-            .poll_write(cx, buf)
-            .map_err(Into::into)
+        // If the writer offered the `Bytes` that `buf` belongs to, quinn keeps a reference to it
+        // until the data is acknowledged instead of copying it.
+        if let Some(chunk) = zero_copy_write::take(buf) {
+            let mut chunks = [chunk];
+            // `write_chunks` is cancel-safe: if it returns `Pending`, nothing was written.
+            let written = futures::ready!(pin!(self.send.write_chunks(&mut chunks)).poll(cx))
+                .map_err(io::Error::from)?;
+            zero_copy_write::record(true, written.bytes);
+            return Poll::Ready(Ok(written.bytes));
+        }
+        let written =
+            futures::ready!(Pin::new(&mut self.send).poll_write(cx, buf)).map_err(io::Error::from)?;
+        zero_copy_write::record(false, written);
+        Poll::Ready(Ok(written))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {

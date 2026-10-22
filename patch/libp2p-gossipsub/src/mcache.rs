@@ -232,7 +232,7 @@ mod tests {
         };
         let u8x: u8 = x as u8;
         let source = Some(PeerId::random());
-        let data: Vec<u8> = vec![u8x];
+        let data = bytes::Bytes::from(vec![u8x]);
         let sequence_number = Some(x);
 
         let m = RawMessage {

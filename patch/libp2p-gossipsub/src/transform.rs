@@ -56,7 +56,7 @@ impl DataTransform for IdentityTransform {
     fn inbound_transform(&self, raw_message: RawMessage) -> Result<Message, std::io::Error> {
         Ok(Message {
             source: raw_message.source,
-            data: raw_message.data,
+            data: raw_message.data.into(),
             sequence_number: raw_message.sequence_number,
             topic: raw_message.topic,
         })
