@@ -13,8 +13,10 @@ node_map = "nodes.csv"
 all_hosts = true
 subnet_subscriptions_per_node = 2
 # Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
-# and 2 per subnet a host only publishes in (~29 connections per host).
+# and publish_subnet_peer_count per subnet a host only publishes in (~59
+# connections per host, ~320 on big operators that publish in every subnet).
 random_peer_count = 0
+publish_subnet_peer_count = 8
 subnet_count = 64
 local_aggregators_per_subnet = 16
 global_aggregator_count = 0
