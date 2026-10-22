@@ -23,8 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "5.0"
 futures = "0.3"
 bytes = "1.0"
-
-[dev-dependencies]
 zero-copy-write = { path = "patch/zero-copy-write" }
 
 [patch.crates-io]

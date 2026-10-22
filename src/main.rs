@@ -242,6 +242,12 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         msgs_received: state.msgs_recv_sig.load(Ordering::Relaxed),
     });
 
+    let writes = zero_copy_write::stats();
+    eprintln!(
+        "QUIC send buffers: {} bytes shared with gossipsub, {} bytes copied",
+        writes.shared_bytes, writes.copied_bytes
+    );
+
     tracing::info!("node {} exiting", state.node_id);
     Ok(())
 }
