@@ -24,6 +24,9 @@ dashmap = "5.0"
 futures = "0.3"
 bytes = "1.0"
 
+[dev-dependencies]
+zero-copy-write = { path = "patch/zero-copy-write" }
+
 [patch.crates-io]
 quinn-udp = { path = "patch/quinn-udp" }
 libp2p-gossipsub = { path = "patch/libp2p-gossipsub" }

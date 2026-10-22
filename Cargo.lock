@@ -1450,6 +1450,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zero-copy-write",
 ]
 
 [[package]]
@@ -1592,6 +1593,7 @@ dependencies = [
  "tracing",
  "void",
  "web-time",
+ "zero-copy-write",
 ]
 
 [[package]]
@@ -1719,6 +1721,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zero-copy-write",
 ]
 
 [[package]]
@@ -3919,6 +3922,13 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "zero-copy-write"
+version = "0.1.0"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]

@@ -18,11 +18,11 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::protocol::{GossipsubCodec, ProtocolConfig};
-use crate::rpc_proto::proto;
+use crate::protocol::{encode_frame, Frame, GossipsubCodec, ProtocolConfig};
 use crate::types::{PeerKind, RawMessage, Rpc, RpcOut};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
+use bytes::Buf;
 use futures::future::Either;
 use futures::prelude::*;
 use futures::StreamExt;
@@ -34,6 +34,7 @@ use libp2p_swarm::handler::{
 use libp2p_swarm::Stream;
 use smallvec::SmallVec;
 use std::{
+    io,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -95,7 +96,7 @@ pub struct EnabledHandler {
     inbound_substream: Option<InboundSubstreamState>,
 
     /// Queue of values that we want to send to the remote.
-    send_queue: SmallVec<[proto::RPC; 16]>,
+    send_queue: SmallVec<[Frame; 16]>,
 
     /// Flag indicating that an outbound substream is being established to prevent duplicate
     /// requests.
@@ -148,11 +149,11 @@ enum InboundSubstreamState {
 /// State of the outbound substream, opened either by us or by the remote.
 enum OutboundSubstreamState {
     /// Waiting for the user to send a message. The idle state for an outbound substream.
-    WaitingOutput(Framed<Stream, GossipsubCodec>),
-    /// Waiting to send a message to the remote.
-    PendingSend(Framed<Stream, GossipsubCodec>, proto::RPC),
+    WaitingOutput(Stream),
+    /// Waiting to send a message to the remote. Holds the chunks of its frame not yet written.
+    PendingSend(Stream, Frame),
     /// Waiting to flush the substream so that the data arrives to the remote.
-    PendingFlush(Framed<Stream, GossipsubCodec>),
+    PendingFlush(Stream),
     /// An error occurred during processing.
     Poisoned,
 }
@@ -261,22 +262,11 @@ impl EnabledHandler {
                         Some(OutboundSubstreamState::WaitingOutput(substream));
                     break;
                 }
-                Some(OutboundSubstreamState::PendingSend(mut substream, message)) => {
-                    match Sink::poll_ready(Pin::new(&mut substream), cx) {
+                Some(OutboundSubstreamState::PendingSend(mut substream, mut frame)) => {
+                    match poll_write_frame(&mut substream, cx, &mut frame) {
                         Poll::Ready(Ok(())) => {
-                            match Sink::start_send(Pin::new(&mut substream), message) {
-                                Ok(()) => {
-                                    self.outbound_substream =
-                                        Some(OutboundSubstreamState::PendingFlush(substream))
-                                }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        "Failed to send message on outbound stream: {e}"
-                                    );
-                                    self.outbound_substream = None;
-                                    break;
-                                }
-                            }
+                            self.outbound_substream =
+                                Some(OutboundSubstreamState::PendingFlush(substream))
                         }
                         Poll::Ready(Err(e)) => {
                             tracing::debug!("Failed to send message on outbound stream: {e}");
@@ -285,13 +275,13 @@ impl EnabledHandler {
                         }
                         Poll::Pending => {
                             self.outbound_substream =
-                                Some(OutboundSubstreamState::PendingSend(substream, message));
+                                Some(OutboundSubstreamState::PendingSend(substream, frame));
                             break;
                         }
                     }
                 }
                 Some(OutboundSubstreamState::PendingFlush(mut substream)) => {
-                    match Sink::poll_flush(Pin::new(&mut substream), cx) {
+                    match AsyncWrite::poll_flush(Pin::new(&mut substream), cx) {
                         Poll::Ready(Ok(())) => {
                             self.last_io_activity = Instant::now();
                             self.outbound_substream =
@@ -409,7 +399,7 @@ impl ConnectionHandler for Handler {
     fn on_behaviour_event(&mut self, message: HandlerIn) {
         match self {
             Handler::Enabled(handler) => match message {
-                HandlerIn::Message(m) => handler.send_queue.push(m.into_protobuf()),
+                HandlerIn::Message(m) => handler.send_queue.push(encode_frame(m)),
                 HandlerIn::JoinedMesh => {
                     handler.in_mesh = true;
                 }
@@ -532,4 +522,30 @@ impl ConnectionHandler for Handler {
             Handler::Disabled(_) => {}
         }
     }
+}
+
+/// Writes the chunks of `frame` to `substream` in order, removing each chunk once it is written.
+///
+/// Each chunk is offered to the transport, which can keep a reference to it until the remote has
+/// received it instead of copying it. This way all the peers that a message is sent to share one
+/// copy of its data.
+fn poll_write_frame(
+    substream: &mut Stream,
+    cx: &mut Context<'_>,
+    frame: &mut Frame,
+) -> Poll<io::Result<()>> {
+    while let Some(chunk) = frame.first_mut() {
+        if chunk.is_empty() {
+            frame.remove(0);
+            continue;
+        }
+        let written = futures::ready!(zero_copy_write::offer(chunk, || {
+            AsyncWrite::poll_write(Pin::new(&mut *substream), cx, chunk)
+        }))?;
+        if written == 0 {
+            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        }
+        chunk.advance(written);
+    }
+    Poll::Ready(Ok(()))
 }

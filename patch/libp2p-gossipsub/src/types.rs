@@ -20,6 +20,7 @@
 
 //! A collection of types using the Gossipsub system.
 use crate::TopicHash;
+use bytes::Bytes;
 use libp2p_identity::PeerId;
 use libp2p_swarm::ConnectionId;
 use prometheus_client::encoding::EncodeLabelValue;
@@ -99,7 +100,9 @@ pub struct RawMessage {
     pub source: Option<PeerId>,
 
     /// Content of the message. Its meaning is out of scope of this library.
-    pub data: Vec<u8>,
+    ///
+    /// Clones of the message share the data, and so do the frames that send it to each peer.
+    pub data: Bytes,
 
     /// A random sequence number.
     pub sequence_number: Option<u64>,
@@ -122,7 +125,7 @@ impl RawMessage {
     pub fn raw_protobuf_len(&self) -> usize {
         let message = proto::Message {
             from: self.source.map(|m| m.to_bytes()),
-            data: Some(self.data.clone()),
+            data: Some(self.data.to_vec()),
             seqno: self.sequence_number.map(|s| s.to_be_bytes().to_vec()),
             topic: TopicHash::into_string(self.topic.clone()),
             signature: self.signature.clone(),
@@ -136,7 +139,7 @@ impl From<RawMessage> for proto::Message {
     fn from(raw: RawMessage) -> Self {
         proto::Message {
             from: raw.source.map(|m| m.to_bytes()),
-            data: Some(raw.data),
+            data: Some(raw.data.into()),
             seqno: raw.sequence_number.map(|s| s.to_be_bytes().to_vec()),
             topic: TopicHash::into_string(raw.topic),
             signature: raw.signature,
@@ -385,7 +388,7 @@ impl From<Rpc> for proto::RPC {
         for message in rpc.messages.into_iter() {
             let message = proto::Message {
                 from: message.source.map(|m| m.to_bytes()),
-                data: Some(message.data),
+                data: Some(message.data.into()),
                 seqno: message.sequence_number.map(|s| s.to_be_bytes().to_vec()),
                 topic: TopicHash::into_string(message.topic),
                 signature: message.signature,

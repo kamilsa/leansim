@@ -284,7 +284,7 @@ fn proto_to_message(rpc: &proto::RPC) -> Rpc {
     for message in rpc.publish.into_iter() {
         messages.push(RawMessage {
             source: message.from.map(|x| PeerId::from_bytes(&x).unwrap()),
-            data: message.data.unwrap_or_default(),
+            data: message.data.unwrap_or_default().into(),
             sequence_number: message.seqno.map(|x| BigEndian::read_u64(&x)), // don't inform the application
             topic: TopicHash::from_raw(message.topic),
             signature: message.signature, // don't inform the application
@@ -998,7 +998,7 @@ fn test_handle_iwant_msg_cached() {
 
     let raw_message = RawMessage {
         source: Some(peers[11]),
-        data: vec![1, 2, 3, 4],
+        data: vec![1, 2, 3, 4].into(),
         sequence_number: Some(1u64),
         topic: TopicHash::from_raw("topic"),
         signature: None,
@@ -1053,7 +1053,7 @@ fn test_handle_iwant_msg_cached_shifted() {
     for shift in 1..10 {
         let raw_message = RawMessage {
             source: Some(peers[11]),
-            data: vec![1, 2, 3, 4],
+            data: vec![1, 2, 3, 4].into(),
             sequence_number: Some(shift),
             topic: TopicHash::from_raw("topic"),
             signature: None,
@@ -1518,7 +1518,7 @@ fn do_forward_messages_to_explicit_peers() {
 
     let message = RawMessage {
         source: Some(peers[1]),
-        data: vec![12],
+        data: vec![12].into(),
         sequence_number: Some(0),
         topic: topic_hashes[0].clone(),
         signature: None,
@@ -1655,7 +1655,7 @@ fn no_gossip_gets_sent_to_explicit_peers() {
 
     let message = RawMessage {
         source: Some(peers[1]),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topic_hashes[0].clone(),
         signature: None,
@@ -2122,7 +2122,7 @@ fn test_gossip_to_at_least_gossip_lazy_peers() {
     //receive message
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topic_hashes[0].clone(),
         signature: None,
@@ -2167,7 +2167,7 @@ fn test_gossip_to_at_most_gossip_factor_peers() {
     //receive message
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topic_hashes[0].clone(),
         signature: None,
@@ -2531,7 +2531,7 @@ fn test_do_not_gossip_to_peers_below_gossip_threshold() {
     // Receive message
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topics[0].clone(),
         signature: None,
@@ -2608,7 +2608,7 @@ fn test_iwant_msg_from_peer_below_gossip_threshold_gets_ignored() {
     // Receive message
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topics[0].clone(),
         signature: None,
@@ -2696,7 +2696,7 @@ fn test_ihave_msg_from_peer_below_gossip_threshold_gets_ignored() {
     //message that other peers have
     let raw_message = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![],
+        data: vec![].into(),
         sequence_number: Some(0),
         topic: topics[0].clone(),
         signature: None,
@@ -2875,7 +2875,7 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
 
     let raw_message1 = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![1, 2, 3, 4],
+        data: vec![1, 2, 3, 4].into(),
         sequence_number: Some(1u64),
         topic: topics[0].clone(),
         signature: None,
@@ -2885,7 +2885,7 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
 
     let raw_message2 = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![1, 2, 3, 4, 5],
+        data: vec![1, 2, 3, 4, 5].into(),
         sequence_number: Some(2u64),
         topic: topics[0].clone(),
         signature: None,
@@ -2895,7 +2895,7 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
 
     let raw_message3 = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![1, 2, 3, 4, 5, 6],
+        data: vec![1, 2, 3, 4, 5, 6].into(),
         sequence_number: Some(3u64),
         topic: topics[0].clone(),
         signature: None,
@@ -2905,7 +2905,7 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
 
     let raw_message4 = RawMessage {
         source: Some(PeerId::random()),
-        data: vec![1, 2, 3, 4, 5, 6, 7],
+        data: vec![1, 2, 3, 4, 5, 6, 7].into(),
         sequence_number: Some(4u64),
         topic: topics[0].clone(),
         signature: None,

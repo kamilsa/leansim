@@ -2684,7 +2684,7 @@ where
 
                 Ok(RawMessage {
                     source: Some(*author),
-                    data,
+                    data: data.into(),
                     // To be interoperable with the go-implementation this is treated as a 64-bit
                     // big-endian uint.
                     sequence_number: Some(sequence_number),
@@ -2697,7 +2697,7 @@ where
             PublishConfig::Author(peer_id) => {
                 Ok(RawMessage {
                     source: Some(*peer_id),
-                    data,
+                    data: data.into(),
                     // To be interoperable with the go-implementation this is treated as a 64-bit
                     // big-endian uint.
                     sequence_number: Some(rand::random()),
@@ -2710,7 +2710,7 @@ where
             PublishConfig::RandomAuthor => {
                 Ok(RawMessage {
                     source: Some(PeerId::random()),
-                    data,
+                    data: data.into(),
                     // To be interoperable with the go-implementation this is treated as a 64-bit
                     // big-endian uint.
                     sequence_number: Some(rand::random()),
@@ -2723,7 +2723,7 @@ where
             PublishConfig::Anonymous => {
                 Ok(RawMessage {
                     source: None,
-                    data,
+                    data: data.into(),
                     // To be interoperable with the go-implementation this is treated as a 64-bit
                     // big-endian uint.
                     sequence_number: None,
@@ -3416,7 +3416,7 @@ mod local_test {
     fn test_message() -> RawMessage {
         RawMessage {
             source: Some(PeerId::random()),
-            data: vec![0; 100],
+            data: vec![0; 100].into(),
             sequence_number: None,
             topic: TopicHash::from_raw("test_topic"),
             signature: None,

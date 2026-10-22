@@ -23,17 +23,20 @@ use crate::handler::HandlerEvent;
 use crate::rpc_proto::proto;
 use crate::topic::TopicHash;
 use crate::types::{
-    ControlAction, MessageId, PeerInfo, PeerKind, RawMessage, Rpc, Subscription, SubscriptionAction,
+    ControlAction, MessageId, PeerInfo, PeerKind, RawMessage, Rpc, RpcOut, Subscription,
+    SubscriptionAction,
 };
 use crate::ValidationError;
 use asynchronous_codec::{Decoder, Encoder, Framed};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::prelude::*;
 use libp2p_core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p_identity::{PeerId, PublicKey};
 use libp2p_swarm::StreamProtocol;
-use quick_protobuf::Writer;
+use quick_protobuf::sizeofs::sizeof_len;
+use quick_protobuf::{MessageWrite, Writer};
+use smallvec::{smallvec, SmallVec};
 use std::pin::Pin;
 use void::Void;
 
@@ -120,18 +123,13 @@ impl<TSocket> OutboundUpgrade<TSocket> for ProtocolConfig
 where
     TSocket: AsyncWrite + AsyncRead + Unpin + Send + 'static,
 {
-    type Output = (Framed<TSocket, GossipsubCodec>, PeerKind);
+    /// The substream is only written to, with frames from [`encode_frame`], so it isn't framed.
+    type Output = (TSocket, PeerKind);
     type Error = Void;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
 
     fn upgrade_outbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
-        Box::pin(future::ok((
-            Framed::new(
-                socket,
-                GossipsubCodec::new(self.max_transmit_size, self.validation_mode),
-            ),
-            protocol_id.kind,
-        )))
+        Box::pin(future::ok((socket, protocol_id.kind)))
     }
 }
 
@@ -210,6 +208,66 @@ impl GossipsubCodec {
     }
 }
 
+/// A frame of the gossipsub protocol, as chunks to be written to the substream in order.
+pub(crate) type Frame = SmallVec<[Bytes; 3]>;
+
+/// Encodes `rpc` as a frame of the gossipsub protocol: the length of the RPC as an unsigned
+/// varint, then the RPC, as [`GossipsubCodec`] encodes it.
+///
+/// A message that is published or forwarded is encoded around its data instead of copying it, so
+/// the frames that send a message to each peer all share its data.
+pub(crate) fn encode_frame(rpc: RpcOut) -> Frame {
+    let message = match rpc {
+        RpcOut::Publish(message) | RpcOut::Forward(message) => message,
+        rpc => {
+            let mut frame = BytesMut::new();
+            quick_protobuf_codec::Codec::<proto::RPC>::new(usize::MAX)
+                .encode(rpc.into_protobuf(), &mut frame)
+                .expect("Encoding to succeed");
+            return smallvec![frame.freeze()];
+        }
+    };
+
+    // `data` is the second field of `proto::Message`: the source comes before it and the other
+    // fields after it.
+    let from = message.source.map(|m| m.to_bytes());
+    let after_data = proto::Message {
+        from: None,
+        data: None,
+        seqno: message.sequence_number.map(|s| s.to_be_bytes().to_vec()),
+        topic: TopicHash::into_string(message.topic),
+        signature: message.signature,
+        key: message.key,
+    };
+    let message_len = from.as_ref().map_or(0, |from| 1 + sizeof_len(from.len()))
+        + 1
+        + sizeof_len(message.data.len())
+        + after_data.get_size();
+
+    // The frame's length, the RPC's `publish` field holding the message, then the message up to
+    // its data.
+    let mut head = Vec::new();
+    let mut writer = Writer::new(&mut head);
+    writer
+        .write_varint((1 + sizeof_len(message_len)) as u64)
+        .and_then(|()| writer.write_tag(18))
+        .and_then(|()| writer.write_varint(message_len as u64))
+        .and_then(|()| match &from {
+            Some(from) => writer.write_with_tag(10, |w| w.write_bytes(from)),
+            None => Ok(()),
+        })
+        .and_then(|()| writer.write_tag(18))
+        .and_then(|()| writer.write_varint(message.data.len() as u64))
+        .expect("Encoding to succeed");
+
+    let mut tail = Vec::with_capacity(after_data.get_size());
+    after_data
+        .write_message(&mut Writer::new(&mut tail))
+        .expect("Encoding to succeed");
+
+    smallvec![head.into(), message.data, tail.into()]
+}
+
 impl Encoder for GossipsubCodec {
     type Item<'a> = proto::RPC;
     type Error = quick_protobuf_codec::Error;
@@ -282,7 +340,7 @@ impl Decoder for GossipsubCodec {
             if let Some(validation_error) = invalid_kind.take() {
                 let message = RawMessage {
                     source: None, // don't bother inform the application
-                    data: message.data.unwrap_or_default(),
+                    data: message.data.unwrap_or_default().into(),
                     sequence_number: None, // don't inform the application
                     topic: TopicHash::from_raw(message.topic),
                     signature: None, // don't inform the application
@@ -302,7 +360,7 @@ impl Decoder for GossipsubCodec {
                 // and source)
                 let message = RawMessage {
                     source: None, // don't bother inform the application
-                    data: message.data.unwrap_or_default(),
+                    data: message.data.unwrap_or_default().into(),
                     sequence_number: None, // don't inform the application
                     topic: TopicHash::from_raw(message.topic),
                     signature: None, // don't inform the application
@@ -327,7 +385,7 @@ impl Decoder for GossipsubCodec {
                         );
                         let message = RawMessage {
                             source: None, // don't bother inform the application
-                            data: message.data.unwrap_or_default(),
+                            data: message.data.unwrap_or_default().into(),
                             sequence_number: None, // don't inform the application
                             topic: TopicHash::from_raw(message.topic),
                             signature: message.signature, // don't inform the application
@@ -346,7 +404,7 @@ impl Decoder for GossipsubCodec {
                     tracing::debug!("Sequence number not present but expected");
                     let message = RawMessage {
                         source: None, // don't bother inform the application
-                        data: message.data.unwrap_or_default(),
+                        data: message.data.unwrap_or_default().into(),
                         sequence_number: None, // don't inform the application
                         topic: TopicHash::from_raw(message.topic),
                         signature: message.signature, // don't inform the application
@@ -372,7 +430,7 @@ impl Decoder for GossipsubCodec {
                                 tracing::debug!("Message source has an invalid PeerId");
                                 let message = RawMessage {
                                     source: None, // don't bother inform the application
-                                    data: message.data.unwrap_or_default(),
+                                    data: message.data.unwrap_or_default().into(),
                                     sequence_number,
                                     topic: TopicHash::from_raw(message.topic),
                                     signature: message.signature, // don't inform the application
@@ -396,7 +454,7 @@ impl Decoder for GossipsubCodec {
             // This message has passed all validation, add it to the validated messages.
             messages.push(RawMessage {
                 source,
-                data: message.data.unwrap_or_default(),
+                data: message.data.unwrap_or_default().into(),
                 sequence_number,
                 topic: TopicHash::from_raw(message.topic),
                 signature: message.signature,
@@ -583,6 +641,61 @@ mod tests {
         }
 
         QuickCheck::new().quickcheck(prop as fn(_) -> _)
+    }
+
+    /// Returns the frame that [`GossipsubCodec`] encodes `rpc` into.
+    fn codec_frame(rpc: RpcOut) -> Vec<u8> {
+        let mut codec = GossipsubCodec::new(u32::MAX as usize, ValidationMode::Strict);
+        let mut buf = BytesMut::new();
+        codec.encode(rpc.into_protobuf(), &mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    #[test]
+    /// Test that the frames written to the substream are the frames the codec encodes, and that
+    /// published messages share their data with the frames.
+    fn encode_frame_matches_codec() {
+        fn prop(message: Message) {
+            let message = message.0;
+            for rpc in [
+                RpcOut::Publish(message.clone()),
+                RpcOut::Forward(message.clone()),
+            ] {
+                let frame = encode_frame(rpc.clone());
+                assert_eq!(frame.concat(), codec_frame(rpc));
+                assert_eq!(frame[1].as_ptr(), message.data.as_ptr());
+            }
+        }
+
+        QuickCheck::new().quickcheck(prop as fn(_) -> _);
+
+        let anonymous = RawMessage {
+            source: None,
+            data: Bytes::new(),
+            sequence_number: None,
+            topic: TopicHash::from_raw("topic"),
+            signature: None,
+            key: None,
+            validated: true,
+        };
+        let large = RawMessage {
+            source: Some(PeerId::random()),
+            data: vec![7; 2 * 1024 * 1024].into(),
+            sequence_number: Some(u64::MAX),
+            key: Some(vec![1; 300]),
+            signature: Some(vec![2; 200]),
+            ..anonymous.clone()
+        };
+        for rpc in [
+            RpcOut::Forward(anonymous),
+            RpcOut::Publish(large),
+            RpcOut::Subscribe(TopicHash::from_raw("topic")),
+            RpcOut::Control(ControlAction::IWant {
+                message_ids: vec![MessageId::new(b"id")],
+            }),
+        ] {
+            assert_eq!(encode_frame(rpc.clone()).concat(), codec_frame(rpc));
+        }
     }
 
     #[test]
