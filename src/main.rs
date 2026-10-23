@@ -124,7 +124,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
     }
     if node_config.role == NodeRole::LocalAggregator {
-        leansim::node::local_aggregator::record_own_signature(&state, &mut swarm).await?;
+        leansim::node::local_aggregator::record_own_signature(&state).await?;
     }
 
     let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);
@@ -152,77 +152,40 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                     state.mark_seen(msg_id);
                 }
 
-                match &wire_msg {
-                    WireMessage::ValidatorSignature {
-                        sender_id,
-                        validator_id,
-                        subnet_id,
-                        ..
-                    } => {
-                        let size = wire_msg.encode().len() as u64;
-                        // Track download bandwidth (both unique and duplicate)
-                        state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
-                        state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
-                        emit(&JsonlEvent::SigReceived {
-                            node_id: state.node_id,
-                            from_id: *sender_id,
-                            validator_id: Some(*validator_id),
-                            from_peer_id: from_peer_str,
-                            subnet_id: *subnet_id,
-                            duplicate: is_dup,
-                            ts_ms: state.elapsed_ms(),
-                            byte_size: size,
-                        });
-                        // Approximate lazy gossip traffic. Full-message forwarding to mesh and
-                        // explicit peers is not observable at this layer.
-                        if !is_dup {
-                            // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
-                            let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil()
-                                as u64)
-                                .max(1);
-                            state
-                                .bytes_sent_sig
-                                .fetch_add(size * d_lazy, Ordering::Relaxed);
-                            state.msgs_sent_sig.fetch_add(d_lazy, Ordering::Relaxed);
-                        }
-                    }
-                    WireMessage::LocalProof {
-                        sender_id,
-                        subnet_id,
-                        covered_validator_count,
-                        ..
-                    } => {
-                        let size = wire_msg.encode().len() as u64;
-                        state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
-                        state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
-                        emit(&JsonlEvent::LocalProofReceived {
-                            node_id: state.node_id,
-                            from_id: *sender_id,
-                            from_peer_id: from_peer_str,
-                            subnet_id: *subnet_id,
-                            covered_sigs: *covered_validator_count,
-                            duplicate: is_dup,
-                            ts_ms: state.elapsed_ms(),
-                            byte_size: size,
-                        });
-                    }
-                    _ => {}
+                let WireMessage::ValidatorSignature {
+                    sender_id,
+                    validator_id,
+                    subnet_id,
+                    ..
+                } = &wire_msg;
+                let size = wire_msg.encode().len() as u64;
+                // Track download bandwidth (both unique and duplicate)
+                state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
+                state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
+                emit(&JsonlEvent::SigReceived {
+                    node_id: state.node_id,
+                    from_id: *sender_id,
+                    validator_id: Some(*validator_id),
+                    from_peer_id: from_peer_str,
+                    subnet_id: *subnet_id,
+                    duplicate: is_dup,
+                    ts_ms: state.elapsed_ms(),
+                    byte_size: size,
+                });
+                // Approximate lazy gossip traffic. Full-message forwarding to mesh and
+                // explicit peers is not observable at this layer.
+                if !is_dup {
+                    // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
+                    let d_lazy =
+                        ((state.config.gossipsub_mesh_n as f64).sqrt().ceil() as u64).max(1);
+                    state
+                        .bytes_sent_sig
+                        .fetch_add(size * d_lazy, Ordering::Relaxed);
+                    state.msgs_sent_sig.fetch_add(d_lazy, Ordering::Relaxed);
                 }
 
-                match state.role {
-                    NodeRole::LocalAggregator => {
-                        leansim::node::local_aggregator::handle_message(
-                            &state, &mut swarm, &wire_msg,
-                        )
-                        .await?;
-                    }
-                    NodeRole::GlobalAggregator => {
-                        leansim::node::global_aggregator::handle_message(
-                            &state, &mut swarm, &wire_msg,
-                        )
-                        .await?;
-                    }
-                    NodeRole::Validator | NodeRole::Relay => {}
+                if state.role == NodeRole::LocalAggregator {
+                    leansim::node::local_aggregator::handle_message(&state, &wire_msg).await?;
                 }
             }
             Ok(None) => {

@@ -31,12 +31,6 @@ pub struct NodeState {
     /// Whether this local aggregator has already published its local proof.
     pub snark1_sent: AtomicBool,
 
-    /// Global aggregator: (sender_id, subnet_id) → covered validator count from that proof.
-    pub received_proofs: DashMap<(u32, u32), usize>,
-
-    /// Whether this global aggregator has already completed.
-    pub snark2_completed: AtomicBool,
-
     /// Per-node message sequence counter.
     pub seq_counter: AtomicU64,
 
@@ -54,7 +48,7 @@ impl NodeState {
             role,
             subnet_id,
             validator_ids: match role {
-                NodeRole::GlobalAggregator | NodeRole::Relay => Vec::new(),
+                NodeRole::Relay => Vec::new(),
                 _ => vec![node_id],
             },
             explicit_subscribed_subnets: Vec::new(),
@@ -64,8 +58,6 @@ impl NodeState {
             sig_sent: AtomicBool::new(false),
             received_sigs: DashMap::new(),
             snark1_sent: AtomicBool::new(false),
-            received_proofs: DashMap::new(),
-            snark2_completed: AtomicBool::new(false),
             seq_counter: AtomicU64::new(0),
             bytes_sent_sig: AtomicU64::new(0),
             bytes_recv_sig: AtomicU64::new(0),
@@ -122,9 +114,5 @@ impl NodeState {
 
     pub fn validators_per_subnet(&self) -> usize {
         self.config.validators_per_subnet()
-    }
-
-    pub fn total_validators(&self) -> usize {
-        self.config.validator_count
     }
 }

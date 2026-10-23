@@ -38,14 +38,8 @@ pub struct ExperimentConfig {
     #[serde(default = "default_local_aggregators")]
     pub local_aggregators_per_subnet: usize,
 
-    #[serde(default = "default_global_aggregators")]
-    pub global_aggregator_count: usize,
-
     #[serde(default = "defaults::default_local_threshold")]
     pub local_threshold: f64,
-
-    #[serde(default = "defaults::default_global_proof_target")]
-    pub global_proof_target: f64,
 
     #[serde(default = "defaults::default_burst_time_ms")]
     pub burst_time_ms: u64,
@@ -56,14 +50,8 @@ pub struct ExperimentConfig {
     #[serde(default = "defaults::default_signature_aggregation_rate")]
     pub signature_aggregation_rate: u64,
 
-    #[serde(default = "defaults::default_global_aggregation_rate")]
-    pub global_aggregation_rate: u64,
-
     #[serde(default = "defaults::default_signature_payload_bytes")]
     pub signature_payload_bytes: usize,
-
-    #[serde(default = "defaults::default_proof_payload_bytes")]
-    pub proof_payload_bytes: usize,
 
     #[serde(default = "defaults::default_mesh_n_low")]
     pub gossipsub_mesh_n_low: usize,
@@ -160,28 +148,13 @@ impl ExperimentConfig {
         if self.local_threshold <= 0.0 || self.local_threshold > 1.0 {
             return Err("local_threshold must be in (0.0, 1.0]".into());
         }
-        if self.global_proof_target <= 0.0 || self.global_proof_target > 1.0 {
-            return Err("global_proof_target must be in (0.0, 1.0]".into());
-        }
         if self.signature_aggregation_rate == 0 {
             return Err("signature_aggregation_rate must be > 0".into());
-        }
-        if self.global_aggregation_rate == 0 {
-            return Err("global_aggregation_rate must be > 0".into());
         }
         if self.signature_payload_bytes == 0 {
             return Err("signature_payload_bytes must be > 0".into());
         }
-        if self.proof_payload_bytes == 0 {
-            return Err("proof_payload_bytes must be > 0".into());
-        }
         Ok(())
-    }
-
-    /// Host count when every validator runs on its own host. Hosts that run several
-    /// validators (see the launcher's `validator_map`) reduce the actual count.
-    pub fn total_nodes(&self) -> usize {
-        self.validator_count + self.global_aggregator_count
     }
 
     pub fn heartbeat_initial_delay_ms(&self) -> u64 {
@@ -206,7 +179,6 @@ impl ExperimentConfig {
 pub enum NodeRole {
     Validator,
     LocalAggregator,
-    GlobalAggregator,
     /// Gossip-only node: subscribes to its assigned subnets and relays, signs nothing.
     Relay,
 }
@@ -237,12 +209,12 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
-    /// Validators whose signatures this host publishes. Global aggregators and relays
-    /// sign nothing; a validator-less local aggregator (an aggregator-only host) signs
-    /// nothing too. The node_id fallback exists for plain validator configs.
+    /// Validators whose signatures this host publishes. Relays sign nothing; a
+    /// validator-less local aggregator (an aggregator-only host) signs nothing too.
+    /// The node_id fallback exists for plain validator configs.
     pub fn signing_validator_ids(&self) -> Vec<u32> {
         match self.role {
-            NodeRole::GlobalAggregator | NodeRole::Relay => Vec::new(),
+            NodeRole::Relay => Vec::new(),
             NodeRole::Validator if self.validator_ids.is_empty() => vec![self.node_id],
             _ => self.validator_ids.clone(),
         }
@@ -254,10 +226,6 @@ fn default_run_timeout() -> u64 {
 }
 
 fn default_local_aggregators() -> usize {
-    1
-}
-
-fn default_global_aggregators() -> usize {
     1
 }
 
