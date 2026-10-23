@@ -34,6 +34,11 @@ gossipsub_mesh_n = 8
 gossipsub_mesh_n_high = 12
 gossipsub_mesh_outbound_min = 2
 gossipsub_heartbeat_interval_ms = 300
+# Every host warms up 3 s before signing: about 2 round trips on the slowest
+# links (up to 259 ms one-way) to learn subscriptions, then a heartbeat to graft
+# meshes. The launcher's dial-count rule would pick 1,500 ms here, which cuts it
+# close on intercontinental links.
+mesh_warmup_ms = 3000
 
 use_geo_latency = true
 geo_seed = 42
