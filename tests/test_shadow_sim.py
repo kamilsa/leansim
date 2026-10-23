@@ -1,5 +1,9 @@
+import contextlib
 import importlib.util
+import io
+import json
 import tempfile
+import tomllib
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -524,6 +528,12 @@ class MeshWarmupTests(unittest.TestCase):
         nodes = [{"seed_addrs": ["a"] * 150, "explicit_peer_addrs": ["a"] * 51}]
         self.assertEqual(shadow_sim.mesh_warmup_ms(nodes), 3000)
 
+    def test_proof_peers_count_as_dials(self) -> None:
+        nodes = [{"node_id": 0, "seed_addrs": ["a"] * 150, "explicit_peer_addrs": []}]
+        plan = {"duties": {"0": {"subnets": [{"subnet": 0, "announce_to": list(range(1, 52))}], "seats": []}}}
+        self.assertEqual(shadow_sim.mesh_warmup_ms(nodes, plan), 3000)
+        self.assertEqual(shadow_sim.mesh_warmup_ms(nodes), 1500)
+
     def test_configured_warmup_must_be_non_negative(self) -> None:
         config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, "mesh_warmup_ms": -1})
         with self.assertRaises(SystemExit):
@@ -611,6 +621,20 @@ class RecursiveSeatTests(unittest.TestCase):
         self.assertEqual(by_peer["S5"]["recursive_seats"], [])
         # A seat does not change the role: BIG also aggregates subnets 0 and 1.
         self.assertEqual(by_peer["BIG"]["role"], "local_aggregator")
+
+    def test_generate_run_writes_the_plan_and_points_hosts_with_duties_at_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()):
+                shadow_sim.generate_run(self.experiment(), output, "/opt/leansim/leansim", 0, "docker")
+            plan_path = output / "aggregation-plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(plan["duties"], key=int), ["0", "1", "3", "6", "7"])
+            self.assertEqual(plan["groups"], [{"layer": 1, "index": 0, "children": [0, 1], "members": [0, 1]}])
+            big = tomllib.loads((output / "configs" / "node_0.toml").read_text(encoding="utf-8"))
+            self.assertEqual(big["aggregation_plan"], str(plan_path.resolve()))
+            s1 = tomllib.loads((output / "configs" / "node_2.toml").read_text(encoding="utf-8"))
+            self.assertNotIn("aggregation_plan", s1)
 
     def test_without_recursion_nodes_have_no_seats(self) -> None:
         nodes = shadow_sim.assign_nodes(self.experiment(recursive_aggregation=False))
