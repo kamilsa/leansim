@@ -121,7 +121,12 @@ impl NodeState {
 
     /// When the earliest pending proof finishes computing, if any.
     pub fn next_proof_due(&self) -> Option<tokio::time::Instant> {
-        self.pending_proofs.lock().unwrap().iter().map(|proof| proof.due).min()
+        self.pending_proofs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|proof| proof.due)
+            .min()
     }
 
     /// Removes and returns proofs due by `now`, earliest first (subnet breaks ties).
