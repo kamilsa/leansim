@@ -25,6 +25,8 @@ EVENT_NAMES = {
     "ProofFetchFailed",
     "ProofServed",
     "RecursiveProofGenerated",
+    "TrafficBucket",
+    "TrafficPeer",
     "NodeStats",
 }
 
@@ -164,6 +166,44 @@ def recursive_summary(output_dir, recursive_done, final_times, traffic, local_la
     }
 
 
+# Peers kept per host in the snapshot; the dashboard's peer chart shows the top 15.
+MAX_TRAFFIC_PEERS = 50
+
+
+def traffic_summary(traffic_buckets, traffic_peers, peer_ids):
+    """Per-host traffic for hosts that logged it: bucket totals by kind, run
+    totals, and the busiest peers (`node:<id>` keys resolved through NodePeerId
+    events, `peer:<base58>` keys kept as-is when the node is unknown)."""
+    summary = {}
+    for node_id, buckets_at in traffic_buckets.items():
+        starts = sorted(buckets_at)
+        buckets = [buckets_at[start] for start in starts]
+        peers = []
+        for key, totals in traffic_peers.get(node_id, {}).items():
+            if key.startswith("peer:"):
+                peer_node = peer_ids.get(key[5:])
+            elif key.startswith("node:") and key[5:].isdigit():
+                peer_node = int(key[5:])
+            else:
+                peer_node = None
+            peers.append(
+                {
+                    "peer": f"node {peer_node}" if peer_node is not None else key,
+                    "node_id": peer_node,
+                    **totals,
+                }
+            )
+        peers.sort(key=lambda peer: (-(peer["inbound"] + peer["outbound"]), str(peer["peer"])))
+        summary[str(node_id)] = {
+            "bucket_ms": buckets[-1].pop("width_ms"),
+            "sent": sum(sum(bucket["outbound"].values()) for bucket in buckets),
+            "received": sum(sum(bucket["inbound"].values()) for bucket in buckets),
+            "buckets": buckets,
+            "peers": peers[:MAX_TRAFFIC_PEERS],
+        }
+    return summary
+
+
 def build_snapshot(output_dir):
     """Parse a run directory into a JSON-serializable metrics snapshot."""
     output_dir = output_dir.resolve()
@@ -192,6 +232,8 @@ def build_snapshot(output_dir):
         "announcements": 0, "pulls": 0, "proofs_fetched": 0, "extra_proofs_fetched": 0,
         "failed_pulls": 0, "fetched_bytes": 0, "served_bytes": 0,
     }
+    traffic_buckets = defaultdict(dict)
+    traffic_peers = defaultdict(dict)
     for path in event_files(output_dir):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -282,6 +324,29 @@ def build_snapshot(output_dir):
                     recursive_done[(layer_id, group_index)].append(timestamp)
                     if event.get("is_final") is True:
                         final_times.append(timestamp)
+            elif name == "TrafficBucket":
+                node_id = integer(event.get("node_id"))
+                start_ms = integer(event.get("start_ms"))
+                width_ms = integer(event.get("width_ms"))
+                if node_id is None or start_ms is None or width_ms is None:
+                    continue
+                traffic_buckets[node_id][start_ms] = {
+                    "start_ms": start_ms,
+                    "width_ms": width_ms,
+                    "inbound": {str(kind): integer(bytes) or 0 for kind, bytes in event.get("inbound", {}).items()},
+                    "outbound": {str(kind): integer(bytes) or 0 for kind, bytes in event.get("outbound", {}).items()},
+                }
+            elif name == "TrafficPeer":
+                node_id = integer(event.get("node_id"))
+                peer = event.get("peer")
+                if node_id is None or not isinstance(peer, str) or not peer:
+                    continue
+                traffic_peers[node_id][peer] = {
+                    "inbound": integer(event.get("inbound_bytes")) or 0,
+                    "outbound": integer(event.get("outbound_bytes")) or 0,
+                    "inbound_msgs": integer(event.get("inbound_msgs")) or 0,
+                    "outbound_msgs": integer(event.get("outbound_msgs")) or 0,
+                }
             elif name == "NodeStats":
                 node_id = integer(event.get("node_id"))
                 if node_id is None:
@@ -404,6 +469,7 @@ def build_snapshot(output_dir):
             "threshold_fraction": threshold_fraction,
             "node_threshold_ms": node_threshold,
             "recursive_aggregation": recursive_summary(output_dir, recursive_done, final_times, proof_traffic, local_latencies),
+            "traffic": traffic_summary(traffic_buckets, traffic_peers, peer_ids),
         },
         "cdf": cdf,
         "node_stats": nodes,
@@ -538,6 +604,92 @@ renderTable(); draw(views[selected]);
 """
 
 
+TRAFFIC_JS = """
+const data = JSON.parse(document.getElementById('traffic-data').textContent);
+const traffic = data.traffic;
+const colors = {signature: '#5aa9e6', duplicate_signature: '#2f6f9e', proof_payload: '#e07a4f', proof_announce: '#d9b26a', proof_request: '#8f7bd8', proof_control: '#6b7280'};
+const mb = (bytes) => bytes / 1e6;
+const kinds = [...new Set(traffic.buckets.flatMap(bucket => [...Object.keys(bucket.inbound), ...Object.keys(bucket.outbound)]))].sort();
+const x = traffic.buckets.map(bucket => bucket.start_ms / 1000);
+const traces = [];
+for (const kind of kinds) {
+  traces.push({name: kind.replaceAll('_', ' ') + ' · sent', type: 'bar', x, y: traffic.buckets.map(bucket => mb(bucket.outbound[kind] || 0)), marker: {color: colors[kind] || '#7f8c9b'}, legendgroup: kind, hovertemplate: '%{y:.2f} MB sent at %{x:.1f} s<extra>' + kind + '</extra>'});
+}
+for (const kind of kinds) {
+  traces.push({name: kind.replaceAll('_', ' ') + ' · received', type: 'bar', x, y: traffic.buckets.map(bucket => -mb(bucket.inbound[kind] || 0)), marker: {color: colors[kind] || '#7f8c9b'}, legendgroup: kind, showlegend: false, hovertemplate: '%{y:.2f} MB received at %{x:.1f} s<extra>' + kind + '</extra>'});
+}
+const dark = {paper_bgcolor: '#14161a', plot_bgcolor: '#14161a', font: {color: '#d7dae0'}};
+Plotly.newPlot('timeline', traces, Object.assign({}, dark, {
+  barmode: 'relative', bargap: 0.05,
+  xaxis: {title: 'time (s)', gridcolor: '#262b33', zeroline: false},
+  yaxis: {title: 'MB · sent above, received below', gridcolor: '#262b33', zerolinecolor: '#5b6472'},
+  margin: {t: 30, l: 70, r: 20, b: 110}, legend: {orientation: 'h', y: -0.25, font: {size: 10}}
+}), {responsive: true, displaylogo: false});
+const peers = traffic.peers.slice(0, 15).reverse();
+Plotly.newPlot('peers', [
+  {name: 'sent', type: 'bar', orientation: 'h', y: peers.map(peer => peer.peer), x: peers.map(peer => mb(peer.outbound)), marker: {color: '#e07a4f'}, hovertemplate: '%{x:.2f} MB sent<extra>%{y}</extra>'},
+  {name: 'received', type: 'bar', orientation: 'h', y: peers.map(peer => peer.peer), x: peers.map(peer => -mb(peer.inbound)), marker: {color: '#5aa9e6'}, hovertemplate: '%{x:.2f} MB received<extra>%{y}</extra>'},
+], Object.assign({}, dark, {
+  barmode: 'relative', title: 'busiest peers',
+  xaxis: {title: 'MB · sent right, received left', gridcolor: '#262b33', zerolinecolor: '#5b6472'},
+  yaxis: {automargin: true}, margin: {t: 40, l: 90, r: 20, b: 50}, legend: {orientation: 'h', y: -0.15}
+}), {responsive: true, displaylogo: false});
+document.getElementById('node').textContent = data.node;
+document.getElementById('run').textContent = data.run + ' · ' + traffic.bucket_ms + ' ms buckets · ' + traffic.buckets.length + ' buckets with traffic';
+document.getElementById('received').textContent = mb(traffic.received).toFixed(2) + ' MB';
+document.getElementById('sent').textContent = mb(traffic.sent).toFixed(2) + ' MB';
+document.getElementById('buckets').textContent = number(traffic.buckets.length);
+const peak = traffic.buckets.reduce((best, bucket) => Math.max(best, mb(Object.values(bucket.inbound).reduce((a, b) => a + b, 0) + Object.values(bucket.outbound).reduce((a, b) => a + b, 0))), 0);
+document.getElementById('peak').textContent = peak.toFixed(2) + ' MB';
+document.getElementById('peers-count').textContent = number(traffic.peers.length);
+"""
+
+TRAFFIC_TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leanSim traffic: node {node_id}</title><style>
+:root {{ color-scheme: dark; }}
+body {{ background: #14161a; color: #d7dae0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 0 auto; padding: 28px; max-width: 1500px; }}
+h1 {{ font-size: 1.3rem; margin: 0 0 4px; font-weight: 600; }} h1 span {{ color: #e07a4f; }}
+.sub {{ color: #8b93a1; margin: 0 0 22px; font-size: .88rem; }}
+.cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }}
+.card, .panel {{ background: #1b1f26; border: 1px solid #262b33; border-radius: 10px; }}
+.card {{ padding: 14px; }} .card b {{ display: block; font-size: 1.3rem; margin-top: 6px; font-variant-numeric: tabular-nums; }}
+.label {{ color: #8b93a1; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }}
+.grid {{ display: grid; gap: 16px; }} .panel {{ padding: 10px; min-width: 0; }}
+#timeline {{ width: 100%; height: 430px; }} #peers {{ width: 100%; height: 430px; }}
+@media (min-width: 1100px) {{ .two {{ grid-template-columns: 3fr 2fr; }} }}
+</style></head><body>
+<h1>Traffic: node <span id="node"></span></h1><p class="sub" id="run"></p>
+<section class="cards">
+<div class="card"><span class="label">Received</span><b id="received"></b></div>
+<div class="card"><span class="label">Sent</span><b id="sent"></b></div>
+<div class="card"><span class="label">Buckets with traffic</span><b id="buckets"></b></div>
+<div class="card"><span class="label">Peak bucket</span><b id="peak"></b></div>
+<div class="card"><span class="label">Peers seen</span><b id="peers-count"></b></div>
+</section>
+<section class="grid two"><div class="panel"><div id="timeline"></div></div><div class="panel"><div id="peers"></div></div></section>
+<script id="traffic-data" type="application/json">{data}</script>
+<script>{plotly}</script>
+<script>{script}</script>
+</body></html>
+"""
+
+
+def generate_traffic_html(snapshot, directory, plotly_js):
+    """One dark dashboard per host that kept traffic logs."""
+    traffic = snapshot.get("metrics", {}).get("traffic") or {}
+    run = Path(snapshot.get("output_dir", "")).name
+    for node_id, logged in traffic.items():
+        data = json_data({"node": node_id, "run": run, "traffic": logged})
+        document = TRAFFIC_TEMPLATE.format(
+            node_id=html.escape(str(node_id)),
+            data=data,
+            plotly=plotly_js,
+            script=TRAFFIC_JS,
+        )
+        (directory / f"traffic-{node_id}.html").write_text(document, encoding="utf-8")
+
+
 def generate_html(primary_snapshot, history, output):
     """Create a self-contained report, importing Plotly only when needed."""
     try:
@@ -552,6 +704,17 @@ def generate_html(primary_snapshot, history, output):
     report_data = json_data({"views": views, "selected": selected})
     plotly_js = get_plotlyjs().replace("</script", "<\\/script")
     title = html.escape("leanSim analysis: " + Path(primary_snapshot["output_dir"]).name)
+    logged_hosts = ",".join(sorted((primary_snapshot.get("metrics", {}).get("traffic") or {}), key=int))
+    traffic_links = (
+        '<p class="traffic-links">Traffic logs per host: '
+        + " ".join(
+            f'<a href="traffic-{node_id}.html">node {html.escape(node_id)}</a>'
+            for node_id in logged_hosts.split(",") if node_id
+        )
+        + "</p>"
+        if logged_hosts
+        else ""
+    )
     document = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>""" + title + """</title><style>
@@ -565,9 +728,10 @@ select { margin: 10px 10px 0; padding: 5px; } @media (max-width: 780px) { body {
 </style></head><body><h1>leanSim run analysis</h1><p class="sub" id="run-name"></p>
 <section class="cards"><div class="card"><span class="label">Event bytes</span><b id="bytes"></b></div><div class="card"><span class="label">Unique validators</span><b id="validators"></b></div><div class="card"><span class="label">Duplicates / ratio</span><b id="duplicates"></b></div><div class="card"><span class="label">90% arrival</span><b id="arrival"></b></div><div class="card"><span class="label">p95 node at threshold</span><b id="node-threshold"></b></div><div class="card"><span class="label">Final proof</span><b id="final-proof"></b></div><div class="card"><span class="label">History snapshots</span><b>""" + str(len(views)) + """</b></div></section>
 <section class="grid"><div class="panel"><div id="cdf"></div></div><div class="panel"><div id="local"></div></div><div class="panel wide"><div id="tree"></div></div><div class="panel wide"><label for="node-field">Per-node measure</label><select id="node-field"><option value="bytes_total">total bytes</option><option value="bytes_sent">bytes sent</option><option value="bytes_received">bytes received</option><option value="msgs_total">total messages</option><option value="msgs_sent">messages sent</option><option value="msgs_received">messages received</option></select><div id="nodes"></div></div>
-<div class="panel wide table-wrap"><table><thead><tr><th>Run</th><th>Seed</th><th>Index</th><th>Validators</th><th>90% arrival</th><th>Event bytes</th></tr></thead><tbody id="history-body"></tbody></table></div></section>
+<div class="panel wide table-wrap"><table><thead><tr><th>Run</th><th>Seed</th><th>Index</th><th>Validators</th><th>90% arrival</th><th>Event bytes</th></tr></thead><tbody id="history-body"></tbody></table></div></section>""" + traffic_links + """
 <script id="snapshot-data" type="application/json">""" + report_data + """</script><script>""" + plotly_js + """</script><script>""" + INTERACTIVE_JS + """</script></body></html>"""
     output.write_text(document, encoding="utf-8")
+    generate_traffic_html(primary_snapshot, output.parent, plotly_js)
 
 
 def serve_directory(directory, port):
@@ -694,6 +858,36 @@ def self_test():
             "announcements": 2, "pulls": 1, "proofs_fetched": 3, "extra_proofs_fetched": 1,
             "failed_pulls": 1, "fetched_bytes": 300, "served_bytes": 100,
         }
+        traffic_dir = root / "traffic"
+        stdout = traffic_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        # Host 7 logs two buckets; peer 9 is known by its PeerId, peer 5 by node id.
+        stdout.write_text("\n".join((
+            '{"event":"NodePeerId","node_id":9,"peer_id":"peer-9"}',
+            '{"event":"TrafficBucket","node_id":7,"start_ms":4300,"width_ms":100,"inbound":{"signature":1200,"proof_payload":262144},"outbound":{"signature":2400}}',
+            '{"event":"TrafficBucket","node_id":7,"start_ms":4400,"width_ms":100,"inbound":{},"outbound":{"proof_announce":128}}',
+            '{"event":"TrafficPeer","node_id":7,"peer":"peer:peer-9","inbound_bytes":1200,"outbound_bytes":2400,"inbound_msgs":1,"outbound_msgs":2}',
+            '{"event":"TrafficPeer","node_id":7,"peer":"node:5","inbound_bytes":262144,"outbound_bytes":0,"inbound_msgs":1,"outbound_msgs":0}',
+        )), encoding="utf-8")
+        (traffic_dir / "run-manifest.json").write_text(json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8")
+        traffic_snapshot = build_snapshot(traffic_dir)
+        traffic = traffic_snapshot["metrics"]["traffic"]
+        assert traffic_snapshot["metrics"]["total_bytes"] == 0, "traffic events must not count as signature traffic"
+        assert set(traffic) == {"7"}
+        logged = traffic["7"]
+        assert logged["bucket_ms"] == 100
+        assert logged["received"] == 263344 and logged["sent"] == 2528
+        assert [bucket["start_ms"] for bucket in logged["buckets"]] == [4300, 4400]
+        assert logged["peers"] == [
+            {"peer": "node 5", "node_id": 5, "inbound": 262144, "outbound": 0, "inbound_msgs": 1, "outbound_msgs": 0},
+            {"peer": "node 9", "node_id": 9, "inbound": 1200, "outbound": 2400, "inbound_msgs": 1, "outbound_msgs": 2},
+        ]
+        assert primary["metrics"]["traffic"] == {}
+        report = root / "traffic-report" / "summary.html"
+        report.parent.mkdir()
+        generate_html(traffic_snapshot, [], report)
+        dashboard = (report.parent / "traffic-7.html").read_text(encoding="utf-8")
+        assert "node 7" in dashboard and "traffic-data" in dashboard
         history = merge_history([], [primary, overlay], append=False)
         assert len(history) == 2
         assert len(merge_history(history, [primary, overlay], append=False)) == 2
@@ -706,6 +900,10 @@ def self_test():
             js_path.write_text(INTERACTIVE_JS, encoding="utf-8")
             import subprocess
             result = subprocess.run(["node", "--check", str(js_path)], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            traffic_js_path = root / "traffic.js"
+            traffic_js_path.write_text(TRAFFIC_JS, encoding="utf-8")
+            result = subprocess.run(["node", "--check", str(traffic_js_path)], capture_output=True, text=True)
             assert result.returncode == 0, result.stderr
     print("self-test passed")
 
