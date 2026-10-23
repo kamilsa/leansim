@@ -239,3 +239,19 @@ fn threshold_met_exactly() {
     let count = (0..22u32).map(|i| state.record_sig(0, i)).last().unwrap();
     assert!(count >= threshold);
 }
+
+#[tokio::test]
+async fn completed_local_proofs_are_returned_for_announcing() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    state.schedule_proof(PendingProof {
+        due: tokio::time::Instant::now(),
+        subnet: 0,
+        sig_count: 22,
+    });
+    let done = local_aggregator::complete_due_proofs(&state);
+    assert_eq!(
+        done.iter().map(|proof| proof.subnet).collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert!(local_aggregator::complete_due_proofs(&state).is_empty());
+}
