@@ -7,9 +7,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use leansim::config::experiment::{NodeConfig, NodeRole};
+use leansim::config::plan::AggregationPlan;
+use leansim::messages::proof::ProofId;
 use leansim::messages::wire::WireMessage;
 use leansim::metrics::events::{emit, JsonlEvent};
-use leansim::network::swarm::{NetEvent, ReceivedMessage};
+use leansim::network::swarm::{peer_id_for, NetEvent, ReceivedMessage};
+use leansim::node::proof_io::ProofIo;
+use leansim::node::recursive::ProofExchange;
 use leansim::node::state::NodeState;
 
 #[derive(Parser)]
@@ -56,7 +60,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let state = Arc::new(
-        leansim::node::state::NodeState::new(
+        NodeState::new(
             node_config.node_id,
             node_config.role,
             node_config.subnet_id,
@@ -91,6 +95,35 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         peer_id: swarm.local_peer_id().to_base58(),
     });
 
+    // Proof duties from the launcher's plan. The hosts this one announces to are
+    // dialed with the seeds, so their connections are up before the first proof.
+    let plan = node_config
+        .aggregation_plan
+        .as_deref()
+        .map(AggregationPlan::load)
+        .transpose()?;
+    let duties = plan
+        .as_ref()
+        .map(|plan| plan.duties_of(node_config.node_id))
+        .unwrap_or_default();
+    let mut dial_addrs = node_config.seed_addrs.clone();
+    if let Some(plan) = &plan {
+        for peer in duties.peers() {
+            let addr = plan.addrs.get(&peer).ok_or_else(|| {
+                anyhow::anyhow!("aggregation plan has no address for node {peer}")
+            })?;
+            swarm.add_peer_address(peer_id_for(peer), addr.parse()?);
+            dial_addrs.push(addr.clone());
+        }
+    }
+    let experiment = &node_config.experiment;
+    let mut exchange = ProofExchange::new(
+        duties,
+        experiment.recursive_proofs_per_child,
+        Duration::from_millis(experiment.recursive_aggregation_time_ms),
+    );
+    let mut proof_io = ProofIo::new(state.node_id, experiment.aggregate_proof_bytes);
+
     let selected_aggregator_topics: Vec<_> = signing_subnets
         .iter()
         .map(|&subnet| {
@@ -102,7 +135,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         .collect();
     leansim::network::swarm::dial_seeds(
         &mut swarm,
-        &node_config.seed_addrs,
+        &dial_addrs,
         &mut explicit_peers,
         &selected_aggregator_topics,
         node_config.experiment.mesh_warmup_ms,
@@ -123,23 +156,63 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         if tokio::time::Instant::now() >= end {
             break;
         }
-        // Wake for the next message, the next local proof to finish, or the end of the run.
-        let wake = state.next_proof_due().map_or(end, |due| due.min(end));
-        let msg = tokio::time::timeout_at(
+        // Wake for the next message, the next proof to finish, or the end of the run.
+        let wake = [state.next_proof_due(), exchange.next_due()]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(end, |due| due.min(end));
+        let event = tokio::time::timeout_at(
             wake,
             leansim::network::swarm::next_event(&mut swarm, &mut explicit_peers),
         )
         .await;
 
-        match msg {
+        match event {
             Ok(Some(NetEvent::Gossip(received))) => handle_signature(&state, received),
-            // Proof requests and responses are wired up in Task B10.
-            Ok(Some(_)) => {}
+            Ok(Some(NetEvent::ProofRequest { request, channel })) => proof_io.on_request(
+                &mut swarm,
+                &mut exchange,
+                request,
+                channel,
+                state.elapsed_ms(),
+            ),
+            Ok(Some(NetEvent::ProofResponse {
+                request_id,
+                response,
+            })) => proof_io.on_response(
+                &mut swarm,
+                &mut exchange,
+                request_id,
+                response,
+                tokio::time::Instant::now(),
+                state.elapsed_ms(),
+            ),
+            Ok(Some(NetEvent::ProofFailed { request_id })) => {
+                proof_io.on_failure(&mut swarm, &mut exchange, request_id, state.elapsed_ms())
+            }
             Ok(None) => break,
             // A proof came due or the run ended; handled below / at the loop top.
             Err(_elapsed) => {}
         }
-        leansim::node::local_aggregator::complete_due_proofs(&state);
+
+        let now = tokio::time::Instant::now();
+        for proof in leansim::node::local_aggregator::complete_due_proofs(&state) {
+            let actions = exchange.proof_ready(ProofId::subnet(proof.subnet), now);
+            proof_io.execute(&mut swarm, actions, state.elapsed_ms());
+        }
+        for done in exchange.take_due(now) {
+            emit(&JsonlEvent::RecursiveProofGenerated {
+                node_id: state.node_id,
+                layer: done.proof.layer,
+                index: done.proof.index,
+                inputs: done.inputs,
+                is_final: done.is_final,
+                ts_ms: state.elapsed_ms(),
+            });
+            let actions = exchange.proof_ready(done.proof, now);
+            proof_io.execute(&mut swarm, actions, state.elapsed_ms());
+        }
     }
 
     emit(&JsonlEvent::NodeStats {
