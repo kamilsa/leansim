@@ -228,6 +228,34 @@ On the 65k network (`experiments/nodemap-small-65k-recursive-sub64.toml`):
 | 4 | 21 (16/4/1) | 269 (92) | 8-18 | 16 |
 | 8 | 9 (8/1) | 115 (57) | 7-18 | 8 |
 
+#### Traffic logs
+
+Logging every host's traffic would dominate the run's output, so logging is
+opt-in per host: `traffic_log_nodes` lists the hosts that keep it, and only those
+node configs get `traffic_log = true`.
+
+- Each logged host records `TrafficBucket` events every `traffic_log_bucket_ms`
+  (default 100 ms): bytes sent and received in that bucket broken down by
+  `signature`, `duplicate_signature`, `proof_announce`, `proof_request`,
+  `proof_payload`, and `proof_control` (acks, missing answers).
+- At exit it writes one `TrafficPeer` event per peer with the run's totals.
+- Incoming signatures are attributed to the peer that forwarded them. Gossipsub
+  does not expose which peers a forward went to, so outgoing gossip is attributed
+  one copy per MESH peer, up to the lazy fan-out (`ceil(sqrt(mesh_n))`); with fewer
+  mesh peers than that, the logged total is below `NodeStats.bytes_sent`.
+- Proof traffic is attributed to the peer's node id, so a peer shows up under
+  `node:<id>` on the proof side and `peer:<base58>` on the gossip side; the
+  analyzer resolves both through the `NodePeerId` events.
+- Traffic events carry no `byte_size`, so they never enter the run's signature
+  traffic totals.
+- `scripts/analyze.py` writes `traffic-<node>.html` per logged host: sent above
+  and received below the axis, stacked by kind, with the busiest peers beside it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `traffic_log_nodes` | `[]` | Hosts that keep traffic logs |
+| `traffic_log_bucket_ms` | `100` | Bucket width of the traffic chart |
+
 ## Output
 
 For an output directory such as `output/`, a run produces:
@@ -239,6 +267,7 @@ output/
 ├── configs/node_<id>.toml      # one node config per simulated process
 ├── run-manifest.json           # actual node, validator, country, bandwidth, and role assignments
 ├── aggregation-plan.json       # recursive groups and each host's proof duties (recursive aggregation only)
+├── traffic-<node>.html         # sent/received dashboard per traffic-logging host
 ├── run-meta.json               # runner, seed, and campaign index
 ├── shadow.data/hosts/.../*.stdout
 ├── runs-history.json           # persisted analysis snapshots
