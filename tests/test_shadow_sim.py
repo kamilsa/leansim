@@ -382,6 +382,13 @@ class RemovedConfigKeysTests(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=key):
                 shadow_sim.validate_experiment(config)
 
+    def test_renamed_proof_size_key_points_at_its_new_name(self) -> None:
+        config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, "proof_payload_bytes": 131072})
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(config)
+        self.assertIn("aggregate_proof_bytes", stderr.getvalue())
+
     def test_validator_map_is_rejected(self) -> None:
         config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, "validator_map": "located-map.csv"})
         with self.assertRaises(SystemExit):

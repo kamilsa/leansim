@@ -40,12 +40,12 @@ MAX_RECURSION_ARITY = 16
 # The proof protocol's CBOR codec reads at most 10 MiB per response; keep headroom.
 MAX_PROOF_BYTES = 8 * 1024 * 1024
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
-_GLOBAL_AGGREGATION_REMOVED = "global aggregation was removed and will be redesigned"
+_GLOBAL_AGGREGATION_REMOVED = "dedicated global aggregators were replaced by recursive_aggregation (attesters in recursive groups)"
 REMOVED_KEYS = {
     "global_aggregator_count": _GLOBAL_AGGREGATION_REMOVED,
     "global_proof_target": _GLOBAL_AGGREGATION_REMOVED,
-    "global_aggregation_rate": _GLOBAL_AGGREGATION_REMOVED,
-    "proof_payload_bytes": _GLOBAL_AGGREGATION_REMOVED,
+    "global_aggregation_rate": "replaced by recursive_aggregation_time_ms (time per recursive proof)",
+    "proof_payload_bytes": "renamed to aggregate_proof_bytes",
     "validator_map": "located-map placement was removed; use node_map with nodes.csv",
 }
 
