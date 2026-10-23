@@ -1,63 +1,65 @@
-use anyhow::Result;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::time::Duration;
 
 use crate::messages::wire::WireMessage;
 use crate::metrics::events::{emit, JsonlEvent};
-use crate::node::state::NodeState;
+use crate::node::state::{NodeState, PendingProof};
 
-/// Gossipsub does not deliver a published message to its source, but a host
-/// acting as an aggregator has its own validators' signatures immediately.
-pub async fn record_own_signature(state: &Arc<NodeState>) -> Result<()> {
+/// Seeds every aggregated subnet with this host's own validators' signatures:
+/// gossipsub does not deliver a published message back to its source.
+pub fn record_own_signatures(state: &NodeState) {
     for &validator_id in &state.validator_ids {
-        if state.config.subnet_for_validator(validator_id) == state.subnet_id {
-            state.received_sigs.insert(validator_id, ());
-        }
+        let subnet = state.config.subnet_for_validator(validator_id);
+        record_signature(state, subnet, validator_id);
     }
-    maybe_complete_proof(state).await
 }
 
-/// Counts a signature from this aggregator's subnet.
-pub async fn handle_message(state: &Arc<NodeState>, msg: &WireMessage) -> Result<()> {
+/// Handles one gossip message on a local aggregator.
+pub fn handle_message(state: &NodeState, msg: &WireMessage) {
     let WireMessage::ValidatorSignature {
         validator_id,
         subnet_id,
         ..
     } = msg;
-    if *subnet_id != state.subnet_id {
-        return Ok(());
-    }
-    state.received_sigs.insert(*validator_id, ());
-    maybe_complete_proof(state).await
+    record_signature(state, *subnet_id, *validator_id);
 }
 
-/// At the subnet threshold, waits out the simulated aggregation compute and
-/// records the local proof. Proofs are not transmitted: there is no global
-/// aggregation stage.
-async fn maybe_complete_proof(state: &Arc<NodeState>) -> Result<()> {
-    let count = state.received_sigs.len();
-    let threshold = (state.validators_per_subnet() as f64 * state.config.local_threshold) as usize;
-    if count < threshold || state.snark1_sent.swap(true, Ordering::SeqCst) {
-        return Ok(());
+/// Counts a signature for an aggregated subnet. At the threshold the subnet's
+/// local proof is scheduled to finish after the simulated aggregation compute;
+/// each subnet's proof runs independently and the host keeps relaying gossip.
+pub fn record_signature(state: &NodeState, subnet: u32, validator_id: u32) {
+    if !state.aggregates(subnet) {
+        return;
     }
-    let compute_delay = std::time::Duration::from_secs_f64(
-        count as f64 / state.config.signature_aggregation_rate as f64,
-    );
-    tokio::time::sleep(compute_delay).await;
-
-    let latency_ms = state.elapsed_ms();
-    emit(&JsonlEvent::LocalProofGenerated {
-        node_id: state.node_id,
-        subnet_id: state.subnet_id,
+    let count = state.record_sig(subnet, validator_id);
+    let threshold = (state.validators_per_subnet() as f64 * state.config.local_threshold) as usize;
+    if count < threshold || !state.claim_proof(subnet) {
+        return;
+    }
+    let compute = Duration::from_secs_f64(count as f64 / state.config.signature_aggregation_rate as f64);
+    state.schedule_proof(PendingProof {
+        due: tokio::time::Instant::now() + compute,
+        subnet,
         sig_count: count,
-        latency_ms,
     });
-    tracing::info!(
-        "local_aggregator {} completed LocalProof (subnet={}, sigs={}, latency_ms={})",
-        state.node_id,
-        state.subnet_id,
-        count,
-        latency_ms,
-    );
-    Ok(())
+}
+
+/// Records every local proof whose compute has finished. Proofs are not
+/// transmitted: there is no global aggregation stage.
+pub fn complete_due_proofs(state: &NodeState) {
+    for proof in state.take_due_proofs(tokio::time::Instant::now()) {
+        let latency_ms = state.elapsed_ms();
+        emit(&JsonlEvent::LocalProofGenerated {
+            node_id: state.node_id,
+            subnet_id: proof.subnet,
+            sig_count: proof.sig_count,
+            latency_ms,
+        });
+        tracing::info!(
+            "local_aggregator {} completed LocalProof (subnet={}, sigs={}, latency_ms={})",
+            state.node_id,
+            proof.subnet,
+            proof.sig_count,
+            latency_ms,
+        );
+    }
 }

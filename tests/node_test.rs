@@ -198,3 +198,45 @@ async fn due_proofs_are_taken_in_order_and_later_ones_wait() {
     assert_eq!(due, vec![0, 2]);
     assert_eq!(state.next_proof_due(), Some(later));
 }
+
+use leansim::node::local_aggregator;
+
+#[tokio::test]
+async fn proof_is_scheduled_once_when_threshold_is_reached() {
+    // 25 validators per subnet at 0.9 → threshold 22; 1000 sigs/s → 22 ms compute.
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    for validator_id in 0..21u32 {
+        local_aggregator::record_signature(&state, 0, validator_id);
+    }
+    assert_eq!(state.next_proof_due(), None);
+    let before = tokio::time::Instant::now();
+    local_aggregator::record_signature(&state, 0, 21);
+    let due = state.next_proof_due().expect("proof scheduled at threshold");
+    assert!(due > before && due <= before + Duration::from_millis(23), "{:?}", due - before);
+    // Later signatures neither reschedule nor duplicate the proof.
+    local_aggregator::record_signature(&state, 0, 22);
+    let proofs = state.take_due_proofs(due);
+    assert_eq!(proofs.len(), 1);
+    assert_eq!((proofs[0].subnet, proofs[0].sig_count), (0, 22));
+}
+
+#[tokio::test]
+async fn signatures_for_subnets_not_aggregated_are_ignored() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    for validator_id in 25..50u32 {
+        local_aggregator::record_signature(&state, 1, validator_id);
+    }
+    assert!(state.sigs_by_subnet.get(&1).is_none());
+    assert_eq!(state.next_proof_due(), None);
+}
+
+#[tokio::test]
+async fn own_signatures_seed_every_aggregated_subnet() {
+    let state = NodeState::new(1, NodeRole::LocalAggregator, 0, test_config())
+        .with_validator_ids(vec![3, 30, 99])
+        .with_aggregated_subnets(vec![0, 1]);
+    local_aggregator::record_own_signatures(&state);
+    assert_eq!(state.sigs_by_subnet.get(&0).unwrap().len(), 1); // validator 3
+    assert_eq!(state.sigs_by_subnet.get(&1).unwrap().len(), 1); // validator 30
+    assert!(state.sigs_by_subnet.get(&3).is_none()); // 99 is in subnet 3, not aggregated
+}

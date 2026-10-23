@@ -61,7 +61,8 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             node_config.experiment.clone(),
         )
         .with_validator_ids(node_config.signing_validator_ids())
-        .with_subscribed_subnets(node_config.subscribed_subnets.clone()),
+        .with_subscribed_subnets(node_config.subscribed_subnets.clone())
+        .with_aggregated_subnets(node_config.aggregated_subnets()),
     );
     let signing_subnets = state.signing_subnets();
     let subscribed_subnets = state.subscribed_subnets();
@@ -110,20 +111,20 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         leansim::node::validator::validator_init(&state, &mut swarm).await?;
     }
     if node_config.role == NodeRole::LocalAggregator {
-        leansim::node::local_aggregator::record_own_signature(&state).await?;
+        leansim::node::local_aggregator::record_own_signatures(&state);
     }
 
     let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);
     let end = tokio::time::Instant::now() + timeout;
 
     loop {
-        let remaining = end.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        if tokio::time::Instant::now() >= end {
             break;
         }
-
-        let msg = tokio::time::timeout(
-            remaining,
+        // Wake for the next message, the next local proof to finish, or the end of the run.
+        let wake = state.next_proof_due().map_or(end, |due| due.min(end));
+        let msg = tokio::time::timeout_at(
+            wake,
             leansim::network::swarm::next_message(&mut swarm, &mut explicit_peers),
         )
         .await;
@@ -171,16 +172,14 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 }
 
                 if state.role == NodeRole::LocalAggregator {
-                    leansim::node::local_aggregator::handle_message(&state, &wire_msg).await?;
+                    leansim::node::local_aggregator::handle_message(&state, &wire_msg);
                 }
             }
-            Ok(None) => {
-                break;
-            }
-            Err(_elapsed) => {
-                break;
-            }
+            Ok(None) => break,
+            // A proof came due or the run ended; handled below / at the loop top.
+            Err(_elapsed) => {}
         }
+        leansim::node::local_aggregator::complete_due_proofs(&state);
     }
 
     emit(&JsonlEvent::NodeStats {
