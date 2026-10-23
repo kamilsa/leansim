@@ -546,6 +546,36 @@ def select_subscriber_aggregators(subscribed: list[set[int]], experiment: dict, 
     return {index: {subnet: []} for index, subnet in aggregator_for.items()}
 
 
+def recursive_layer_sizes(subnet_count: int, arity: int) -> list[int]:
+    """Groups per recursive layer. Layer 1 aggregates `arity` subnet proofs per
+    group, each later layer `arity` groups of the layer below, until one group
+    (the final proof) remains."""
+    sizes = []
+    count = subnet_count
+    while count > 1:
+        count = -(-count // arity)
+        sizes.append(count)
+    return sizes
+
+
+def recursive_groups(experiment: dict) -> list[dict]:
+    """Every recursive group, layer by layer: group i of layer l aggregates
+    children i*arity .. (i+1)*arity - 1 of layer l - 1 (subnets when l is 1); the
+    last group of a layer takes what is left. The last group is the root."""
+    arity = experiment["recursive_aggregation_arity"]
+    groups = []
+    below = experiment["subnet_count"]
+    for layer, size in enumerate(recursive_layer_sizes(experiment["subnet_count"], arity), start=1):
+        for index in range(size):
+            groups.append({
+                "layer": layer,
+                "index": index,
+                "children": list(range(index * arity, min((index + 1) * arity, below))),
+            })
+        below = size
+    return groups
+
+
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     """Ethereum-style assignment: hosts and validator co-location come from a
     nodes.csv node map; every node subscribes to subnet_subscriptions_per_node
