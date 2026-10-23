@@ -44,10 +44,11 @@ pub fn record_signature(state: &NodeState, subnet: u32, validator_id: u32) {
     });
 }
 
-/// Records every local proof whose compute has finished. Proofs are not
-/// transmitted: there is no global aggregation stage.
-pub fn complete_due_proofs(state: &NodeState) {
-    for proof in state.take_due_proofs(tokio::time::Instant::now()) {
+/// Logs every local proof whose compute has finished and returns them, so the
+/// caller can announce them to their layer-1 group.
+pub fn complete_due_proofs(state: &NodeState) -> Vec<PendingProof> {
+    let done = state.take_due_proofs(tokio::time::Instant::now());
+    for proof in &done {
         let latency_ms = state.elapsed_ms();
         emit(&JsonlEvent::LocalProofGenerated {
             node_id: state.node_id,
@@ -63,4 +64,5 @@ pub fn complete_due_proofs(state: &NodeState) {
             latency_ms,
         );
     }
+    done
 }
