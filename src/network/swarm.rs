@@ -9,12 +9,30 @@ use libp2p::{
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use crate::config::experiment::ExperimentConfig;
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
 
 /// The concrete behaviour type used throughout the simulator.
 pub type GossipsubBehaviour = gossipsub::Behaviour;
+
+/// A host's libp2p identity, derived from its node id so any host can name
+/// another's PeerId from the launcher's plan without a discovery round.
+pub fn node_keypair(node_id: u32) -> identity::Keypair {
+    let mut hasher = Sha256::new();
+    hasher.update(b"leansim-node-key");
+    hasher.update(node_id.to_le_bytes());
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&hasher.finalize());
+    identity::Keypair::ed25519_from_bytes(seed)
+        .expect("32 bytes are always a valid ed25519 secret key")
+}
+
+pub fn peer_id_for(node_id: u32) -> PeerId {
+    node_keypair(node_id).public().to_peer_id()
+}
 
 /// Tracks address-based explicit peers because generated configs do not know PeerIds in advance.
 pub struct ExplicitPeerManager {
@@ -127,11 +145,11 @@ fn parse_addrs(addrs: &[String]) -> Result<HashSet<Multiaddr>> {
 
 /// Builds a libp2p Swarm with QUIC transport and gossipsub.
 pub fn build_swarm(
-    _node_id: u32,
+    node_id: u32,
     listen_addr: &str,
     config: &ExperimentConfig,
 ) -> Result<Swarm<GossipsubBehaviour>> {
-    let id_keys = identity::Keypair::generate_ed25519();
+    let id_keys = node_keypair(node_id);
 
     let gossipsub_behaviour = build_gossipsub(&id_keys, config)?;
 
