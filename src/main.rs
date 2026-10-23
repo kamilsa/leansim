@@ -79,8 +79,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 
     leansim::network::swarm::subscribe_to_topics(
         &mut swarm,
-        node_config.role,
-        node_config.subnet_id,
+        &state.aggregated_subnets,
         &subscribed_subnets,
         &node_config.experiment.run_id,
     )?;
