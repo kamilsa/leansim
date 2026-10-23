@@ -177,6 +177,7 @@ fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
         selected_aggregator_addrs: vec![],
         validator_ids,
         subscribed_subnets: vec![],
+        aggregated_subnets: vec![],
         experiment: base_config(),
     }
 }
@@ -233,4 +234,27 @@ fn heartbeat_initial_delay_defaults_to_interval() {
     assert_eq!(exp.heartbeat_initial_delay_ms(), 1000);
     exp.gossipsub_heartbeat_initial_delay_ms = Some(5000);
     assert_eq!(exp.heartbeat_initial_delay_ms(), 5000);
+}
+
+#[test]
+fn legacy_local_aggregator_aggregates_its_subnet_id() {
+    let mut node = node_config(NodeRole::LocalAggregator, vec![3]);
+    node.subnet_id = 2;
+    assert_eq!(node.aggregated_subnets(), vec![2]);
+}
+
+#[test]
+fn local_aggregator_aggregates_every_listed_committee_subnet() {
+    let mut node = node_config(NodeRole::LocalAggregator, vec![3, 40]);
+    node.aggregated_subnets = vec![3, 1, 3];
+    assert_eq!(node.aggregated_subnets(), vec![1, 3]);
+}
+
+#[test]
+fn non_aggregators_aggregate_nothing() {
+    for role in [NodeRole::Validator, NodeRole::Relay] {
+        let mut node = node_config(role, vec![3]);
+        node.aggregated_subnets = vec![1];
+        assert!(node.aggregated_subnets().is_empty(), "{role:?}");
+    }
 }
