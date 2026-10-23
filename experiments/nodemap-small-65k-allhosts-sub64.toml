@@ -1,0 +1,63 @@
+# Same as experiments/nodemap-131k-allhosts-sub64.toml — 64 subnets, 2 random
+# subnet subscriptions per node, supernodes by operator size, 16 local
+# aggregators per subnet, every observed node in the network with validator
+# hosts that got no validator slot running as gossip-only relays instead of
+# being dropped — but on nodes_small.csv, a 1/10 stratified sample of nodes.csv
+# that preserves the validators-per-node distribution (1,361 nodes: 1,090
+# validator hosts + 271 no_validator relays, 73,420 validator slots).
+# 65,536 validators (2^16, the largest power of two fitting the sample's
+# validator slots) across 64 subnets of 1,024: half the validators and a tenth
+# of the hosts of the 131k nodes.csv run.
+run_id = "nodemap-small-65k-allhosts-sub64"
+run_timeout_secs = 120
+
+validator_count = 65536
+node_map = "nodes_small.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in.
+random_peer_count = 0
+subnet_count = 64
+local_aggregators_per_subnet = 16
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output-nodemap-small-65k-allhosts-sub64"
