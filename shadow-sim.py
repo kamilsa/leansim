@@ -815,6 +815,63 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
         )
 
 
+def build_aggregation_plan(nodes: list[dict], experiment: dict) -> dict:
+    """aggregation-plan.json: every recursive group with its members, and for each
+    host with a duty the proofs it announces and to whom, plus the addresses of
+    every host named. Nodes read their own entry under "duties".
+
+    A subnet duty announces the subnet proof to every member of its layer-1 group;
+    a seat lists its group's children, its siblings (the group's other members,
+    who also hear about each child proof the host obtains), and the parent group's
+    members, who hear about the group proof. A host never announces to itself.
+    """
+    groups = recursive_groups(experiment)
+    members: dict[tuple[int, int], list[int]] = {(group["layer"], group["index"]): [] for group in groups}
+    for node in nodes:
+        for layer, index in node.get("recursive_seats", []):
+            members[(layer, index)].append(node["node_id"])
+    children = {(group["layer"], group["index"]): group["children"] for group in groups}
+    parent = {(group["layer"] - 1, child): (group["layer"], group["index"]) for group in groups for child in group["children"]}
+    top = groups[-1]["layer"]
+    duties: dict[int, dict] = {}
+    for node in nodes:
+        me = node["node_id"]
+        subnets = [
+            {"subnet": subnet, "announce_to": [member for member in members[parent[(0, subnet)]] if member != me]}
+            for subnet in node.get("aggregated_subnets", [])
+        ]
+        seats = []
+        for layer, index in node.get("recursive_seats", []):
+            up = parent.get((layer, index))
+            seats.append({
+                "layer": layer,
+                "index": index,
+                "children": children[(layer, index)],
+                "siblings": [member for member in members[(layer, index)] if member != me],
+                "announce_to": [member for member in members[up] if member != me] if up else [],
+                "is_final": layer == top,
+            })
+        if subnets or seats:
+            duties[me] = {"subnets": subnets, "seats": seats}
+    named = set(duties) | {peer for duty in duties.values() for peer in proof_peers(duty)}
+    return {
+        "arity": experiment["recursive_aggregation_arity"],
+        "groups": [dict(group, members=members[(group["layer"], group["index"])]) for group in groups],
+        "addrs": {str(node_id): nodes[node_id]["listen_addr"] for node_id in sorted(named)},
+        "duties": {str(node_id): duties[node_id] for node_id in sorted(duties)},
+    }
+
+
+def proof_peers(duty: dict) -> set[int]:
+    """Hosts a duty announces to, which the node dials during warmup. Mirrors
+    NodeDuties::peers in src/config/plan.rs."""
+    peers = {peer for subnet in duty.get("subnets", []) for peer in subnet["announce_to"]}
+    for seat in duty.get("seats", []):
+        peers.update(seat["siblings"])
+        peers.update(seat["announce_to"])
+    return peers
+
+
 def mesh_warmup_ms(nodes: list[dict]) -> int:
     """One mesh warmup for the whole run, so every host signs at the same time.
 
