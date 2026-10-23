@@ -486,6 +486,18 @@ function drawNodeChart(snapshot) {
     title: field.replaceAll('_', ' '), margin: {t: 42, l: 55, r: 15, b: 80}, yaxis: {rangemode: 'tozero'}, paper_bgcolor: '#fffdf8', plot_bgcolor: '#fffdf8'
   }, {responsive: true, displaylogo: false});
 }
+function drawTree(metrics) {
+  const recursive = metrics.recursive_aggregation;
+  const groups = (recursive && recursive.groups) || [];
+  const local = metrics.local_proof_latency_ms_by_subnet || {};
+  const subnets = Object.keys(local);
+  Plotly.react('tree', [
+    {mode: 'markers', name: 'subnet proofs (first)', x: subnets.map(id => local[id].min), y: subnets.map(() => 0), text: subnets.map(id => 'subnet ' + id), marker: {color: '#537d63', size: 7}},
+    {mode: 'markers', name: 'group proofs (first)', x: groups.map(group => group.first), y: groups.map(group => group.layer), text: groups.map(group => 'group ' + group.layer + '/' + group.index + ', ' + group.members_done + ' members proved'), marker: {color: '#e07a4f', size: 8}},
+  ], {
+    title: 'Aggregation tree: first proof per subnet and group', xaxis: {title: 'time (ms)'}, yaxis: {title: 'layer', dtick: 1, rangemode: 'tozero'}, margin: {t: 42, l: 55, r: 15, b: 55}, paper_bgcolor: '#fffdf8', plot_bgcolor: '#fffdf8'
+  }, {responsive: true, displaylogo: false});
+}
 function draw(snapshot) {
   const metrics = snapshot.metrics;
   card('run-name', label(snapshot));
@@ -503,6 +515,9 @@ function draw(snapshot) {
   Plotly.react('local', [{type: 'bar', x: ids.map(id => 'subnet ' + id), y: ids.map(id => local[id].median), error_y: {type: 'data', array: ids.map(id => local[id].max - local[id].median), arrayminus: ids.map(id => local[id].median - local[id].min), visible: true}, marker: {color: '#537d63'}}], {
     title: 'Local proof latency (median, min/max)', yaxis: {title: 'ms', rangemode: 'tozero'}, margin: {t: 42, l: 55, r: 15, b: 55}, paper_bgcolor: '#fffdf8', plot_bgcolor: '#fffdf8'
   }, {responsive: true, displaylogo: false});
+  const recursive = metrics.recursive_aggregation;
+  card('final-proof', recursive && recursive.final_proof_ms != null ? number(recursive.final_proof_ms) + ' ms' : '-');
+  drawTree(metrics);
   drawNodeChart(snapshot);
 }
 function renderTable() {
@@ -544,12 +559,12 @@ def generate_html(primary_snapshot, history, output):
 body { max-width: 1400px; margin: 0 auto; padding: 28px; } h1 { margin: 0 0 5px; } .sub { color: #665f52; margin: 0 0 24px; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 12px; margin-bottom: 22px; } .card, .panel { background: #fffdf8; border: 1px solid #d8d0c1; border-radius: 8px; box-shadow: 0 2px 6px #332b1b12; }
 .card { padding: 13px; } .card b { display: block; font-size: 1.35rem; margin-top: 5px; } .label { color: #665f52; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
-.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; } .panel { padding: 8px; min-width: 0; } .wide { grid-column: 1 / -1; } #cdf, #local, #nodes { width: 100%; height: 350px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; } .panel { padding: 8px; min-width: 0; } .wide { grid-column: 1 / -1; } #cdf, #local, #nodes, #tree { width: 100%; height: 350px; }
 table { width: 100%; border-collapse: collapse; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .86rem; } th, td { padding: 9px; text-align: left; border-bottom: 1px solid #e6dfd1; } th { color: #665f52; } tbody tr { cursor: pointer; } tbody tr:hover, tbody tr.selected { background: #f1e5c6; }
 select { margin: 10px 10px 0; padding: 5px; } @media (max-width: 780px) { body { padding: 14px; } .cards, .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .table-wrap { overflow-x: auto; } }
 </style></head><body><h1>leanSim run analysis</h1><p class="sub" id="run-name"></p>
-<section class="cards"><div class="card"><span class="label">Event bytes</span><b id="bytes"></b></div><div class="card"><span class="label">Unique validators</span><b id="validators"></b></div><div class="card"><span class="label">Duplicates / ratio</span><b id="duplicates"></b></div><div class="card"><span class="label">90% arrival</span><b id="arrival"></b></div><div class="card"><span class="label">p95 node at threshold</span><b id="node-threshold"></b></div><div class="card"><span class="label">History snapshots</span><b>""" + str(len(views)) + """</b></div></section>
-<section class="grid"><div class="panel"><div id="cdf"></div></div><div class="panel"><div id="local"></div></div><div class="panel wide"><label for="node-field">Per-node measure</label><select id="node-field"><option value="bytes_total">total bytes</option><option value="bytes_sent">bytes sent</option><option value="bytes_received">bytes received</option><option value="msgs_total">total messages</option><option value="msgs_sent">messages sent</option><option value="msgs_received">messages received</option></select><div id="nodes"></div></div>
+<section class="cards"><div class="card"><span class="label">Event bytes</span><b id="bytes"></b></div><div class="card"><span class="label">Unique validators</span><b id="validators"></b></div><div class="card"><span class="label">Duplicates / ratio</span><b id="duplicates"></b></div><div class="card"><span class="label">90% arrival</span><b id="arrival"></b></div><div class="card"><span class="label">p95 node at threshold</span><b id="node-threshold"></b></div><div class="card"><span class="label">Final proof</span><b id="final-proof"></b></div><div class="card"><span class="label">History snapshots</span><b>""" + str(len(views)) + """</b></div></section>
+<section class="grid"><div class="panel"><div id="cdf"></div></div><div class="panel"><div id="local"></div></div><div class="panel wide"><div id="tree"></div></div><div class="panel wide"><label for="node-field">Per-node measure</label><select id="node-field"><option value="bytes_total">total bytes</option><option value="bytes_sent">bytes sent</option><option value="bytes_received">bytes received</option><option value="msgs_total">total messages</option><option value="msgs_sent">messages sent</option><option value="msgs_received">messages received</option></select><div id="nodes"></div></div>
 <div class="panel wide table-wrap"><table><thead><tr><th>Run</th><th>Seed</th><th>Index</th><th>Validators</th><th>90% arrival</th><th>Event bytes</th></tr></thead><tbody id="history-body"></tbody></table></div></section>
 <script id="snapshot-data" type="application/json">""" + report_data + """</script><script>""" + plotly_js + """</script><script>""" + INTERACTIVE_JS + """</script></body></html>"""
     output.write_text(document, encoding="utf-8")
