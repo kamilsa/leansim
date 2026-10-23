@@ -549,3 +549,9 @@ class RecursiveTreeTests(unittest.TestCase):
         self.assertEqual(len(groups), 9)
         self.assertEqual(groups[0]["children"], list(range(8)))
         self.assertEqual(groups[-1], {"layer": 2, "index": 0, "children": list(range(8))})
+
+
+class RecursivePoolTests(unittest.TestCase):
+    def test_pools_partition_validators_in_a_seeded_order(self) -> None:
+        pools = shadow_sim.recursive_pools({"validator_count": 16, "geo_seed": 7}, 3)
+        self.assertEqual(pools, [[7, 8, 1, 13, 0], [14, 11, 9, 10, 2], [4, 12, 6, 3, 5, 15]])
