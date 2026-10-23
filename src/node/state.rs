@@ -42,12 +42,6 @@ pub struct NodeState {
     /// Whether this validator has already sent its signature.
     pub sig_sent: AtomicBool,
 
-    /// Local aggregator: set of unique validator ids whose signatures have been received.
-    pub received_sigs: DashMap<u32, ()>,
-
-    /// Whether this local aggregator has already published its local proof.
-    pub snark1_sent: AtomicBool,
-
     /// Per-node message sequence counter.
     pub seq_counter: AtomicU64,
 
@@ -81,8 +75,6 @@ impl NodeState {
             config,
             seen_messages: DashMap::new(),
             sig_sent: AtomicBool::new(false),
-            received_sigs: DashMap::new(),
-            snark1_sent: AtomicBool::new(false),
             seq_counter: AtomicU64::new(0),
             bytes_sent_sig: AtomicU64::new(0),
             bytes_recv_sig: AtomicU64::new(0),

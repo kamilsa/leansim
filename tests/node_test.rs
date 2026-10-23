@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,55 +73,6 @@ fn duplicate_suppression_by_message_id() {
     assert!(!state.is_duplicate(&id));
     state.mark_seen(id);
     assert!(state.is_duplicate(&id));
-}
-
-#[test]
-fn received_sigs_unique_counting() {
-    let state = make_state(NodeRole::LocalAggregator, 0);
-    // Insert same validator twice — only one entry in DashMap
-    state.received_sigs.insert(5, ());
-    state.received_sigs.insert(5, ());
-    assert_eq!(state.received_sigs.len(), 1);
-    state.received_sigs.insert(6, ());
-    assert_eq!(state.received_sigs.len(), 2);
-}
-
-#[test]
-fn threshold_not_met_below_count() {
-    let state = make_state(NodeRole::LocalAggregator, 0);
-    // 25 validators per subnet, 90% threshold = 22.5 → 22 (floor for usize cast)
-    let threshold = (25usize as f64 * 0.9) as usize;
-    assert_eq!(threshold, 22);
-
-    // Insert 21 sigs (below threshold)
-    for i in 0..21u32 {
-        state.received_sigs.insert(i, ());
-    }
-    assert!(state.received_sigs.len() < threshold);
-}
-
-#[test]
-fn threshold_met_exactly() {
-    let state = make_state(NodeRole::LocalAggregator, 0);
-    let threshold = (25usize as f64 * 0.9) as usize;
-    assert_eq!(threshold, 22);
-
-    // Insert exactly 22 sigs
-    for i in 0..22u32 {
-        state.received_sigs.insert(i, ());
-    }
-    assert!(state.received_sigs.len() >= threshold);
-}
-
-#[test]
-fn snark1_sent_gate_prevents_double_publish() {
-    let state = make_state(NodeRole::LocalAggregator, 0);
-    // First call: should succeed (returns false = not previously set)
-    let first = state.snark1_sent.swap(true, Ordering::SeqCst);
-    assert!(!first);
-    // Second call: should see it was already set
-    let second = state.snark1_sent.swap(true, Ordering::SeqCst);
-    assert!(second);
 }
 
 #[test]
@@ -239,4 +189,22 @@ async fn own_signatures_seed_every_aggregated_subnet() {
     assert_eq!(state.sigs_by_subnet.get(&0).unwrap().len(), 1); // validator 3
     assert_eq!(state.sigs_by_subnet.get(&1).unwrap().len(), 1); // validator 30
     assert!(state.sigs_by_subnet.get(&3).is_none()); // 99 is in subnet 3, not aggregated
+}
+
+#[test]
+fn threshold_not_met_below_count() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    // 25 validators per subnet, 90% threshold = 22.5 → 22 (floor for usize cast)
+    let threshold = (25usize as f64 * 0.9) as usize;
+    assert_eq!(threshold, 22);
+    let count = (0..21u32).map(|i| state.record_sig(0, i)).last().unwrap();
+    assert!(count < threshold);
+}
+
+#[test]
+fn threshold_met_exactly() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    let threshold = (25usize as f64 * 0.9) as usize;
+    let count = (0..22u32).map(|i| state.record_sig(0, i)).last().unwrap();
+    assert!(count >= threshold);
 }

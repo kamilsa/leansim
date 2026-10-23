@@ -9,7 +9,7 @@ use libp2p::{
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use crate::config::experiment::{ExperimentConfig, NodeRole};
+use crate::config::experiment::ExperimentConfig;
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
 
@@ -175,23 +175,17 @@ fn build_gossipsub(
     .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
 }
 
-/// Subscribes to the topics relevant to the given role. A host joins every subnet in
-/// `subscribed_subnets` (its gossip membership, independent of what it publishes);
-/// only global aggregators join the aggregation topic, so local proofs have an
-/// audience only when global aggregation is part of the run.
+/// Subscribes to the host's subnet topics: every subnet in `subscribed_subnets`
+/// (its gossip membership, independent of what it publishes) plus every subnet
+/// it aggregates, which an aggregator must hear whether subscribed or not.
 pub fn subscribe_to_topics(
     swarm: &mut Swarm<GossipsubBehaviour>,
-    role: NodeRole,
-    subnet_id: u32,
+    aggregated_subnets: &BTreeSet<u32>,
     subscribed_subnets: &BTreeSet<u32>,
     run_id: &str,
 ) -> Result<()> {
-    let mut subnets = subscribed_subnets.clone();
-    if role == NodeRole::LocalAggregator {
-        subnets.insert(subnet_id);
-    }
-    for subnet in subnets {
-        let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
+    for subnet in subscribed_subnets.union(aggregated_subnets) {
+        let topic = IdentTopic::new(topics::subnet_topic(run_id, *subnet));
         swarm.behaviour_mut().subscribe(&topic)?;
     }
     Ok(())
