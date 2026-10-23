@@ -241,3 +241,71 @@ fn announcements_no_group_of_this_host_wants_are_ignored() {
     assert_eq!(exchange(0, 1).announcement(sub(1), 1), vec![]);
     assert_eq!(exchange(2, 1).announcement(sub(3), 9), vec![]);
 }
+
+#[test]
+fn a_group_proves_once_it_holds_every_child_then_feeds_its_parent() {
+    let mut node = exchange(2, 1);
+    let t0 = Instant::now();
+    assert_eq!(
+        node.announcement(sub(0), 0),
+        vec![Action::Fetch {
+            from: 0,
+            proof: sub(0)
+        }]
+    );
+    assert_eq!(
+        node.fetched(sub(0), t0),
+        vec![Action::Announce {
+            to: 1,
+            proof: sub(0)
+        }]
+    );
+    assert_eq!(node.next_due(), None);
+    // Host 1 announced subnet 1's proof itself, so it is not told back.
+    assert_eq!(
+        node.announcement(sub(1), 1),
+        vec![Action::Fetch {
+            from: 1,
+            proof: sub(1)
+        }]
+    );
+    assert_eq!(node.fetched(sub(1), t0), vec![]);
+    assert_eq!(node.next_due(), Some(t0 + PROOF_TIME));
+    assert_eq!(node.take_due(t0), vec![]);
+    assert_eq!(
+        node.take_due(t0 + PROOF_TIME),
+        vec![RecursiveProof {
+            proof: G10,
+            inputs: 2,
+            is_final: false
+        }]
+    );
+    // Host 2 also sits in the root group: its group proof counts there and is
+    // announced once to host 4, the root's other member.
+    let t1 = t0 + PROOF_TIME;
+    assert_eq!(
+        node.proof_ready(G10, t1),
+        vec![Action::Announce { to: 4, proof: G10 }]
+    );
+    assert_eq!(node.next_due(), None);
+    assert_eq!(
+        node.announcement(G11, 3),
+        vec![Action::Fetch {
+            from: 3,
+            proof: G11
+        }]
+    );
+    assert_eq!(
+        node.fetched(G11, t1),
+        vec![Action::Announce { to: 4, proof: G11 }]
+    );
+    assert_eq!(
+        node.take_due(t1 + PROOF_TIME),
+        vec![RecursiveProof {
+            proof: ROOT,
+            inputs: 2,
+            is_final: true
+        }]
+    );
+    assert_eq!(node.proof_ready(ROOT, t1 + PROOF_TIME), vec![]);
+}
