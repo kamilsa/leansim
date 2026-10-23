@@ -656,3 +656,52 @@ class RecursiveConfigTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit, msg=f"{key}={value}"):
                 shadow_sim.validate_experiment(self.config(**{key: value}))
+
+
+class AggregationPlanTests(unittest.TestCase):
+    """4 subnets at arity 2: groups 1/0 (subnets 0, 1), 1/1 (subnets 2, 3), 2/0 (the root)."""
+
+    NODES = [
+        {"node_id": 0, "listen_addr": "a0", "aggregated_subnets": [0], "recursive_seats": []},
+        {"node_id": 1, "listen_addr": "a1", "aggregated_subnets": [1, 2], "recursive_seats": [[1, 0]]},
+        {"node_id": 2, "listen_addr": "a2", "aggregated_subnets": [3], "recursive_seats": [[1, 0], [2, 0]]},
+        {"node_id": 3, "listen_addr": "a3", "aggregated_subnets": [], "recursive_seats": [[1, 1]]},
+        {"node_id": 4, "listen_addr": "a4", "aggregated_subnets": [], "recursive_seats": [[2, 0]]},
+        {"node_id": 5, "listen_addr": "a5", "aggregated_subnets": [], "recursive_seats": []},
+    ]
+
+    def plan(self) -> dict:
+        return shadow_sim.build_aggregation_plan(self.NODES, {"subnet_count": 4, "recursive_aggregation_arity": 2})
+
+    def test_plan_lists_members_duties_and_addresses(self) -> None:
+        plan = self.plan()
+        self.assertEqual(plan["arity"], 2)
+        self.assertEqual(plan["groups"], [
+            {"layer": 1, "index": 0, "children": [0, 1], "members": [1, 2]},
+            {"layer": 1, "index": 1, "children": [2, 3], "members": [3]},
+            {"layer": 2, "index": 0, "children": [0, 1], "members": [2, 4]},
+        ])
+        self.assertEqual(plan["addrs"], {"0": "a0", "1": "a1", "2": "a2", "3": "a3", "4": "a4"})
+        self.assertEqual(plan["duties"], {
+            "0": {"subnets": [{"subnet": 0, "announce_to": [1, 2]}], "seats": []},
+            "1": {
+                "subnets": [{"subnet": 1, "announce_to": [2]}, {"subnet": 2, "announce_to": [3]}],
+                "seats": [{"layer": 1, "index": 0, "children": [0, 1], "siblings": [2], "announce_to": [2, 4], "is_final": False}],
+            },
+            "2": {
+                "subnets": [{"subnet": 3, "announce_to": [3]}],
+                "seats": [
+                    {"layer": 1, "index": 0, "children": [0, 1], "siblings": [1], "announce_to": [4], "is_final": False},
+                    {"layer": 2, "index": 0, "children": [0, 1], "siblings": [4], "announce_to": [], "is_final": True},
+                ],
+            },
+            "3": {"subnets": [], "seats": [{"layer": 1, "index": 1, "children": [2, 3], "siblings": [], "announce_to": [2, 4], "is_final": False}]},
+            "4": {"subnets": [], "seats": [{"layer": 2, "index": 0, "children": [0, 1], "siblings": [2], "announce_to": [], "is_final": True}]},
+        })
+
+    def test_proof_peers_are_every_host_a_duty_announces_to(self) -> None:
+        duties = self.plan()["duties"]
+        self.assertEqual(
+            {node_id: sorted(shadow_sim.proof_peers(duty)) for node_id, duty in duties.items()},
+            {"0": [1, 2], "1": [2, 3, 4], "2": [1, 3, 4], "3": [2, 4], "4": [2]},
+        )
