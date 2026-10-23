@@ -609,6 +609,7 @@ const data = JSON.parse(document.getElementById('traffic-data').textContent);
 const traffic = data.traffic;
 const colors = {signature: '#5aa9e6', duplicate_signature: '#2f6f9e', proof_payload: '#e07a4f', proof_announce: '#d9b26a', proof_request: '#8f7bd8', proof_control: '#6b7280'};
 const mb = (bytes) => bytes / 1e6;
+const fmt = (value) => Number(value).toLocaleString('en-US');
 const kinds = [...new Set(traffic.buckets.flatMap(bucket => [...Object.keys(bucket.inbound), ...Object.keys(bucket.outbound)]))].sort();
 const x = traffic.buckets.map(bucket => bucket.start_ms / 1000);
 const traces = [];
@@ -638,10 +639,10 @@ document.getElementById('node').textContent = data.node;
 document.getElementById('run').textContent = data.run + ' · ' + traffic.bucket_ms + ' ms buckets · ' + traffic.buckets.length + ' buckets with traffic';
 document.getElementById('received').textContent = mb(traffic.received).toFixed(2) + ' MB';
 document.getElementById('sent').textContent = mb(traffic.sent).toFixed(2) + ' MB';
-document.getElementById('buckets').textContent = number(traffic.buckets.length);
+document.getElementById('buckets').textContent = fmt(traffic.buckets.length);
 const peak = traffic.buckets.reduce((best, bucket) => Math.max(best, mb(Object.values(bucket.inbound).reduce((a, b) => a + b, 0) + Object.values(bucket.outbound).reduce((a, b) => a + b, 0))), 0);
 document.getElementById('peak').textContent = peak.toFixed(2) + ' MB';
-document.getElementById('peers-count').textContent = number(traffic.peers.length);
+document.getElementById('peers-count').textContent = fmt(traffic.peers.length);
 """
 
 TRAFFIC_TEMPLATE = """<!doctype html>
@@ -905,6 +906,8 @@ def self_test():
             traffic_js_path.write_text(TRAFFIC_JS, encoding="utf-8")
             result = subprocess.run(["node", "--check", str(traffic_js_path)], capture_output=True, text=True)
             assert result.returncode == 0, result.stderr
+            # The dashboard is its own page: the summary report's helpers are not in scope.
+            assert "number(" not in TRAFFIC_JS, "traffic.js must define its own formatters"
     print("self-test passed")
 
 
