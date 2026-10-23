@@ -361,5 +361,72 @@ class AllHostsPlacementTests(unittest.TestCase):
             shadow_sim.validate_experiment(experiment)
 
 
+class DutySubnetSubscriptionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.map_path = Path(directory.name) / "nodes.csv"
+        # 16 validators on BIG and SOLO (2 subnets of 8), 1 relay.
+        rows = [
+            "node_type,peer_key,validator_count,validator_indices",
+            "validator,BIG,15,0;1;2;3;4;5;6;7;8;9;10;11;12;13;14",
+            "validator,SOLO,1,15",
+            "no_validator,R1,0,",
+        ]
+        self.map_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        shadow_sim.load_node_map.cache_clear()
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {
+            "run_id": "test",
+            "validator_count": 16,
+            "subnet_count": 2,
+            "local_aggregators_per_subnet": 1,
+            "global_aggregator_count": 0,
+            "geo_seed": 7,
+            "node_map": str(self.map_path),
+            "subnet_subscriptions_per_node": 2,
+            "subscribe_to_duty_subnets": True,
+        }
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_validator_hosts_subscribe_to_their_duty_subnets(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        by_peer = {node["peer_key"]: node for node in nodes}
+        # BIG's validators span both subnets, so it must be subscribed to both.
+        self.assertEqual(by_peer["BIG"]["signing_subnets"], [0, 1])
+        self.assertEqual(set(by_peer["BIG"]["subscribed_subnets"]), {0, 1})
+        # SOLO's single validator lands in one duty subnet; the second subscription
+        # is the random one, so it is subscribed to exactly 2 distinct subnets.
+        solo_duty = set(by_peer["SOLO"]["signing_subnets"])
+        self.assertEqual(len(by_peer["SOLO"]["subscribed_subnets"]), 2)
+        self.assertTrue(solo_duty.issubset(by_peer["SOLO"]["subscribed_subnets"]))
+
+    def test_relays_keep_only_random_subscriptions(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        relay = next(node for node in nodes if node["peer_key"] == "R1")
+        self.assertEqual(len(relay["subscribed_subnets"]), 2)
+
+    def test_without_duty_flag_subscriptions_stay_random(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment(subscribe_to_duty_subnets=False))
+        for node in nodes:
+            if node["role"] in ("validator", "relay"):
+                self.assertEqual(len(node["subscribed_subnets"]), 2)
+
+    def test_aggregator_stays_subscribed_to_its_collected_subnet(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment())
+        for subnet in range(2):
+            aggregators = [n for n in nodes if n["role"] == "local_aggregator" and n["subnet_id"] == subnet]
+            self.assertEqual(len(aggregators), 1)
+            self.assertIn(subnet, aggregators[0]["subscribed_subnets"])
+
+    def test_duty_subscriptions_require_node_map(self) -> None:
+        experiment = self.experiment()
+        del experiment["node_map"]
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(experiment)
+
+
 if __name__ == "__main__":
     unittest.main()
