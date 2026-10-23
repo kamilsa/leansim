@@ -1,4 +1,5 @@
 use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole};
+use leansim::network::swarm::warmup_ms;
 
 fn base_config() -> ExperimentConfig {
     ExperimentConfig {
@@ -18,6 +19,7 @@ fn base_config() -> ExperimentConfig {
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
         gossipsub_heartbeat_initial_delay_ms: None,
+        mesh_warmup_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
         network_defaults: NetworkDefaults::default(),
@@ -257,4 +259,22 @@ fn non_aggregators_aggregate_nothing() {
         node.aggregated_subnets = vec![1];
         assert!(node.aggregated_subnets().is_empty(), "{role:?}");
     }
+}
+
+#[test]
+fn warmup_uses_the_run_wide_value_when_set() {
+    assert_eq!(warmup_ms(10, Some(3000)), 3000);
+    assert_eq!(warmup_ms(500, Some(1500)), 1500);
+}
+
+#[test]
+fn warmup_falls_back_to_the_host_dial_count() {
+    assert_eq!(warmup_ms(200, None), 1500);
+    assert_eq!(warmup_ms(201, None), 3000);
+}
+
+#[test]
+fn mesh_warmup_defaults_to_unset() {
+    let exp: ExperimentConfig = toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    assert_eq!(exp.mesh_warmup_ms, None);
 }

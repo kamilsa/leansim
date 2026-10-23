@@ -560,3 +560,24 @@ class CommitteeAggregatorTests(unittest.TestCase):
     def test_committee_aggregators_need_a_positive_target(self) -> None:
         with self.assertRaises(SystemExit):
             shadow_sim.validate_experiment(self.experiment(local_aggregators_per_subnet=0))
+
+
+class MeshWarmupTests(unittest.TestCase):
+    @staticmethod
+    def nodes(*dials: int) -> list[dict]:
+        return [{"seed_addrs": ["a"] * count, "explicit_peer_addrs": []} for count in dials]
+
+    def test_short_warmup_when_no_host_dials_many_peers(self) -> None:
+        self.assertEqual(shadow_sim.mesh_warmup_ms(self.nodes(10, 200)), 1500)
+
+    def test_busiest_host_sets_the_warmup_for_everyone(self) -> None:
+        self.assertEqual(shadow_sim.mesh_warmup_ms(self.nodes(10, 201)), 3000)
+
+    def test_explicit_peers_count_as_dials(self) -> None:
+        nodes = [{"seed_addrs": ["a"] * 150, "explicit_peer_addrs": ["a"] * 51}]
+        self.assertEqual(shadow_sim.mesh_warmup_ms(nodes), 3000)
+
+    def test_configured_warmup_must_be_non_negative(self) -> None:
+        config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, "mesh_warmup_ms": -1})
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(config)

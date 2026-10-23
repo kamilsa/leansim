@@ -31,6 +31,11 @@ SEED_PEER_COUNT = 50
 # subnets need gossipsub_mesh_n instead.
 PUBLISH_SUBNET_PEER_COUNT = 2
 RUNNER_SECTIONS = {"run", "docker", "output"}
+# Mirrors network::swarm::warmup_ms: a host dialing more than WARMUP_DIAL_THRESHOLD
+# peers needs the long mesh warmup before signing.
+WARMUP_DIAL_THRESHOLD = 200
+SHORT_WARMUP_MS = 1500
+LONG_WARMUP_MS = 3000
 # Global (recursive) aggregation was removed; it will be redesigned.
 REMOVED_KEYS = ("global_aggregator_count", "global_proof_target", "global_aggregation_rate", "proof_payload_bytes")
 
@@ -155,6 +160,8 @@ def validate_experiment(config: dict) -> None:
             die("committee_aggregators requires node_map")
         if config["committee_aggregators"] and local_aggregators < 1:
             die("committee_aggregators needs local_aggregators_per_subnet >= 1 (the lottery's target)")
+    if "mesh_warmup_ms" in config:
+        as_int(config["mesh_warmup_ms"], "mesh_warmup_ms", minimum=0)
     if config.get("random_peer_count") is not None:
         if node_map is None:
             die("random_peer_count requires node_map")
@@ -746,6 +753,18 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
         )
 
 
+def mesh_warmup_ms(nodes: list[dict]) -> int:
+    """One mesh warmup for the whole run, so every host signs at the same time.
+
+    A node counts its dials as seed_addrs plus explicit peers (swarm::dial_seeds);
+    the busiest host decides. Per-host warmups let hosts past the dial threshold
+    start late and, with gossip validation on, swallow every message that
+    reached them while still warming up.
+    """
+    busiest = max((len(node["seed_addrs"]) + len(node["explicit_peer_addrs"]) for node in nodes), default=0)
+    return LONG_WARMUP_MS if busiest > WARMUP_DIAL_THRESHOLD else SHORT_WARMUP_MS
+
+
 def sample_supernodes(nodes: list[dict], experiment: dict) -> set[int]:
     count = math.ceil(len(nodes) * experiment["supernode_fraction"])
     if not count:
@@ -846,6 +865,9 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     shutil.rmtree(configs_dir, ignore_errors=True)
     configs_dir.mkdir()
     nodes = assign_nodes(experiment)
+    if "mesh_warmup_ms" not in experiment:
+        experiment["mesh_warmup_ms"] = mesh_warmup_ms(nodes)
+    log(f"mesh warmup {experiment['mesh_warmup_ms']} ms for every host")
     if experiment.get("validator_map") or experiment.get("node_map"):
         per_host = [len(node["validator_ids"]) for node in nodes if node["validator_ids"]]
         log(

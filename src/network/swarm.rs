@@ -291,11 +291,19 @@ pub async fn next_message(
 }
 
 /// Dial all seed peers, then poll for connections and mesh formation.
+/// Warmup before signing: the run-wide `mesh_warmup_ms` when the launcher set
+/// one (it mirrors this rule with the busiest host's dial count), otherwise
+/// longer for a host that dials many peers.
+pub fn warmup_ms(dial_count: usize, configured: Option<u64>) -> u64 {
+    configured.unwrap_or(if dial_count > 200 { 3000 } else { 1500 })
+}
+
 pub async fn dial_seeds(
     swarm: &mut Swarm<GossipsubBehaviour>,
     seeds: &[String],
     explicit_peers: &mut ExplicitPeerManager,
     selected_aggregator_topics: &[IdentTopic],
+    configured_warmup_ms: Option<u64>,
 ) -> Result<()> {
     let mut dial_addrs = parse_addrs(seeds)?;
     dial_addrs.extend(explicit_peers.all_addrs().cloned());
@@ -312,7 +320,7 @@ pub async fn dial_seeds(
     }
 
     // Poll for connection events and mesh formation.
-    let warmup_ms = if dial_addrs.len() > 200 { 3000 } else { 1500 };
+    let warmup_ms = warmup_ms(dial_addrs.len(), configured_warmup_ms);
     poll_warmup(swarm, explicit_peers, warmup_ms).await;
 
     if !selected_aggregator_topics.is_empty() {
