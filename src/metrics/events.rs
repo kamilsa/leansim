@@ -6,10 +6,7 @@ use std::io::{self, Write};
 #[serde(tag = "event")]
 pub enum JsonlEvent {
     /// Emitted by each node at startup to map PeerId → node index.
-    NodePeerId {
-        node_id: u32,
-        peer_id: String,
-    },
+    NodePeerId { node_id: u32, peer_id: String },
     SigSent {
         node_id: u32,
         /// Logical validator that signed; absent in logs from before multi-validator hosts.
@@ -33,12 +30,65 @@ pub enum JsonlEvent {
         ts_ms: u64,
         byte_size: u64,
     },
-    /// A local aggregator finished its subnet proof (computed, not transmitted).
+    /// A local aggregator finished a subnet proof (announced to its layer-1 group
+    /// with recursive aggregation).
     LocalProofGenerated {
         node_id: u32,
         subnet_id: u32,
         sig_count: usize,
         latency_ms: u64,
+    },
+    /// A host told `to_id` that it holds proof (layer, index).
+    ProofAnnounced {
+        node_id: u32,
+        to_id: u32,
+        layer: u32,
+        index: u32,
+        ts_ms: u64,
+    },
+    /// A host started pulling proof (layer, index) from `from_id`.
+    ProofRequested {
+        node_id: u32,
+        from_id: u32,
+        layer: u32,
+        index: u32,
+        ts_ms: u64,
+    },
+    /// A pulled proof arrived; `duplicate` when the host already held a copy.
+    ProofFetched {
+        node_id: u32,
+        from_id: u32,
+        layer: u32,
+        index: u32,
+        duplicate: bool,
+        ts_ms: u64,
+        byte_size: u64,
+    },
+    /// A pull failed: dial failure, timeout, closed connection, or the peer lacked the proof.
+    ProofFetchFailed {
+        node_id: u32,
+        from_id: u32,
+        layer: u32,
+        index: u32,
+        ts_ms: u64,
+    },
+    /// A host answered a pull with the proof's bytes.
+    ProofServed {
+        node_id: u32,
+        to_id: u32,
+        layer: u32,
+        index: u32,
+        ts_ms: u64,
+        byte_size: u64,
+    },
+    /// A recursive aggregator finished group `index` of `layer`; `is_final` for the root.
+    RecursiveProofGenerated {
+        node_id: u32,
+        layer: u32,
+        index: u32,
+        inputs: usize,
+        is_final: bool,
+        ts_ms: u64,
     },
     NodeStats {
         node_id: u32,
