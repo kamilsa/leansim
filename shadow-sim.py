@@ -597,6 +597,35 @@ def recursive_pools(experiment: dict, group_count: int) -> list[list[int]]:
     ]
 
 
+def is_recursive_aggregator(validator: int, pool_size: int, experiment: dict) -> bool:
+    """The is_aggregator lottery over a recursive pool: recursive_group_size is the
+    expected, not exact, number of winners per pool."""
+    modulo = max(1, pool_size // experiment["recursive_group_size"])
+    digest = _seeded_hash(b"leansim-recursive-aggregator", validator, experiment)
+    return int.from_bytes(digest[:8], "little") % modulo == 0
+
+
+def select_recursive_seats(hosts: list[dict], experiment: dict) -> list[dict]:
+    """recursive_groups() with each group's pool_size and seats: host index ->
+    the validators that won the group's lottery.
+
+    Group i draws from pool i. A validator that won its committee's subnet
+    lottery is skipped, so no validator holds two duties; a host can still hold
+    several through different validators, and several winners on one host share
+    one seat.
+    """
+    host_of = {validator: index for index, host in enumerate(hosts) for validator in host["validator_ids"]}
+    groups = recursive_groups(experiment)
+    for group, pool in zip(groups, recursive_pools(experiment, len(groups))):
+        seats: defaultdict[int, list[int]] = defaultdict(list)
+        for validator in pool:
+            if not is_aggregator(validator, experiment) and is_recursive_aggregator(validator, len(pool), experiment):
+                seats[host_of[validator]].append(validator)
+        group["pool_size"] = len(pool)
+        group["seats"] = {index: sorted(validators) for index, validators in sorted(seats.items())}
+    return groups
+
+
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     """Ethereum-style assignment: hosts and validator co-location come from a
     nodes.csv node map; every node subscribes to subnet_subscriptions_per_node
