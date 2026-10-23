@@ -555,3 +555,43 @@ class RecursivePoolTests(unittest.TestCase):
     def test_pools_partition_validators_in_a_seeded_order(self) -> None:
         pools = shadow_sim.recursive_pools({"validator_count": 16, "geo_seed": 7}, 3)
         self.assertEqual(pools, [[7, 8, 1, 13, 0], [14, 11, 9, 10, 2], [4, 12, 6, 3, 5, 15]])
+
+
+class RecursiveSeatTests(unittest.TestCase):
+    """The committee fixture (16 validators in 2 committees of 8) with one recursive group."""
+
+    setUp = CommitteeAggregatorTests.setUp
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {"recursive_aggregation": True, "recursive_aggregation_arity": 2, "recursive_group_size": 4}
+        values.update(overrides)
+        return CommitteeAggregatorTests.experiment(self, **values)
+
+    def seats(self, experiment: dict) -> dict:
+        hosts = shadow_sim.place_nodes(experiment)
+        groups = shadow_sim.select_recursive_seats(hosts, experiment)
+        return {hosts[index]["peer_key"]: validators for group in groups for index, validators in group["seats"].items()}
+
+    def test_lottery_winners_take_seats_on_their_hosts(self) -> None:
+        # One pool of all 16 validators, modulo 16 // 4 = 4: winners 2, 6, 10.
+        # 6 and 10 both run on BIG, which gets one seat.
+        self.assertEqual(self.seats(self.experiment()), {"BIG": [6, 10], "MID": [2]})
+
+    def test_validators_with_a_subnet_duty_are_skipped(self) -> None:
+        # Seed 8: the recursive lottery draws 0, 6, 9, 10, but 6 and 10 won subnet duties.
+        experiment = self.experiment(geo_seed=8)
+        winners = sorted(v for validators in self.seats(experiment).values() for v in validators)
+        self.assertEqual(winners, [0, 9])
+        self.assertFalse(any(shadow_sim.is_aggregator(v, experiment) for v in winners))
+
+    def test_no_validator_holds_two_duties_at_scale(self) -> None:
+        experiment = {
+            "validator_count": 4096, "subnet_count": 64, "local_aggregators_per_subnet": 16,
+            "geo_seed": 7, "recursive_aggregation_arity": 2, "recursive_group_size": 16,
+        }
+        hosts = [{"validator_ids": [v]} for v in range(4096)]
+        groups = shadow_sim.select_recursive_seats(hosts, experiment)
+        seated = [v for group in groups for validators in group["seats"].values() for v in validators]
+        self.assertEqual(len(groups), 63)
+        self.assertEqual(len(seated), len(set(seated)))
+        self.assertFalse(any(shadow_sim.is_aggregator(v, experiment) for v in seated))
