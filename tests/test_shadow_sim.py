@@ -438,3 +438,77 @@ class RemovedGlobalAggregationTests(unittest.TestCase):
         nodes = shadow_sim.assign_nodes(experiment(0))
         self.assertEqual(len(nodes), 12)
         self.assertNotIn("global_aggregator", {node["role"] for node in nodes})
+
+
+class CommitteeAggregatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.map_path = Path(directory.name) / "nodes.csv"
+        # 20 validator slots on 8 hosts plus 2 no_validator relays; 16 validators
+        # in 2 committees of 8.
+        rows = [
+            "node_type,peer_key,validator_count,validator_indices",
+            "validator,BIG,12," + ";".join(str(i) for i in range(12)),
+            "validator,MID,2,12;13",
+            "validator,S1,1,14",
+            "validator,S2,1,15",
+            "validator,S3,1,16",
+            "validator,S4,1,17",
+            "validator,S5,1,18",
+            "validator,S6,1,19",
+            "no_validator,R1,0,",
+            "no_validator,R2,0,",
+        ]
+        self.map_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        shadow_sim.load_node_map.cache_clear()
+
+    def experiment(self, **overrides: object) -> dict:
+        values = {
+            "run_id": "test",
+            "validator_count": 16,
+            "subnet_count": 2,
+            "local_aggregators_per_subnet": 4,
+            "geo_seed": 7,
+            "node_map": str(self.map_path),
+            "all_hosts": True,
+            "subnet_subscriptions_per_node": 1,
+            "committee_aggregators": True,
+        }
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def winners(self, experiment: dict) -> list[int]:
+        return [v for v in range(experiment["validator_count"]) if shadow_sim.is_aggregator(v, experiment)]
+
+    def test_committees_are_contiguous_id_blocks_mapped_to_subnets(self) -> None:
+        experiment = self.experiment()
+        self.assertEqual([shadow_sim.committee_of(v, experiment) for v in (0, 7, 8, 15)], [0, 0, 1, 1])
+        self.assertEqual(shadow_sim.subnet_for_committee(1, experiment), 1)
+        self.assertEqual(list(shadow_sim.committee_members(1, experiment)), list(range(8, 16)))
+
+    def test_lottery_is_seeded(self) -> None:
+        self.assertEqual(self.winners(self.experiment()), [0, 1, 3, 8, 9, 12, 14, 15])
+        self.assertEqual(self.winners(self.experiment(geo_seed=8)), [1, 2, 3, 5, 6, 10, 14])
+
+    def test_lottery_picks_everyone_when_target_covers_the_committee(self) -> None:
+        self.assertEqual(self.winners(self.experiment(local_aggregators_per_subnet=8)), list(range(16)))
+
+    def test_lottery_hits_the_target_on_average(self) -> None:
+        experiment = {"validator_count": 65536, "subnet_count": 64, "local_aggregators_per_subnet": 16, "geo_seed": 7}
+        winners = sum(shadow_sim.is_aggregator(v, experiment) for v in range(65536))
+        # Binomial(65536, 1/64): mean 1024, sd ~32 (seed 7 gives 1009).
+        self.assertTrue(900 <= winners <= 1150, winners)
+
+    def test_duties_go_to_the_hosts_of_the_winners(self) -> None:
+        experiment = self.experiment()
+        hosts = shadow_sim.place_nodes(experiment)
+        duties = shadow_sim.select_committee_aggregators(hosts, experiment)
+        by_peer = {hosts[index]["peer_key"]: subnets for index, subnets in duties.items()}
+        self.assertEqual(by_peer, {
+            "S5": {0: [0]},
+            "BIG": {0: [1], 1: [8, 9, 14]},
+            "S2": {0: [3]},
+            "MID": {1: [12]},
+            "S6": {1: [15]},
+        })

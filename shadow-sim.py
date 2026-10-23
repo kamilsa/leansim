@@ -8,6 +8,7 @@
 import argparse
 import csv
 import functools
+import hashlib
 import json
 import math
 import os
@@ -495,6 +496,72 @@ def assign_nodes(experiment: dict) -> list[dict]:
         node["explicit_peer_addrs"] = explicit_addrs
         node["seed_addrs"] = explicit_addrs + candidates[:max(0, SEED_PEER_COUNT - len(explicit_addrs))]
     return nodes
+
+
+# host index -> subnet it aggregates -> the validators that won its aggregator lottery
+AggregatorDuties = dict[int, dict[int, list[int]]]
+
+
+def committee_size(experiment: dict) -> int:
+    return max(1, experiment["validator_count"] // experiment["subnet_count"])
+
+
+def committee_of(validator: int, experiment: dict) -> int:
+    """Committee a validator attests in: equal, contiguous blocks of validator ids,
+    one committee per subnet; the last absorbs any remainder, like Rust's
+    subnet_for_validator clamp.
+
+    node_map mode deals validator ids over randomly sampled slots (place_nodes),
+    so each block is a uniformly random set of validators, the same draw
+    Ethereum's committee shuffle makes. leansim simulates a single round, so
+    committees are drawn once per run.
+    """
+    return min(validator // committee_size(experiment), experiment["subnet_count"] - 1)
+
+
+def committee_members(committee: int, experiment: dict) -> range:
+    size = committee_size(experiment)
+    last = committee == experiment["subnet_count"] - 1
+    return range(committee * size, experiment["validator_count"] if last else (committee + 1) * size)
+
+
+def subnet_for_committee(committee: int, experiment: dict) -> int:
+    """Attestation subnet a committee publishes in. Ethereum maps committee i of
+    a slot to (committees_since_epoch_start + i) % subnet count; with one slot of
+    subnet_count committees that is the committee index itself."""
+    return committee % experiment["subnet_count"]
+
+
+def is_aggregator(validator: int, experiment: dict) -> bool:
+    """Ethereum's is_aggregator lottery: a validator aggregates its committee when
+    bytes_to_uint64(hash(slot_signature)[0:8]) % modulo == 0, with
+    modulo = max(1, committee_size // TARGET_AGGREGATORS_PER_COMMITTEE).
+    local_aggregators_per_subnet is that target, so it is the expected, not
+    exact, number of aggregators per committee. A geo_seed-keyed hash of the
+    validator id stands in for the slot signature: reproducible and
+    independent of placement.
+    """
+    modulo = max(1, committee_size(experiment) // experiment["local_aggregators_per_subnet"])
+    digest = hashlib.sha256(
+        b"leansim-aggregator" + experiment["geo_seed"].to_bytes(8, "little") + validator.to_bytes(8, "little")
+    ).digest()
+    return int.from_bytes(digest[:8], "little") % modulo == 0
+
+
+def select_committee_aggregators(hosts: list[dict], experiment: dict) -> AggregatorDuties:
+    """Ethereum-style aggregators: the lottery runs over each committee's own
+    validators, and the host running a winner aggregates that committee's
+    subnet. Only signing validators enter, so hosts without validators never
+    aggregate; a host with winners in several committees aggregates them all,
+    and several winners on one host still make one aggregating host.
+    """
+    host_of = {validator: index for index, host in enumerate(hosts) for validator in host["validator_ids"]}
+    duties: defaultdict[int, defaultdict[int, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for committee in range(experiment["subnet_count"]):
+        for validator in committee_members(committee, experiment):
+            if is_aggregator(validator, experiment):
+                duties[host_of[validator]][subnet_for_committee(committee, experiment)].append(validator)
+    return {index: dict(subnets) for index, subnets in duties.items()}
 
 
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
