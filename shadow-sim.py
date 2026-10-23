@@ -20,6 +20,7 @@ import tomllib
 from collections import Counter, defaultdict
 from copy import deepcopy
 from pathlib import Path
+from typing import NoReturn
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -50,7 +51,7 @@ REMOVED_KEYS = {
 }
 
 
-def die(message: str) -> None:
+def die(message: str) -> NoReturn:
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -179,6 +180,12 @@ def validate_experiment(config: dict) -> None:
             die("recursive_aggregation requires committee_aggregators = true: recursive aggregators are attesters without a subnet duty")
         if subnets < 2:
             die("recursive_aggregation needs subnet_count >= 2")
+    traffic_nodes = setting(config, "traffic_log_nodes", [])
+    if not isinstance(traffic_nodes, list):
+        die("traffic_log_nodes must be a list of node ids")
+    for node_id in traffic_nodes:
+        as_int(node_id, "traffic_log_nodes entry", minimum=0)
+    as_int(setting(config, "traffic_log_bucket_ms", 100), "traffic_log_bucket_ms", minimum=1)
     if "mesh_warmup_ms" in config:
         as_int(config["mesh_warmup_ms"], "mesh_warmup_ms", minimum=0)
     if config.get("random_peer_count") is not None:
@@ -258,6 +265,8 @@ def experiment_defaults(experiment: dict) -> dict:
         "recursive_group_size": 16,
         "recursive_proofs_per_child": 1,
         "aggregate_proof_bytes": 262144,
+        "traffic_log_nodes": [],
+        "traffic_log_bucket_ms": 100,
     }
     merged = deepcopy(experiment)
     for key, value in defaults.items():
@@ -1012,6 +1021,12 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     shutil.rmtree(configs_dir, ignore_errors=True)
     configs_dir.mkdir()
     nodes = assign_nodes(experiment)
+    traffic_nodes = sorted(set(experiment["traffic_log_nodes"]))
+    unknown = [node_id for node_id in traffic_nodes if node_id >= len(nodes)]
+    if unknown:
+        die(f"traffic_log_nodes names hosts that do not exist: {unknown} (this run has {len(nodes)} hosts)")
+    if traffic_nodes:
+        log(f"traffic logs for nodes {traffic_nodes}")
     plan = build_aggregation_plan(nodes, experiment) if experiment.get("recursive_aggregation") else None
     if "mesh_warmup_ms" not in experiment:
         experiment["mesh_warmup_ms"] = mesh_warmup_ms(nodes, plan)
@@ -1071,6 +1086,8 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
         }
         if plan is not None and str(node["node_id"]) in plan["duties"]:
             node_toml["aggregation_plan"] = str(plan_path)
+        if node["node_id"] in traffic_nodes:
+            node_toml["traffic_log"] = True
         write_toml(config_path, node_toml)
     write_topology(output_dir / "topology.gml", nodes, experiment, countries, latency)
     write_shadow_yaml(output_dir / "shadow.yaml", nodes, experiment, binary)
@@ -1150,6 +1167,8 @@ def clean_output(output_dir: Path) -> None:
         shutil.rmtree(output_dir / name, ignore_errors=True)
     for name in ("runs-history.json", "summary.html", "run-meta.json", "run-manifest.json", "aggregation-plan.json"):
         (output_dir / name).unlink(missing_ok=True)
+    for path in output_dir.glob("traffic-*.html"):
+        path.unlink(missing_ok=True)
 
 
 def resolve_path(value: str) -> Path:

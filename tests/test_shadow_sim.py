@@ -736,3 +736,58 @@ class AggregationPlanTests(unittest.TestCase):
             {node_id: sorted(shadow_sim.proof_peers(duty)) for node_id, duty in duties.items()},
             {"0": [1, 2], "1": [2, 3, 4], "2": [1, 3, 4], "3": [2, 4], "4": [2]},
         )
+
+
+class TrafficLogTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        values = {"run_id": "t", "validator_count": 4, "subnet_count": 1}
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_defaults_log_nothing(self) -> None:
+        config = self.config()
+        self.assertEqual(config["traffic_log_nodes"], [])
+        self.assertEqual(config["traffic_log_bucket_ms"], 100)
+        shadow_sim.validate_experiment(config)
+
+    def test_invalid_values_are_rejected(self) -> None:
+        for key, value in (
+            ("traffic_log_nodes", 3),
+            ("traffic_log_nodes", [0, -1]),
+            ("traffic_log_nodes", ["0"]),
+            ("traffic_log_bucket_ms", 0),
+        ):
+            with self.assertRaises(SystemExit, msg=f"{key}={value}"):
+                shadow_sim.validate_experiment(self.config(**{key: value}))
+
+    def test_generate_run_flags_only_the_listed_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                shadow_sim.generate_run(
+                    self.config(traffic_log_nodes=[1, 3]), output, "/opt/leansim/leansim", 0, "docker"
+                )
+            flagged = sorted(
+                int(path.stem.split("_")[1])
+                for path in (output / "configs").glob("node_*.toml")
+                if tomllib.loads(path.read_text(encoding="utf-8")).get("traffic_log")
+            )
+            self.assertEqual(flagged, [1, 3])
+            self.assertIn("traffic logs for nodes [1, 3]", printed.getvalue())
+            self.assertNotIn(
+                "traffic_log", tomllib.loads((output / "configs" / "node_2.toml").read_text(encoding="utf-8"))
+            )
+
+    def test_unknown_node_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                shadow_sim.generate_run(
+                    self.config(traffic_log_nodes=[9]), Path(directory), "/opt/leansim/leansim", 0, "docker"
+                )
+
+    def test_clean_output_removes_traffic_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "traffic-1150.html"
+            report.write_text("x", encoding="utf-8")
+            shadow_sim.clean_output(Path(directory))
+            self.assertFalse(report.exists())
