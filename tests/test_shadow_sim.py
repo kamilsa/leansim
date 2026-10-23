@@ -235,6 +235,13 @@ class NodeMapPlacementTests(unittest.TestCase):
                 self.assertGreaterEqual(len(on_subnet), min(target, available), (node["node_id"], subnet))
 
 
+    def test_subscriber_aggregators_aggregate_exactly_their_subnet(self) -> None:
+        for node in shadow_sim.assign_nodes(self.experiment()):
+            expected = [node["subnet_id"]] if node["role"] == "local_aggregator" else []
+            self.assertEqual(node["aggregated_subnets"], expected)
+            self.assertEqual(node["aggregator_validator_ids"], [])
+
+
 class SupernodeByValidatorCountTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
@@ -512,3 +519,44 @@ class CommitteeAggregatorTests(unittest.TestCase):
             "MID": {1: [12]},
             "S6": {1: [15]},
         })
+
+    def test_aggregators_are_signing_hosts_of_their_committees(self) -> None:
+        experiment = self.experiment()
+        nodes = shadow_sim.assign_nodes(experiment)
+        aggregators = [node for node in nodes if node["role"] == "local_aggregator"]
+        self.assertEqual(sorted(node["peer_key"] for node in aggregators), ["BIG", "MID", "S2", "S5", "S6"])
+        for node in aggregators:
+            self.assertTrue(set(node["aggregator_validator_ids"]) <= set(node["validator_ids"]))
+            self.assertEqual(
+                node["aggregated_subnets"],
+                sorted({shadow_sim.committee_of(v, experiment) for v in node["aggregator_validator_ids"]}),
+            )
+            self.assertTrue(set(node["aggregated_subnets"]) <= set(node["subscribed_subnets"]))
+            self.assertEqual(node["subnet_id"], node["aggregated_subnets"][0])
+
+    def test_host_aggregates_each_committee_once(self) -> None:
+        by_peer = {node["peer_key"]: node for node in shadow_sim.assign_nodes(self.experiment())}
+        self.assertEqual(by_peer["BIG"]["aggregated_subnets"], [0, 1])
+        self.assertEqual(by_peer["BIG"]["aggregator_validator_ids"], [1, 8, 9, 14])
+
+    def test_validator_less_hosts_never_aggregate(self) -> None:
+        for node in shadow_sim.assign_nodes(self.experiment(local_aggregators_per_subnet=8)):
+            if not node["validator_ids"]:
+                self.assertEqual(node["role"], "relay")
+                self.assertEqual(node["aggregated_subnets"], [])
+            else:
+                self.assertEqual(node["role"], "local_aggregator")
+
+    def test_committee_aggregators_require_node_map(self) -> None:
+        experiment = self.experiment()
+        del experiment["node_map"]
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(experiment)
+
+    def test_committee_aggregators_must_be_boolean(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.experiment(committee_aggregators="yes"))
+
+    def test_committee_aggregators_need_a_positive_target(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.experiment(local_aggregators_per_subnet=0))
