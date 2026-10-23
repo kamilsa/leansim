@@ -19,6 +19,12 @@ EVENT_NAMES = {
     "SigSent",
     "SigReceived",
     "LocalProofGenerated",
+    "ProofAnnounced",
+    "ProofRequested",
+    "ProofFetched",
+    "ProofFetchFailed",
+    "ProofServed",
+    "RecursiveProofGenerated",
     "NodeStats",
 }
 
@@ -122,6 +128,42 @@ def validator_key(event, host_field):
     return None
 
 
+def recursive_summary(output_dir, recursive_done, final_times, traffic, local_latencies):
+    """Aggregation-tree timing for runs with recursive aggregation, else None: when
+    each subnet got its first proof, each group's first and median proof, each
+    layer's first and last group, and the final proof."""
+    plan = read_json(output_dir / "aggregation-plan.json")
+    planned = [group for group in plan.get("groups", []) if isinstance(group, dict)] if isinstance(plan.get("groups"), list) else []
+    if not planned and not recursive_done:
+        return None
+    groups = [
+        {"layer": layer, "index": index, "first": min(times), "median": median(times), "members_done": len(times)}
+        for (layer, index), times in sorted(recursive_done.items())
+    ]
+    layer_ids = sorted({group["layer"] for group in groups} | {group["layer"] for group in planned if isinstance(group.get("layer"), int)})
+    layers = {}
+    for layer in layer_ids:
+        firsts = [group["first"] for group in groups if group["layer"] == layer]
+        layers[str(layer)] = {
+            "groups_planned": sum(1 for group in planned if group.get("layer") == layer),
+            "groups_done": len(firsts),
+            "first": min(firsts, default=None),
+            "median": median(firsts),
+            "last": max(firsts, default=None),
+        }
+    subnet_first = [min(values) for values in local_latencies.values() if values]
+    return {
+        "arity": plan.get("arity"),
+        "groups_planned": len(planned),
+        "groups_done": len(groups),
+        "subnet_proofs_ms": {"first": min(subnet_first), "median": median(subnet_first), "last": max(subnet_first)} if subnet_first else None,
+        "layers": layers,
+        "groups": groups,
+        "final_proof_ms": min(final_times) if final_times else None,
+        "traffic": traffic,
+    }
+
+
 def build_snapshot(output_dir):
     """Parse a run directory into a JSON-serializable metrics snapshot."""
     output_dir = output_dir.resolve()
@@ -144,6 +186,12 @@ def build_snapshot(output_dir):
 
     # Keep proof timestamps by node/subnet for stage timing even if logs end early.
     local_proofs = []
+    recursive_done = defaultdict(list)
+    final_times = []
+    proof_traffic = {
+        "announcements": 0, "pulls": 0, "proofs_fetched": 0, "extra_proofs_fetched": 0,
+        "failed_pulls": 0, "fetched_bytes": 0, "served_bytes": 0,
+    }
     for path in event_files(output_dir):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -211,6 +259,29 @@ def build_snapshot(output_dir):
                 if latency is not None and subnet_id is not None:
                     local_latencies[subnet_id].append(latency)
                     local_proofs.append((node_id, subnet_id, latency))
+            elif name == "ProofAnnounced":
+                proof_traffic["announcements"] += 1
+            elif name == "ProofRequested":
+                proof_traffic["pulls"] += 1
+            elif name == "ProofFetched":
+                proof_traffic["proofs_fetched"] += 1
+                if event.get("duplicate") is True:
+                    proof_traffic["extra_proofs_fetched"] += 1
+                if byte_size is not None and byte_size >= 0:
+                    proof_traffic["fetched_bytes"] += byte_size
+            elif name == "ProofFetchFailed":
+                proof_traffic["failed_pulls"] += 1
+            elif name == "ProofServed":
+                if byte_size is not None and byte_size >= 0:
+                    proof_traffic["served_bytes"] += byte_size
+            elif name == "RecursiveProofGenerated":
+                layer_id = integer(event.get("layer"))
+                group_index = integer(event.get("index"))
+                timestamp = number(event.get("ts_ms"))
+                if layer_id is not None and group_index is not None and timestamp is not None:
+                    recursive_done[(layer_id, group_index)].append(timestamp)
+                    if event.get("is_final") is True:
+                        final_times.append(timestamp)
             elif name == "NodeStats":
                 node_id = integer(event.get("node_id"))
                 if node_id is None:
@@ -332,6 +403,7 @@ def build_snapshot(output_dir):
             },
             "threshold_fraction": threshold_fraction,
             "node_threshold_ms": node_threshold,
+            "recursive_aggregation": recursive_summary(output_dir, recursive_done, final_times, proof_traffic, local_latencies),
         },
         "cdf": cdf,
         "node_stats": nodes,
@@ -532,6 +604,7 @@ def self_test():
         assert metrics["unique_validators"] == 2
         assert metrics["stage_medians_ms"]["threshold_reached"] == 150
         assert metrics["stage_medians_ms"]["aggregation_compute"] == 20
+        assert metrics["recursive_aggregation"] is None
         overlay_dir = root / "overlay-self-signature"
         stdout = overlay_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
         stdout.parent.mkdir(parents=True)
@@ -571,6 +644,41 @@ def self_test():
         node_threshold = colocated_metrics["node_threshold_ms"]
         assert node_threshold["nodes"] == 2 and node_threshold["reached"] == 2
         assert node_threshold["p50"] == 41 and node_threshold["max"] == 50
+        recursive_dir = root / "recursive"
+        stdout = recursive_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        # Subnets 0 and 1 feed one root group with members 3 and 4.
+        stdout.write_text("\n".join((
+            '{"event":"LocalProofGenerated","node_id":1,"subnet_id":0,"sig_count":2,"latency_ms":170}',
+            '{"event":"LocalProofGenerated","node_id":2,"subnet_id":1,"sig_count":2,"latency_ms":190}',
+            '{"event":"ProofAnnounced","node_id":1,"to_id":3,"layer":0,"index":0,"ts_ms":170}',
+            '{"event":"ProofAnnounced","node_id":2,"to_id":3,"layer":0,"index":1,"ts_ms":190}',
+            '{"event":"ProofRequested","node_id":3,"from_id":1,"layer":0,"index":0,"ts_ms":171}',
+            '{"event":"ProofServed","node_id":1,"to_id":3,"layer":0,"index":0,"ts_ms":172,"byte_size":100}',
+            '{"event":"ProofFetched","node_id":3,"from_id":1,"layer":0,"index":0,"duplicate":false,"ts_ms":200,"byte_size":100}',
+            '{"event":"ProofFetched","node_id":3,"from_id":2,"layer":0,"index":1,"duplicate":false,"ts_ms":220,"byte_size":100}',
+            '{"event":"ProofFetched","node_id":3,"from_id":4,"layer":0,"index":1,"duplicate":true,"ts_ms":230,"byte_size":100}',
+            '{"event":"ProofFetchFailed","node_id":4,"from_id":2,"layer":0,"index":1,"ts_ms":240}',
+            '{"event":"RecursiveProofGenerated","node_id":3,"layer":1,"index":0,"inputs":2,"is_final":true,"ts_ms":500}',
+            '{"event":"RecursiveProofGenerated","node_id":4,"layer":1,"index":0,"inputs":2,"is_final":true,"ts_ms":520}',
+        )), encoding="utf-8")
+        (recursive_dir / "run-manifest.json").write_text(json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8")
+        (recursive_dir / "aggregation-plan.json").write_text(
+            json.dumps({"arity": 2, "groups": [{"layer": 1, "index": 0, "children": [0, 1], "members": [3, 4]}]}),
+            encoding="utf-8",
+        )
+        recursive_metrics = build_snapshot(recursive_dir)["metrics"]
+        recursive = recursive_metrics["recursive_aggregation"]
+        assert recursive_metrics["total_bytes"] == 400
+        assert recursive["final_proof_ms"] == 500
+        assert recursive["groups_planned"] == 1 and recursive["groups_done"] == 1
+        assert recursive["groups"] == [{"layer": 1, "index": 0, "first": 500, "median": 510, "members_done": 2}]
+        assert recursive["layers"] == {"1": {"groups_planned": 1, "groups_done": 1, "first": 500, "median": 500, "last": 500}}
+        assert recursive["subnet_proofs_ms"] == {"first": 170, "median": 180, "last": 190}
+        assert recursive["traffic"] == {
+            "announcements": 2, "pulls": 1, "proofs_fetched": 3, "extra_proofs_fetched": 1,
+            "failed_pulls": 1, "fetched_bytes": 300, "served_bytes": 100,
+        }
         history = merge_history([], [primary, overlay], append=False)
         assert len(history) == 2
         assert len(merge_history(history, [primary, overlay], append=False)) == 2
