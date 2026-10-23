@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::defaults;
 
+/// Largest proof the proof protocol carries: its CBOR codec reads at most 10 MiB
+/// per response. Mirrors MAX_PROOF_BYTES in shadow-sim.py.
+pub const MAX_PROOF_BYTES: usize = 8 * 1024 * 1024;
+
 /// Network defaults applied to all node-to-node links in Shadow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDefaults {
@@ -52,6 +56,19 @@ pub struct ExperimentConfig {
 
     #[serde(default = "defaults::default_signature_payload_bytes")]
     pub signature_payload_bytes: usize,
+
+    /// Simulated time for one recursive proof, whatever its number of children.
+    #[serde(default = "defaults::default_recursive_aggregation_time_ms")]
+    pub recursive_aggregation_time_ms: u64,
+
+    /// Announcers a recursive aggregator pulls one child proof from at once,
+    /// until one copy arrives; it never downloads more copies than this.
+    #[serde(default = "defaults::default_recursive_proofs_per_child")]
+    pub recursive_proofs_per_child: usize,
+
+    /// Wire size of every aggregation proof, subnet and recursive.
+    #[serde(default = "defaults::default_aggregate_proof_bytes")]
+    pub aggregate_proof_bytes: usize,
 
     #[serde(default = "defaults::default_mesh_n_low")]
     pub gossipsub_mesh_n_low: usize,
@@ -160,6 +177,14 @@ impl ExperimentConfig {
         if self.signature_payload_bytes == 0 {
             return Err("signature_payload_bytes must be > 0".into());
         }
+        if self.recursive_proofs_per_child == 0 {
+            return Err("recursive_proofs_per_child must be > 0".into());
+        }
+        if self.aggregate_proof_bytes == 0 || self.aggregate_proof_bytes > MAX_PROOF_BYTES {
+            return Err(format!(
+                "aggregate_proof_bytes must be in 1..={MAX_PROOF_BYTES}"
+            ));
+        }
         Ok(())
     }
 
@@ -218,6 +243,10 @@ pub struct NodeConfig {
     /// means just `subnet_id`, as in configs written before committee aggregators.
     #[serde(default)]
     pub aggregated_subnets: Vec<u32>,
+    /// Path of the launcher's aggregation-plan.json; set only on hosts with a
+    /// proof duty in a run with recursive aggregation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation_plan: Option<String>,
     pub experiment: ExperimentConfig,
 }
 

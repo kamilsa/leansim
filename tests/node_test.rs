@@ -17,6 +17,9 @@ fn test_config() -> ExperimentConfig {
         burst_jitter_ms: 500,
         signature_aggregation_rate: 1000,
         signature_payload_bytes: 3072,
+        recursive_aggregation_time_ms: 276,
+        recursive_proofs_per_child: 1,
+        aggregate_proof_bytes: 262_144,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,
@@ -111,8 +114,13 @@ fn signing_subnets_cover_every_colocated_validator() {
 #[test]
 fn legacy_local_aggregator_aggregates_its_subnet() {
     let state = make_state(NodeRole::LocalAggregator, 3);
-    assert_eq!(state.aggregated_subnets.iter().copied().collect::<Vec<_>>(), vec![3]);
-    assert!(make_state(NodeRole::Validator, 3).aggregated_subnets.is_empty());
+    assert_eq!(
+        state.aggregated_subnets.iter().copied().collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert!(make_state(NodeRole::Validator, 3)
+        .aggregated_subnets
+        .is_empty());
 }
 
 #[test]
@@ -141,11 +149,27 @@ async fn due_proofs_are_taken_in_order_and_later_ones_wait() {
     let state = make_state(NodeRole::LocalAggregator, 0);
     let now = tokio::time::Instant::now();
     let later = now + Duration::from_secs(5);
-    state.schedule_proof(PendingProof { due: later, subnet: 1, sig_count: 22 });
-    state.schedule_proof(PendingProof { due: now, subnet: 2, sig_count: 23 });
-    state.schedule_proof(PendingProof { due: now, subnet: 0, sig_count: 24 });
+    state.schedule_proof(PendingProof {
+        due: later,
+        subnet: 1,
+        sig_count: 22,
+    });
+    state.schedule_proof(PendingProof {
+        due: now,
+        subnet: 2,
+        sig_count: 23,
+    });
+    state.schedule_proof(PendingProof {
+        due: now,
+        subnet: 0,
+        sig_count: 24,
+    });
     assert_eq!(state.next_proof_due(), Some(now));
-    let due: Vec<u32> = state.take_due_proofs(now).iter().map(|proof| proof.subnet).collect();
+    let due: Vec<u32> = state
+        .take_due_proofs(now)
+        .iter()
+        .map(|proof| proof.subnet)
+        .collect();
     assert_eq!(due, vec![0, 2]);
     assert_eq!(state.next_proof_due(), Some(later));
 }
@@ -162,8 +186,14 @@ async fn proof_is_scheduled_once_when_threshold_is_reached() {
     assert_eq!(state.next_proof_due(), None);
     let before = tokio::time::Instant::now();
     local_aggregator::record_signature(&state, 0, 21);
-    let due = state.next_proof_due().expect("proof scheduled at threshold");
-    assert!(due > before && due <= before + Duration::from_millis(23), "{:?}", due - before);
+    let due = state
+        .next_proof_due()
+        .expect("proof scheduled at threshold");
+    assert!(
+        due > before && due <= before + Duration::from_millis(23),
+        "{:?}",
+        due - before
+    );
     // Later signatures neither reschedule nor duplicate the proof.
     local_aggregator::record_signature(&state, 0, 22);
     let proofs = state.take_due_proofs(due);
