@@ -595,3 +595,51 @@ class RecursiveSeatTests(unittest.TestCase):
         self.assertEqual(len(groups), 63)
         self.assertEqual(len(seated), len(set(seated)))
         self.assertFalse(any(shadow_sim.is_aggregator(v, experiment) for v in seated))
+
+    def test_recursive_config_validates(self) -> None:
+        shadow_sim.validate_experiment(self.experiment())
+
+    def test_one_subnet_cannot_recurse(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.experiment(subnet_count=1))
+
+
+class RecursiveConfigTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        values = {"run_id": "t", "validator_count": 16, "subnet_count": 2, "local_aggregators_per_subnet": 4}
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def test_defaults(self) -> None:
+        config = self.config()
+        keys = (
+            "recursive_aggregation", "recursive_aggregation_arity", "recursive_aggregation_time_ms",
+            "recursive_group_size", "recursive_proofs_per_child", "aggregate_proof_bytes",
+        )
+        self.assertEqual(
+            {key: config[key] for key in keys},
+            {
+                "recursive_aggregation": False, "recursive_aggregation_arity": 2,
+                "recursive_aggregation_time_ms": 276, "recursive_group_size": 16,
+                "recursive_proofs_per_child": 1, "aggregate_proof_bytes": 262144,
+            },
+        )
+        shadow_sim.validate_experiment(config)
+
+    def test_recursive_aggregation_requires_committee_aggregators(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.config(recursive_aggregation=True))
+
+    def test_invalid_values_are_rejected(self) -> None:
+        for key, value in (
+            ("recursive_aggregation", "yes"),
+            ("recursive_aggregation_arity", 1),
+            ("recursive_aggregation_arity", 17),
+            ("recursive_aggregation_time_ms", -1),
+            ("recursive_group_size", 0),
+            ("recursive_proofs_per_child", 0),
+            ("aggregate_proof_bytes", 0),
+            ("aggregate_proof_bytes", 8 * 1024 * 1024 + 1),
+        ):
+            with self.assertRaises(SystemExit, msg=f"{key}={value}"):
+                shadow_sim.validate_experiment(self.config(**{key: value}))

@@ -35,6 +35,10 @@ RUNNER_SECTIONS = {"run", "docker", "output"}
 WARMUP_DIAL_THRESHOLD = 200
 SHORT_WARMUP_MS = 1500
 LONG_WARMUP_MS = 3000
+# leanVM's aggregate() takes at most MAX_RECURSIONS = 16 child proofs.
+MAX_RECURSION_ARITY = 16
+# The proof protocol's CBOR codec reads at most 10 MiB per response; keep headroom.
+MAX_PROOF_BYTES = 8 * 1024 * 1024
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
 _GLOBAL_AGGREGATION_REMOVED = "global aggregation was removed and will be redesigned"
 REMOVED_KEYS = {
@@ -160,6 +164,21 @@ def validate_experiment(config: dict) -> None:
             die("committee_aggregators requires node_map")
         if config["committee_aggregators"] and local_aggregators < 1:
             die("committee_aggregators needs local_aggregators_per_subnet >= 1 (the lottery's target)")
+    if not isinstance(setting(config, "recursive_aggregation", False), bool):
+        die("recursive_aggregation must be a boolean")
+    arity = as_int(setting(config, "recursive_aggregation_arity", 2), "recursive_aggregation_arity", minimum=2)
+    if arity > MAX_RECURSION_ARITY:
+        die(f"recursive_aggregation_arity must be at most {MAX_RECURSION_ARITY} (leanVM aggregates at most that many proofs at once)")
+    as_int(setting(config, "recursive_aggregation_time_ms", 276), "recursive_aggregation_time_ms", minimum=0)
+    as_int(setting(config, "recursive_group_size", 16), "recursive_group_size", minimum=1)
+    as_int(setting(config, "recursive_proofs_per_child", 1), "recursive_proofs_per_child", minimum=1)
+    if as_int(setting(config, "aggregate_proof_bytes", 262144), "aggregate_proof_bytes", minimum=1) > MAX_PROOF_BYTES:
+        die(f"aggregate_proof_bytes must be at most {MAX_PROOF_BYTES} (the proof protocol's response limit)")
+    if config.get("recursive_aggregation"):
+        if not config.get("committee_aggregators"):
+            die("recursive_aggregation requires committee_aggregators = true: recursive aggregators are attesters without a subnet duty")
+        if subnets < 2:
+            die("recursive_aggregation needs subnet_count >= 2")
     if "mesh_warmup_ms" in config:
         as_int(config["mesh_warmup_ms"], "mesh_warmup_ms", minimum=0)
     if config.get("random_peer_count") is not None:
@@ -233,6 +252,12 @@ def experiment_defaults(experiment: dict) -> dict:
         "supernode_uplink_mbps": 1000,
         "supernode_downlink_mbps": 1000,
         "topology_degree": 0,
+        "recursive_aggregation": False,
+        "recursive_aggregation_arity": 2,
+        "recursive_aggregation_time_ms": 276,
+        "recursive_group_size": 16,
+        "recursive_proofs_per_child": 1,
+        "aggregate_proof_bytes": 262144,
     }
     merged = deepcopy(experiment)
     for key, value in defaults.items():
