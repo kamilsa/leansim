@@ -2,9 +2,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAcceptance},
-    identity,
-    swarm::SwarmEvent,
-    Multiaddr, PeerId, Swarm,
+    identity, request_response,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
@@ -12,11 +12,19 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::config::experiment::ExperimentConfig;
+use crate::messages::proof::{ProofRequest, ProofResponse};
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
 
-/// The concrete behaviour type used throughout the simulator.
-pub type GossipsubBehaviour = gossipsub::Behaviour;
+/// Gossipsub carries signatures; request-response carries proof announcements and pulls.
+#[derive(NetworkBehaviour)]
+pub struct SimBehaviour {
+    pub gossipsub: gossipsub::Behaviour,
+    pub proofs: request_response::cbor::Behaviour<ProofRequest, ProofResponse>,
+}
+
+/// Protocol id of the proof announce-and-pull exchange.
+pub const PROOF_PROTOCOL: &str = "/leansim/proof/1";
 
 /// A host's libp2p identity, derived from its node id so any host can name
 /// another's PeerId from the launcher's plan without a discovery round.
@@ -64,7 +72,7 @@ impl ExplicitPeerManager {
         self.explicit_addrs.iter()
     }
 
-    fn dial_missing_selected_aggregators(&self, swarm: &mut Swarm<GossipsubBehaviour>) {
+    fn dial_missing_selected_aggregators(&self, swarm: &mut Swarm<SimBehaviour>) {
         for addr in &self.selected_aggregator_addrs {
             if self.peers_by_addr.contains_key(addr) {
                 continue;
@@ -80,7 +88,7 @@ impl ExplicitPeerManager {
 
     fn register_connection(
         &mut self,
-        swarm: &mut Swarm<GossipsubBehaviour>,
+        swarm: &mut Swarm<SimBehaviour>,
         peer_id: PeerId,
         remote_addr: &Multiaddr,
     ) {
@@ -92,13 +100,13 @@ impl ExplicitPeerManager {
             self.peers_by_addr.remove(&previous_addr);
         }
         self.peers_by_addr.insert(remote_addr.clone(), peer_id);
-        swarm.behaviour_mut().add_explicit_peer(&peer_id);
+        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
         tracing::info!(peer = %peer_id, address = %remote_addr, "registered explicit peer");
     }
 
     fn handle_disconnection(
         &mut self,
-        swarm: &mut Swarm<GossipsubBehaviour>,
+        swarm: &mut Swarm<SimBehaviour>,
         peer_id: PeerId,
         remaining_connections: u32,
     ) {
@@ -109,7 +117,10 @@ impl ExplicitPeerManager {
             return;
         };
         self.peers_by_addr.remove(&addr);
-        swarm.behaviour_mut().remove_explicit_peer(&peer_id);
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .remove_explicit_peer(&peer_id);
         match swarm.dial(addr.clone()) {
             Ok(()) => tracing::info!(peer = %peer_id, address = %addr, "redialing explicit peer"),
             Err(error) => {
@@ -122,7 +133,7 @@ impl ExplicitPeerManager {
     /// signing subnets (an aggregator is selected for a subnet it collects).
     fn selected_aggregators_ready(
         &self,
-        behaviour: &GossipsubBehaviour,
+        gossipsub: &gossipsub::Behaviour,
         topics: &[IdentTopic],
     ) -> bool {
         let topic_hashes: Vec<_> = topics.iter().map(IdentTopic::hash).collect();
@@ -130,7 +141,7 @@ impl ExplicitPeerManager {
             self.peers_by_addr.get(addr).is_some_and(|peer_id| {
                 topic_hashes
                     .iter()
-                    .any(|topic_hash| behaviour.is_peer_subscribed(peer_id, topic_hash))
+                    .any(|topic_hash| gossipsub.is_peer_subscribed(peer_id, topic_hash))
             })
         })
     }
@@ -148,15 +159,22 @@ pub fn build_swarm(
     node_id: u32,
     listen_addr: &str,
     config: &ExperimentConfig,
-) -> Result<Swarm<GossipsubBehaviour>> {
+) -> Result<Swarm<SimBehaviour>> {
     let id_keys = node_keypair(node_id);
 
-    let gossipsub_behaviour = build_gossipsub(&id_keys, config)?;
+    let gossipsub = build_gossipsub(&id_keys, config)?;
+    let proofs = request_response::cbor::Behaviour::new(
+        [(
+            StreamProtocol::new(PROOF_PROTOCOL),
+            request_response::ProtocolSupport::Full,
+        )],
+        request_response::Config::default().with_request_timeout(Duration::from_secs(10)),
+    );
 
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         .with_quic()
-        .with_behaviour(|_key| gossipsub_behaviour)?
+        .with_behaviour(|_key| SimBehaviour { gossipsub, proofs })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
 
@@ -170,7 +188,7 @@ pub fn build_swarm(
 fn build_gossipsub(
     key: &identity::Keypair,
     config: &ExperimentConfig,
-) -> Result<GossipsubBehaviour> {
+) -> Result<gossipsub::Behaviour> {
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .mesh_n_low(config.gossipsub_mesh_n_low)
         .mesh_n(config.gossipsub_mesh_n)
@@ -197,14 +215,14 @@ fn build_gossipsub(
 /// (its gossip membership, independent of what it publishes) plus every subnet
 /// it aggregates, which an aggregator must hear whether subscribed or not.
 pub fn subscribe_to_topics(
-    swarm: &mut Swarm<GossipsubBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     aggregated_subnets: &BTreeSet<u32>,
     subscribed_subnets: &BTreeSet<u32>,
     run_id: &str,
 ) -> Result<()> {
     for subnet in subscribed_subnets.union(aggregated_subnets) {
         let topic = IdentTopic::new(topics::subnet_topic(run_id, *subnet));
-        swarm.behaviour_mut().subscribe(&topic)?;
+        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
     }
     Ok(())
 }
@@ -212,12 +230,12 @@ pub fn subscribe_to_topics(
 /// Publishes a wire message to a gossipsub topic.
 /// InsufficientPeers errors are logged but not propagated — the mesh may still be forming.
 pub fn publish(
-    swarm: &mut Swarm<GossipsubBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     topic: &IdentTopic,
     msg: &WireMessage,
 ) -> Result<()> {
     let data = msg.encode();
-    match swarm.behaviour_mut().publish(topic.clone(), data) {
+    match swarm.behaviour_mut().gossipsub.publish(topic.clone(), data) {
         Ok(_msg_id) => Ok(()),
         Err(gossipsub::PublishError::InsufficientPeers) => {
             tracing::warn!("publish to {topic}: insufficient peers, mesh may still be forming");
@@ -239,23 +257,26 @@ pub struct ReceivedMessage {
 /// Returns on gossipsub messages, forwarding deserialized WireMessages and the
 /// propagation source PeerId (the immediate mesh peer that forwarded the message).
 pub async fn next_message(
-    swarm: &mut Swarm<GossipsubBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     explicit_peers: &mut ExplicitPeerManager,
 ) -> Option<ReceivedMessage> {
     loop {
         let event = swarm.next().await?;
         match event {
-            SwarmEvent::Behaviour(gossipsub::Event::Message {
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source: peer_id,
                 message_id: _id,
                 message,
-            }) => match WireMessage::decode(&message.data) {
+            })) => match WireMessage::decode(&message.data) {
                 Ok(wire_msg) => {
-                    let _ = swarm.behaviour_mut().report_message_validation_result(
-                        &_id,
-                        &peer_id,
-                        MessageAcceptance::Accept,
-                    );
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .report_message_validation_result(
+                            &_id,
+                            &peer_id,
+                            MessageAcceptance::Accept,
+                        );
                     return Some(ReceivedMessage {
                         wire_msg,
                         from_peer: peer_id,
@@ -263,28 +284,36 @@ pub async fn next_message(
                     });
                 }
                 Err(_) => {
-                    let _ = swarm.behaviour_mut().report_message_validation_result(
-                        &_id,
-                        &peer_id,
-                        MessageAcceptance::Reject,
-                    );
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .report_message_validation_result(
+                            &_id,
+                            &peer_id,
+                            MessageAcceptance::Reject,
+                        );
                 }
             },
-            SwarmEvent::Behaviour(gossipsub::Event::DuplicateMessage {
-                propagation_source: peer_id,
-                message_id: _id,
-                raw_data,
-                ..
-            }) => {
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(
+                gossipsub::Event::DuplicateMessage {
+                    propagation_source: peer_id,
+                    message_id: _id,
+                    raw_data,
+                    ..
+                },
+            )) => {
                 // Decode the raw data to count the duplicate.
                 // Use `Ignore` to prevent re-forwarding — the message was already
                 // forwarded when first seen. Accepting duplicates causes a storm.
                 if let Ok(wire_msg) = WireMessage::decode(&raw_data) {
-                    let _ = swarm.behaviour_mut().report_message_validation_result(
-                        &_id,
-                        &peer_id,
-                        MessageAcceptance::Ignore,
-                    );
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .report_message_validation_result(
+                            &_id,
+                            &peer_id,
+                            MessageAcceptance::Ignore,
+                        );
                     return Some(ReceivedMessage {
                         wire_msg,
                         from_peer: peer_id,
@@ -317,7 +346,7 @@ pub fn warmup_ms(dial_count: usize, configured: Option<u64>) -> u64 {
 }
 
 pub async fn dial_seeds(
-    swarm: &mut Swarm<GossipsubBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     seeds: &[String],
     explicit_peers: &mut ExplicitPeerManager,
     selected_aggregator_topics: &[IdentTopic],
@@ -343,11 +372,11 @@ pub async fn dial_seeds(
 
     if !selected_aggregator_topics.is_empty() {
         let topics = selected_aggregator_topics;
-        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topics) {
+        if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
             explicit_peers.dial_missing_selected_aggregators(swarm);
             poll_warmup(swarm, explicit_peers, warmup_ms).await;
         }
-        if !explicit_peers.selected_aggregators_ready(swarm.behaviour(), topics) {
+        if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
             anyhow::bail!(
                 "selected explicit aggregators were not connected and subscribed during warmup"
             );
@@ -359,7 +388,7 @@ pub async fn dial_seeds(
 }
 
 async fn poll_warmup(
-    swarm: &mut Swarm<GossipsubBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     explicit_peers: &mut ExplicitPeerManager,
     warmup_ms: u64,
 ) {

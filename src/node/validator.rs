@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::messages::wire::WireMessage;
 use crate::metrics::events::{emit, JsonlEvent};
-use crate::network::swarm::{self, GossipsubBehaviour};
+use crate::network::swarm::{self, SimBehaviour};
 use crate::network::topics;
 use crate::node::state::NodeState;
 use libp2p::Swarm;
@@ -15,10 +15,7 @@ use libp2p::Swarm;
 /// Validator init: sleep burst_time + random jitter, then publish one synthetic signature
 /// per validator on this host. Co-located validators share the host's clock, so they sign
 /// back to back after a single delay.
-pub async fn validator_init(
-    state: &Arc<NodeState>,
-    swarm: &mut Swarm<GossipsubBehaviour>,
-) -> Result<()> {
+pub async fn validator_init(state: &Arc<NodeState>, swarm: &mut Swarm<SimBehaviour>) -> Result<()> {
     let config = &state.config;
 
     let jitter = {
