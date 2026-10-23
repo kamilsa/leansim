@@ -167,6 +167,13 @@ lowest-latency neighbours, and no IHAVE gossip is sent. With libp2p's 5 s
 default (set `gossipsub_heartbeat_initial_delay_ms = 5000` to reproduce it),
 signatures stayed inside their region until about 5 s after start.
 
+Every host waits the same mesh warmup before signing, so all of them vote at
+once: 1,500 ms, or 3,000 ms when any host dials more than 200 peers. The
+launcher derives it from the busiest host and records it as `mesh_warmup_ms`
+(set it in the experiment to override). With per-host warmups, hosts past the
+dial threshold signed late and dropped the gossip that reached them while
+still warming up.
+
 The explicit aggregator count must be smaller than
 `local_aggregators_per_subnet`, because local aggregators also sign and cannot
 select themselves. Explicit peers are additional direct forwarding links and do
