@@ -35,7 +35,8 @@ pub fn record_signature(state: &NodeState, subnet: u32, validator_id: u32) {
     if count < threshold || !state.claim_proof(subnet) {
         return;
     }
-    let compute = Duration::from_secs_f64(count as f64 / state.config.signature_aggregation_rate as f64);
+    let compute =
+        Duration::from_secs_f64(count as f64 / state.config.signature_aggregation_rate as f64);
     state.schedule_proof(PendingProof {
         due: tokio::time::Instant::now() + compute,
         subnet,
