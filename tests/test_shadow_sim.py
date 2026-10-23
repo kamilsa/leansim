@@ -528,3 +528,24 @@ class MeshWarmupTests(unittest.TestCase):
         config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, "mesh_warmup_ms": -1})
         with self.assertRaises(SystemExit):
             shadow_sim.validate_experiment(config)
+
+
+class RecursiveTreeTests(unittest.TestCase):
+    def test_layer_sizes_shrink_by_the_arity_until_one_group(self) -> None:
+        self.assertEqual(shadow_sim.recursive_layer_sizes(64, 2), [32, 16, 8, 4, 2, 1])
+        self.assertEqual(shadow_sim.recursive_layer_sizes(64, 4), [16, 4, 1])
+        self.assertEqual(shadow_sim.recursive_layer_sizes(64, 8), [8, 1])
+        self.assertEqual(shadow_sim.recursive_layer_sizes(64, 16), [4, 1])
+
+    def test_groups_take_consecutive_children_and_the_last_takes_the_rest(self) -> None:
+        groups = shadow_sim.recursive_groups({"subnet_count": 6, "recursive_aggregation_arity": 4})
+        self.assertEqual(
+            [(group["layer"], group["index"], group["children"]) for group in groups],
+            [(1, 0, [0, 1, 2, 3]), (1, 1, [4, 5]), (2, 0, [0, 1])],
+        )
+
+    def test_eight_to_one_over_64_subnets_is_eight_groups_and_a_root(self) -> None:
+        groups = shadow_sim.recursive_groups({"subnet_count": 64, "recursive_aggregation_arity": 8})
+        self.assertEqual(len(groups), 9)
+        self.assertEqual(groups[0]["children"], list(range(8)))
+        self.assertEqual(groups[-1], {"layer": 2, "index": 0, "children": list(range(8))})
