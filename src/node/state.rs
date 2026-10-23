@@ -1,11 +1,20 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use dashmap::DashMap;
 
 use crate::config::experiment::{ExperimentConfig, NodeRole};
 use crate::messages::wire::MessageId;
+
+/// A local proof whose simulated aggregation compute is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingProof {
+    pub due: tokio::time::Instant,
+    pub subnet: u32,
+    pub sig_count: usize,
+}
 
 /// Shared node state used across the event loop and role runtimes.
 pub struct NodeState {
@@ -16,6 +25,14 @@ pub struct NodeState {
     pub validator_ids: Vec<u32>,
     /// Explicit subnet subscriptions (gossip membership); empty means "the signing subnets".
     pub explicit_subscribed_subnets: Vec<u32>,
+    /// Subnets (committees) this host aggregates; empty unless a local aggregator.
+    pub aggregated_subnets: BTreeSet<u32>,
+    /// Local aggregator: subnet → unique validator ids whose signatures arrived.
+    pub sigs_by_subnet: DashMap<u32, HashSet<u32>>,
+    /// Local aggregator: subnets whose local proof is already scheduled or done.
+    pub proofs_claimed: DashMap<u32, ()>,
+    /// Local aggregator: proofs whose simulated compute has not finished yet.
+    pub pending_proofs: Mutex<Vec<PendingProof>>,
     pub start: Instant,
     pub config: ExperimentConfig,
 
@@ -52,6 +69,14 @@ impl NodeState {
                 _ => vec![node_id],
             },
             explicit_subscribed_subnets: Vec::new(),
+            aggregated_subnets: if role == NodeRole::LocalAggregator {
+                BTreeSet::from([subnet_id])
+            } else {
+                BTreeSet::new()
+            },
+            sigs_by_subnet: DashMap::new(),
+            proofs_claimed: DashMap::new(),
+            pending_proofs: Mutex::new(Vec::new()),
             start: Instant::now(),
             config,
             seen_messages: DashMap::new(),
@@ -74,6 +99,47 @@ impl NodeState {
     pub fn with_subscribed_subnets(mut self, subnets: Vec<u32>) -> Self {
         self.explicit_subscribed_subnets = subnets;
         self
+    }
+
+    pub fn with_aggregated_subnets(mut self, subnets: Vec<u32>) -> Self {
+        self.aggregated_subnets = subnets.into_iter().collect();
+        self
+    }
+
+    pub fn aggregates(&self, subnet: u32) -> bool {
+        self.aggregated_subnets.contains(&subnet)
+    }
+
+    /// Records a signature for a subnet and returns how many unique validators
+    /// of that subnet this host now holds.
+    pub fn record_sig(&self, subnet: u32, validator_id: u32) -> usize {
+        let mut validators = self.sigs_by_subnet.entry(subnet).or_default();
+        validators.insert(validator_id);
+        validators.len()
+    }
+
+    /// Claims the subnet's local proof; true only the first time per subnet.
+    pub fn claim_proof(&self, subnet: u32) -> bool {
+        self.proofs_claimed.insert(subnet, ()).is_none()
+    }
+
+    pub fn schedule_proof(&self, proof: PendingProof) {
+        self.pending_proofs.lock().unwrap().push(proof);
+    }
+
+    /// When the earliest pending proof finishes computing, if any.
+    pub fn next_proof_due(&self) -> Option<tokio::time::Instant> {
+        self.pending_proofs.lock().unwrap().iter().map(|proof| proof.due).min()
+    }
+
+    /// Removes and returns proofs due by `now`, earliest first (subnet breaks ties).
+    pub fn take_due_proofs(&self, now: tokio::time::Instant) -> Vec<PendingProof> {
+        let mut pending = self.pending_proofs.lock().unwrap();
+        let (mut due, waiting): (Vec<_>, Vec<_>) =
+            pending.drain(..).partition(|proof| proof.due <= now);
+        *pending = waiting;
+        due.sort_by_key(|proof| (proof.due, proof.subnet));
+        due
     }
 
     /// Subnets this host signs in, one per distinct validator subnet.

@@ -1,9 +1,10 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeRole};
 use leansim::messages::wire::WireMessage;
-use leansim::node::state::NodeState;
+use leansim::node::state::{NodeState, PendingProof};
 
 fn test_config() -> ExperimentConfig {
     ExperimentConfig {
@@ -154,4 +155,46 @@ fn signing_subnets_cover_every_colocated_validator() {
         state.signing_subnets().into_iter().collect::<Vec<_>>(),
         vec![0, 1, 3]
     );
+}
+
+#[test]
+fn legacy_local_aggregator_aggregates_its_subnet() {
+    let state = make_state(NodeRole::LocalAggregator, 3);
+    assert_eq!(state.aggregated_subnets.iter().copied().collect::<Vec<_>>(), vec![3]);
+    assert!(make_state(NodeRole::Validator, 3).aggregated_subnets.is_empty());
+}
+
+#[test]
+fn record_sig_counts_unique_validators_per_subnet() {
+    let state = NodeState::new(1, NodeRole::LocalAggregator, 0, test_config())
+        .with_aggregated_subnets(vec![0, 2]);
+    assert!(state.aggregates(2));
+    assert!(!state.aggregates(1));
+    assert_eq!(state.record_sig(0, 5), 1);
+    assert_eq!(state.record_sig(0, 5), 1);
+    assert_eq!(state.record_sig(0, 6), 2);
+    // Another committee's subnet keeps its own count.
+    assert_eq!(state.record_sig(2, 60), 1);
+}
+
+#[test]
+fn claim_proof_succeeds_once_per_subnet() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    assert!(state.claim_proof(0));
+    assert!(!state.claim_proof(0));
+    assert!(state.claim_proof(1));
+}
+
+#[tokio::test]
+async fn due_proofs_are_taken_in_order_and_later_ones_wait() {
+    let state = make_state(NodeRole::LocalAggregator, 0);
+    let now = tokio::time::Instant::now();
+    let later = now + Duration::from_secs(5);
+    state.schedule_proof(PendingProof { due: later, subnet: 1, sig_count: 22 });
+    state.schedule_proof(PendingProof { due: now, subnet: 2, sig_count: 23 });
+    state.schedule_proof(PendingProof { due: now, subnet: 0, sig_count: 24 });
+    assert_eq!(state.next_proof_due(), Some(now));
+    let due: Vec<u32> = state.take_due_proofs(now).iter().map(|proof| proof.subnet).collect();
+    assert_eq!(due, vec![0, 2]);
+    assert_eq!(state.next_proof_due(), Some(later));
 }
