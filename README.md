@@ -179,10 +179,54 @@ Ethereum's committee model:
   aggregates all of them; several winners on one host still make one aggregator.
 - Each aggregated subnet gets its own ≥ `local_threshold` proof. Proofs compute in
   parallel (`sig_count / signature_aggregation_rate` each) without pausing the
-  host's gossip. They are logged, not transmitted.
+  host's gossip. Without recursive aggregation they are logged, not transmitted.
 
 Without the flag, `local_aggregators_per_subnet` hosts are promoted among each
 subnet's subscribers, one subnet per host, possibly relays.
+
+#### Recursive aggregation
+
+With `recursive_aggregation = true` (requires `committee_aggregators = true`), subnet
+proofs are aggregated recursively until one final proof remains, as leanVM's
+`aggregate` proves one proof from up to 16 child proofs:
+
+- Layer 1 has `ceil(subnet_count / arity)` groups; group `i` aggregates subnets
+  `i*arity` to `(i+1)*arity - 1`. Each later layer aggregates `arity` groups of the
+  layer below until one group remains. 64 subnets give 32/16/8/4/2/1 groups at
+  arity 2, 16/4/1 at 4, and 8/1 at 8.
+- Group members are attesters, drawn like subnet aggregators. Validator ids are
+  dealt into one pool per group in a `geo_seed`-keyed hash order; a validator wins a
+  seat when `hash(geo_seed, validator)[0:8] % max(1, pool_size / recursive_group_size) == 0`,
+  so `recursive_group_size` is the expected number of winners per group. A validator
+  that won a subnet duty is skipped, so no validator holds two duties; a host can
+  hold several through different validators, and several winners on one host share
+  one seat.
+- Proofs travel by announce and pull over a request-response protocol
+  (`/leansim/proof/1`). An aggregator that finishes a proof announces it to every
+  member of the next group. A member pulls each child proof from the first
+  announcer, from up to `recursive_proofs_per_child` announcers at once until one
+  copy arrives, and announces the child proofs it holds to its group's other
+  members, who can pull from it too.
+- A member proves once it holds one proof of every child. The proof takes
+  `recursive_aggregation_time_ms`, whatever the arity, so set the two together.
+  The final group's first proof is the final proof.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `recursive_aggregation` | `false` | Enable recursive aggregation |
+| `recursive_aggregation_arity` | `2` | Child proofs per recursive proof, 2 to 16 |
+| `recursive_aggregation_time_ms` | `276` | Time of one recursive proof (leanVM 2-to-1 on an M4 Max) |
+| `recursive_group_size` | `16` | Expected members per group (lottery target) |
+| `recursive_proofs_per_child` | `1` | Announcers a member pulls one child proof from at once |
+| `aggregate_proof_bytes` | `262144` | Wire size of every subnet and recursive proof |
+
+On the 65k network (`experiments/nodemap-small-65k-recursive-sub64.toml`):
+
+| Arity | Groups | Seats (hosts) | Members per group | Most seats on one host |
+|---|---|---|---|---|
+| 2 | 63 (32/16/8/4/2/1) | 826 (150) | 7-22 | 50 |
+| 4 | 21 (16/4/1) | 269 (92) | 8-18 | 16 |
+| 8 | 9 (8/1) | 115 (57) | 7-18 | 8 |
 
 ## Output
 
@@ -194,6 +238,7 @@ output/
 ├── topology.gml                # generated network graph
 ├── configs/node_<id>.toml      # one node config per simulated process
 ├── run-manifest.json           # actual node, validator, country, bandwidth, and role assignments
+├── aggregation-plan.json       # recursive groups and each host's proof duties (recursive aggregation only)
 ├── run-meta.json               # runner, seed, and campaign index
 ├── shadow.data/hosts/.../*.stdout
 ├── runs-history.json           # persisted analysis snapshots
@@ -206,7 +251,8 @@ reconstructing seeded geo or supernode assignments.
 ## Analysis
 
 The generated report contains signature-arrival CDFs, threshold timing,
-per-subnet local proof latency, duplicate traffic, and
+per-subnet local proof latency, the aggregation tree (first proof per subnet and
+group, and the final proof), duplicate traffic, and
 per-node byte/message counters. It has no web framework or npm dependency.
 
 Run the analyzer directly when needed:
