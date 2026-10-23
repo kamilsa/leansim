@@ -29,15 +29,6 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Generate a netviz-compatible trace file from a run manifest and Shadow run.
-    Netviz {
-        #[arg(long)]
-        manifest: PathBuf,
-        #[arg(long)]
-        shadow_data: PathBuf,
-        #[arg(long)]
-        out: PathBuf,
-    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -50,11 +41,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Node { config } => run_node(config).await,
-        Command::Netviz {
-            manifest,
-            shadow_data,
-            out,
-        } => leansim::netviz::generate(&manifest, &shadow_data, &out),
     }
 }
 
