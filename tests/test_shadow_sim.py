@@ -19,7 +19,6 @@ def experiment(explicit_count: int) -> dict:
             "validator_count": 12,
             "subnet_count": 2,
             "local_aggregators_per_subnet": 3,
-            "global_aggregator_count": 1,
             "gossipsub_explicit_aggregator_count": explicit_count,
             "geo_seed": 7,
         }
@@ -32,10 +31,6 @@ class ExplicitAggregatorAssignmentTests(unittest.TestCase):
         by_id = {node["node_id"]: node for node in nodes}
 
         for node in nodes:
-            if node["role"] == "global_aggregator":
-                self.assertEqual(node["selected_aggregator_ids"], [])
-                continue
-
             selected = node["selected_aggregator_ids"]
             self.assertEqual(len(selected), 2)
             self.assertEqual(len(set(selected)), 2)
@@ -81,7 +76,6 @@ class ValidatorMapPlacementTests(unittest.TestCase):
             "validator_count": 17,
             "subnet_count": 1,
             "local_aggregators_per_subnet": 3,
-            "global_aggregator_count": 1,
             "geo_seed": 7,
             "validator_map": str(self.map_path),
         }
@@ -95,7 +89,7 @@ class ValidatorMapPlacementTests(unittest.TestCase):
 
     def test_colocated_validators_share_one_host(self) -> None:
         nodes = shadow_sim.assign_nodes(self.experiment())
-        signing = [node for node in nodes if node["role"] != "global_aggregator"]
+        signing = nodes
         # All 17 validators sampled: A, B, C, and four solo peers.
         self.assertEqual(len(signing), 7)
         self.assertEqual(Counter(len(node["validator_ids"]) for node in signing), Counter({8: 1, 4: 1, 1: 5}))
@@ -151,7 +145,6 @@ class NodeMapPlacementTests(unittest.TestCase):
             "validator_count": 10,
             "subnet_count": 4,
             "local_aggregators_per_subnet": 1,
-            "global_aggregator_count": 0,
             "geo_seed": 7,
             "node_map": str(self.map_path),
             "subnet_subscriptions_per_node": 2,
@@ -261,7 +254,6 @@ class SupernodeByValidatorCountTests(unittest.TestCase):
             "validator_count": 153,
             "subnet_count": 1,
             "local_aggregators_per_subnet": 1,
-            "global_aggregator_count": 0,
             "geo_seed": 7,
             "node_map": str(self.map_path),
             "subnet_subscriptions_per_node": 1,
@@ -323,7 +315,6 @@ class AllHostsPlacementTests(unittest.TestCase):
             "validator_count": 4,
             "subnet_count": 1,
             "local_aggregators_per_subnet": 1,
-            "global_aggregator_count": 0,
             "geo_seed": 7,
             "node_map": str(self.map_path),
             "subnet_subscriptions_per_node": 1,
@@ -382,7 +373,6 @@ class DutySubnetSubscriptionTests(unittest.TestCase):
             "validator_count": 16,
             "subnet_count": 2,
             "local_aggregators_per_subnet": 1,
-            "global_aggregator_count": 0,
             "geo_seed": 7,
             "node_map": str(self.map_path),
             "subnet_subscriptions_per_node": 2,
@@ -430,3 +420,21 @@ class DutySubnetSubscriptionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemovedGlobalAggregationTests(unittest.TestCase):
+    def test_removed_keys_are_rejected(self) -> None:
+        for key, value in (
+            ("global_aggregator_count", 0),
+            ("global_proof_target", 0.66),
+            ("global_aggregation_rate", 10),
+            ("proof_payload_bytes", 131072),
+        ):
+            config = shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, key: value})
+            with self.assertRaises(SystemExit, msg=key):
+                shadow_sim.validate_experiment(config)
+
+    def test_no_global_aggregator_hosts(self) -> None:
+        nodes = shadow_sim.assign_nodes(experiment(0))
+        self.assertEqual(len(nodes), 12)
+        self.assertNotIn("global_aggregator", {node["role"] for node in nodes})

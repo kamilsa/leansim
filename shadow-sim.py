@@ -30,6 +30,8 @@ SEED_PEER_COUNT = 50
 # subnets need gossipsub_mesh_n instead.
 PUBLISH_SUBNET_PEER_COUNT = 2
 RUNNER_SECTIONS = {"run", "docker", "output"}
+# Global (recursive) aggregation was removed; it will be redesigned.
+REMOVED_KEYS = ("global_aggregator_count", "global_proof_target", "global_aggregation_rate", "proof_payload_bytes")
 
 
 def die(message: str) -> None:
@@ -67,6 +69,9 @@ def validate_experiment(config: dict) -> None:
     run_id = config.get("run_id")
     if not isinstance(run_id, str) or not run_id.strip():
         die("run_id must be a non-empty string")
+    for key in REMOVED_KEYS:
+        if key in config:
+            die(f"{key} is no longer supported: global aggregation was removed; delete it from the config")
     validators = as_int(config.get("validator_count"), "validator_count", minimum=1)
     subnets = as_int(config.get("subnet_count"), "subnet_count", minimum=1)
     if validators % subnets:
@@ -86,16 +91,12 @@ def validate_experiment(config: dict) -> None:
     )
     if explicit_aggregators and explicit_aggregators >= local_aggregators:
         die("gossipsub_explicit_aggregator_count must be less than local_aggregators_per_subnet")
-    as_int(setting(config, "global_aggregator_count", 1), "global_aggregator_count", minimum=0)
     as_number(setting(config, "local_threshold", 0.9), "local_threshold", minimum=0.0000001, maximum=1)
-    as_number(setting(config, "global_proof_target", 0.66), "global_proof_target", minimum=0.0000001, maximum=1)
     for key, default in (
         ("burst_time_ms", 2000),
         ("burst_jitter_ms", 500),
         ("signature_aggregation_rate", 1000),
-        ("global_aggregation_rate", 10),
         ("signature_payload_bytes", 3072),
-        ("proof_payload_bytes", 131072),
         ("gossipsub_mesh_n_low", 2),
         ("gossipsub_mesh_n", 4),
         ("gossipsub_mesh_n_high", 8),
@@ -109,12 +110,8 @@ def validate_experiment(config: dict) -> None:
         as_int(setting(config, key, default), key, minimum=0)
     if as_int(setting(config, "signature_aggregation_rate", 1000), "signature_aggregation_rate") == 0:
         die("signature_aggregation_rate must be greater than zero")
-    if as_int(setting(config, "global_aggregation_rate", 10), "global_aggregation_rate") == 0:
-        die("global_aggregation_rate must be greater than zero")
     if as_int(setting(config, "signature_payload_bytes", 3072), "signature_payload_bytes") == 0:
         die("signature_payload_bytes must be greater than zero")
-    if as_int(setting(config, "proof_payload_bytes", 131072), "proof_payload_bytes") == 0:
-        die("proof_payload_bytes must be greater than zero")
     if not isinstance(setting(config, "gossipsub_flood_publish", False), bool):
         die("gossipsub_flood_publish must be a boolean")
     if "gossipsub_heartbeat_initial_delay_ms" in config:
@@ -202,15 +199,11 @@ def experiment_defaults(experiment: dict) -> dict:
     defaults = {
         "run_timeout_secs": 120,
         "local_aggregators_per_subnet": 1,
-        "global_aggregator_count": 1,
         "local_threshold": 0.9,
-        "global_proof_target": 0.66,
         "burst_time_ms": 2000,
         "burst_jitter_ms": 500,
         "signature_aggregation_rate": 1000,
-        "global_aggregation_rate": 10,
         "signature_payload_bytes": 3072,
-        "proof_payload_bytes": 131072,
         "gossipsub_mesh_n_low": 2,
         "gossipsub_mesh_n": 4,
         "gossipsub_mesh_n_high": 8,
@@ -284,10 +277,6 @@ def country_latency(latency: dict, source: str, target: str) -> float:
 
 def subnet_ip(subnet: int, local_id: int) -> str:
     return f"10.{subnet}.{local_id // 254}.{local_id % 254 + 1}"
-
-
-def global_aggregator_ip(node_id: int) -> str:
-    return f"10.255.{node_id // 254}.{node_id % 254 + 1}"
 
 
 @functools.lru_cache(maxsize=None)
@@ -468,15 +457,6 @@ def assign_nodes(experiment: dict) -> list[dict]:
             node["peer_key"] = host["peer_key"]
             node["source_validator_indices"] = host["source_validator_indices"]
         nodes.append(node)
-    for _ in range(experiment["global_aggregator_count"]):
-        nodes.append({
-            "node_id": len(nodes),
-            "role": "global_aggregator",
-            "subnet_id": 0,
-            "ip": global_aggregator_ip(len(nodes)),
-            "validator_ids": [],
-            "signing_subnets": [],
-        })
     for node in nodes:
         node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
 
@@ -591,16 +571,6 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
             node["peer_key"] = host["peer_key"]
         node["source_validator_slots"] = host.get("source_validator_slots", 0)
         nodes.append(node)
-    for _ in range(experiment["global_aggregator_count"]):
-        nodes.append({
-            "node_id": len(nodes),
-            "role": "global_aggregator",
-            "subnet_id": 0,
-            "ip": global_aggregator_ip(len(nodes)),
-            "validator_ids": [],
-            "signing_subnets": [],
-            "subscribed_subnets": [],
-        })
     for node in nodes:
         node["listen_addr"] = f"/ip4/{node['ip']}/udp/9090/quic-v1"
 
