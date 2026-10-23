@@ -172,6 +172,28 @@ The explicit aggregator count must be smaller than
 select themselves. Explicit peers are additional direct forwarding links and do
 not count toward `gossipsub_mesh_n`.
 
+#### Committee aggregators
+
+With `committee_aggregators = true` (requires `node_map`), aggregation follows
+Ethereum's committee model:
+
+- Each validator belongs to exactly one committee: `validator_count / subnet_count`
+  validators per committee, as contiguous id blocks. Ids are dealt over randomly
+  sampled node-map slots, so every committee is a random set of validators.
+- Committee `i` attests on subnet `i` (one slot of `subnet_count` committees).
+- Aggregators are picked by Ethereum's `is_aggregator` lottery: a validator wins when
+  `hash(geo_seed, validator)[0:8] % max(1, committee_size / local_aggregators_per_subnet) == 0`,
+  so `local_aggregators_per_subnet` is the expected number per committee. The host
+  of a winning validator aggregates that committee's subnet. Hosts without
+  validators never aggregate. A host with winners in several committees
+  aggregates all of them; several winners on one host still make one aggregator.
+- Each aggregated subnet gets its own ≥ `local_threshold` proof. Proofs compute in
+  parallel (`sig_count / signature_aggregation_rate` each) without pausing the
+  host's gossip. They are logged, not transmitted.
+
+Without the flag, `local_aggregators_per_subnet` hosts are promoted among each
+subnet's subscribers, one subnet per host, possibly relays.
+
 ## Output
 
 For an output directory such as `output/`, a run produces:

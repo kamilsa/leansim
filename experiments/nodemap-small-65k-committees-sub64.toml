@@ -1,0 +1,60 @@
+# Same network as experiments/nodemap-small-65k-allhosts-sub64.toml (nodes_small.csv,
+# all hosts, 65,536 validators in 64 committees of 1,024), but local aggregators
+# follow Ethereum: an is_aggregator lottery (target 16 per committee) over each
+# committee's own validators; the hosts of the winners aggregate that committee's
+# subnet. Relays never aggregate; a big operator with winners in many committees
+# aggregates all of them.
+run_id = "nodemap-small-65k-committees-sub64"
+run_timeout_secs = 120
+
+validator_count = 65536
+node_map = "nodes_small.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in.
+random_peer_count = 0
+subnet_count = 64
+local_aggregators_per_subnet = 16
+committee_aggregators = true
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+image_name = "leansim-shadow:local"
+rebuild = false
+
+[output]
+dir = "output-nodemap-small-65k-committees-sub64"
