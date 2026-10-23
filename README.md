@@ -249,7 +249,18 @@ node configs get `traffic_log = true`.
 - Traffic events carry no `byte_size`, so they never enter the run's signature
   traffic totals.
 - `scripts/analyze.py` writes `traffic-<node>.html` per logged host: sent above
-  and received below the axis, stacked by kind, with the busiest peers beside it.
+  and received below the axis, stacked areas by kind in MB/s (averaged over each
+  bucket), with a ranked peer-exchange table below and links between tracked hosts.
+  Run-wide markers show the median signature-send time, first subnet proof and
+  first final proof (when available). Curved outlines are the default;
+  enable **Raw buckets** for the exact step view. Curves are display interpolation
+  only: totals, peak rates and hover values still use measured buckets.
+  Empty intervals have zero-valued endpoints. The time axis starts at run start
+  (zero); when `mesh_warmup_ms` is known, the warmup interval is shaded and marked
+  "traffic not captured" rather than hidden or filled with artificial zero samples.
+  These are application-level rates, not exact wire bandwidth: outgoing gossip
+  is estimated, IHAVE/IWANT and transport overhead are not measured, and proof
+  payloads are attributed when handled rather than throughout their transfer.
 
 | Key | Default | Meaning |
 |---|---|---|

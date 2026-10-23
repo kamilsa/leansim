@@ -106,6 +106,7 @@ def metadata_for(output_dir):
         "run_index": first("run_index", "index"),
         "run_id": first("run_id", "name"),
         "local_threshold": threshold,
+        "mesh_warmup_ms": number(experiment.get("mesh_warmup_ms")),
     }
 
 
@@ -195,7 +196,7 @@ def traffic_summary(traffic_buckets, traffic_peers, peer_ids):
             )
         peers.sort(key=lambda peer: (-(peer["inbound"] + peer["outbound"]), str(peer["peer"])))
         summary[str(node_id)] = {
-            "bucket_ms": buckets[-1].pop("width_ms"),
+            "bucket_ms": buckets[-1]["width_ms"],
             "sent": sum(sum(bucket["outbound"].values()) for bucket in buckets),
             "received": sum(sum(bucket["inbound"].values()) for bucket in buckets),
             "buckets": buckets,
@@ -607,72 +608,142 @@ renderTable(); draw(views[selected]);
 TRAFFIC_JS = """
 const data = JSON.parse(document.getElementById('traffic-data').textContent);
 const traffic = data.traffic;
-const colors = {signature: '#5aa9e6', duplicate_signature: '#2f6f9e', proof_payload: '#e07a4f', proof_announce: '#d9b26a', proof_request: '#8f7bd8', proof_control: '#6b7280'};
+const colors = {signature: '#53d8b1', duplicate_signature: '#328b91', proof_payload: '#ad9bff', proof_announce: '#e2bc7a', proof_request: '#8ca8d1', proof_control: '#778598'};
+const names = {signature: 'Signatures', duplicate_signature: 'Duplicate signatures', proof_payload: 'Proof payloads', proof_announce: 'Announcements', proof_request: 'Pull requests', proof_control: 'Proof control'};
 const mb = (bytes) => bytes / 1e6;
-const fmt = (value) => Number(value).toLocaleString('en-US');
 const kinds = [...new Set(traffic.buckets.flatMap(bucket => [...Object.keys(bucket.inbound), ...Object.keys(bucket.outbound)]))].sort();
-const x = traffic.buckets.map(bucket => bucket.start_ms / 1000);
+const frames = [];
+let previousEnd = null;
+for (const bucket of traffic.buckets) {
+  if (previousEnd !== null && bucket.start_ms > previousEnd) {
+    frames.push({start_ms: previousEnd, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+  }
+  frames.push(bucket);
+  previousEnd = bucket.start_ms + bucket.width_ms;
+}
+if (previousEnd !== null) frames.push({start_ms: previousEnd, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+const x = frames.map(bucket => bucket.start_ms / 1000);
+const rate = (bytes, bucket) => mb(bytes) * 1000 / bucket.width_ms;
 const traces = [];
-for (const kind of kinds) {
-  traces.push({name: kind.replaceAll('_', ' ') + ' · sent', type: 'bar', x, y: traffic.buckets.map(bucket => mb(bucket.outbound[kind] || 0)), marker: {color: colors[kind] || '#7f8c9b'}, legendgroup: kind, hovertemplate: '%{y:.2f} MB sent at %{x:.1f} s<extra>' + kind + '</extra>'});
+for (const [direction, field, sign] of [['sent', 'outbound', 1], ['received', 'inbound', -1]]) {
+  for (const kind of kinds) {
+    const values = frames.map(bucket => rate(bucket[field][kind] || 0, bucket));
+    traces.push({name: names[kind] || kind, type: 'scatter', mode: 'lines', x,
+      y: values.map(value => value === 0 ? 0 : sign * value), customdata: values,
+      stackgroup: direction, line: {color: '#dbe8f155', width: 0.6, shape: 'spline', smoothing: 0.65},
+      fillcolor: colors[kind] || '#778598', legendgroup: kind, showlegend: direction === 'sent',
+      hovertemplate: '%{customdata:.2f} MB/s ' + direction + ' at %{x:.1f} s<extra>' + (names[kind] || kind) + '</extra>'});
+  }
 }
-for (const kind of kinds) {
-  traces.push({name: kind.replaceAll('_', ' ') + ' · received', type: 'bar', x, y: traffic.buckets.map(bucket => -mb(bucket.inbound[kind] || 0)), marker: {color: colors[kind] || '#7f8c9b'}, legendgroup: kind, showlegend: false, hovertemplate: '%{y:.2f} MB received at %{x:.1f} s<extra>' + kind + '</extra>'});
+const peak = frames.reduce((best, bucket) => Math.max(best,
+  rate(Object.values(bucket.inbound).reduce((a, b) => a + b, 0), bucket),
+  rate(Object.values(bucket.outbound).reduce((a, b) => a + b, 0), bucket)), 0);
+const extent = peak > 0 ? peak * 1.12 : 1;
+const warmupSeconds = Number.isFinite(data.warmup_ms) && data.warmup_ms > 0 ? data.warmup_ms / 1000 : 0;
+const milestones = (data.milestones || []).filter(point => Number.isFinite(point.time_ms));
+const endSeconds = Math.max((previousEnd || 0) / 1000, warmupSeconds, ...milestones.map(point => point.time_ms / 1000), 1);
+const shapes = warmupSeconds > 0 ? [{type: 'rect', xref: 'x', yref: 'paper', x0: 0, x1: warmupSeconds, y0: 0, y1: 1,
+  fillcolor: '#96a6b9', opacity: 0.055, line: {width: 0}, layer: 'below'}] : [];
+const annotations = warmupSeconds > 0 ? [{xref: 'x', yref: 'paper', x: warmupSeconds / 2, y: 0.88,
+  text: 'Warmup<br>traffic not<br>captured', showarrow: false, font: {color: '#96a6b9', size: 10}, align: 'center'}] : [];
+for (const [index, point] of milestones.entries()) {
+  const at = point.time_ms / 1000;
+  shapes.push({type: 'line', xref: 'x', yref: 'paper', x0: at, x1: at, y0: 0, y1: 1,
+    line: {color: '#748399', width: 0.7, dash: 'dot'}, layer: 'below'});
+  annotations.push({xref: 'x', yref: 'paper', x: at, y: index % 2 ? 1.20 : 1.02, yanchor: 'bottom',
+    text: point.label + '<br>' + at.toFixed(2) + ' s', xanchor: index === milestones.length - 1 ? 'right' : 'center',
+    showarrow: false, font: {color: '#96a6b9', size: 10}, align: 'center'});
 }
-const dark = {paper_bgcolor: '#14161a', plot_bgcolor: '#14161a', font: {color: '#d7dae0'}};
-Plotly.newPlot('timeline', traces, Object.assign({}, dark, {
-  barmode: 'relative', bargap: 0.05,
-  xaxis: {title: 'time (s)', gridcolor: '#262b33', zeroline: false},
-  yaxis: {title: 'MB · sent above, received below', gridcolor: '#262b33', zerolinecolor: '#5b6472'},
-  margin: {t: 30, l: 70, r: 20, b: 110}, legend: {orientation: 'h', y: -0.25, font: {size: 10}}
-}), {responsive: true, displaylogo: false});
-const peers = traffic.peers.slice(0, 15).reverse();
-Plotly.newPlot('peers', [
-  {name: 'sent', type: 'bar', orientation: 'h', y: peers.map(peer => peer.peer), x: peers.map(peer => mb(peer.outbound)), marker: {color: '#e07a4f'}, hovertemplate: '%{x:.2f} MB sent<extra>%{y}</extra>'},
-  {name: 'received', type: 'bar', orientation: 'h', y: peers.map(peer => peer.peer), x: peers.map(peer => -mb(peer.inbound)), marker: {color: '#5aa9e6'}, hovertemplate: '%{x:.2f} MB received<extra>%{y}</extra>'},
-], Object.assign({}, dark, {
-  barmode: 'relative', title: 'busiest peers',
-  xaxis: {title: 'MB · sent right, received left', gridcolor: '#262b33', zerolinecolor: '#5b6472'},
-  yaxis: {automargin: true}, margin: {t: 40, l: 90, r: 20, b: 50}, legend: {orientation: 'h', y: -0.15}
-}), {responsive: true, displaylogo: false});
+Plotly.newPlot('timeline', traces, {
+  paper_bgcolor: '#161e28', plot_bgcolor: '#161e28', font: {color: '#96a6b9', family: 'Menlo, Consolas, monospace', size: 10},
+  xaxis: {title: {text: 'TIME FROM RUN START / s', standoff: 16, font: {size: 10}}, range: [0, endSeconds], autorange: false,
+    gridcolor: '#29344366', zeroline: false, tickcolor: '#293443', ticks: 'outside', fixedrange: false},
+  shapes, annotations,
+  yaxis: {title: {text: 'MB/s', standoff: 10, font: {size: 10}}, range: [-extent, extent], gridcolor: '#293443', zerolinecolor: '#718196', zerolinewidth: 1,
+    tickvals: [-extent * 0.9, -extent * 0.45, 0, extent * 0.45, extent * 0.9],
+    ticktext: [extent * 0.9, extent * 0.45, 0, extent * 0.45, extent * 0.9].map(value => value.toFixed(1))},
+  margin: {t: 94, l: 60, r: 30, b: 100},
+  legend: {orientation: 'h', x: 0, y: -0.22, font: {size: 10}, groupclick: 'togglegroup'},
+  hoverlabel: {bgcolor: '#10151c', bordercolor: '#293443', font: {color: '#e8eef5', family: 'Menlo, Consolas, monospace', size: 11}},
+  uirevision: data.run + data.node,
+}, {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d']});
 document.getElementById('node').textContent = data.node;
 document.getElementById('run').textContent = data.run + ' · ' + traffic.bucket_ms + ' ms buckets · ' + traffic.buckets.length + ' buckets with traffic';
 document.getElementById('received').textContent = mb(traffic.received).toFixed(2) + ' MB';
 document.getElementById('sent').textContent = mb(traffic.sent).toFixed(2) + ' MB';
-document.getElementById('buckets').textContent = fmt(traffic.buckets.length);
-const peak = traffic.buckets.reduce((best, bucket) => Math.max(best, mb(Object.values(bucket.inbound).reduce((a, b) => a + b, 0) + Object.values(bucket.outbound).reduce((a, b) => a + b, 0))), 0);
-document.getElementById('peak').textContent = peak.toFixed(2) + ' MB';
-document.getElementById('peers-count').textContent = fmt(traffic.peers.length);
+document.getElementById('peak').textContent = peak.toFixed(2) + ' MB/s';
+document.getElementById('raw-buckets').addEventListener('change', () => {
+  const raw = document.getElementById('raw-buckets').checked;
+  Plotly.restyle('timeline', {'line.shape': raw ? 'hv' : 'spline', 'line.smoothing': raw ? 0 : 0.65});
+  document.getElementById('curve-note').textContent = raw
+    ? 'Raw buckets · flat rate within each measured interval'
+    : 'Curved display · interpolation only; totals, peak and hover values use raw buckets';
+});
 """
 
 TRAFFIC_TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>leanSim traffic: node {node_id}</title><style>
-:root {{ color-scheme: dark; }}
-body {{ background: #14161a; color: #d7dae0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 0 auto; padding: 28px; max-width: 1500px; }}
-h1 {{ font-size: 1.3rem; margin: 0 0 4px; font-weight: 600; }} h1 span {{ color: #e07a4f; }}
-.sub {{ color: #8b93a1; margin: 0 0 22px; font-size: .88rem; }}
-.cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }}
-.card, .panel {{ background: #1b1f26; border: 1px solid #262b33; border-radius: 10px; }}
-.card {{ padding: 14px; }} .card b {{ display: block; font-size: 1.3rem; margin-top: 6px; font-variant-numeric: tabular-nums; }}
-.label {{ color: #8b93a1; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }}
-.grid {{ display: grid; gap: 16px; }} .panel {{ padding: 10px; min-width: 0; }}
-#timeline {{ width: 100%; height: 430px; }} #peers {{ width: 100%; height: 430px; }}
-@media (min-width: 1100px) {{ .two {{ grid-template-columns: 3fr 2fr; }} }}
-</style></head><body>
-<h1>Traffic: node <span id="node"></span></h1><p class="sub" id="run"></p>
-<section class="cards">
-<div class="card"><span class="label">Received</span><b id="received"></b></div>
-<div class="card"><span class="label">Sent</span><b id="sent"></b></div>
-<div class="card"><span class="label">Buckets with traffic</span><b id="buckets"></b></div>
-<div class="card"><span class="label">Peak bucket</span><b id="peak"></b></div>
-<div class="card"><span class="label">Peers seen</span><b id="peers-count"></b></div>
+:root {{ color-scheme: dark; --ink: #10151c; --surface: #161e28; --rule: #293443; --text: #e8eef5; --muted: #96a6b9; --sent: #53d8b1; --received: #ad9bff; --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; }}
+* {{ box-sizing: border-box; }}
+body {{ background: var(--ink); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }}
+a {{ color: inherit; text-decoration: none; }} a:hover {{ color: var(--sent); }}
+a:focus-visible, input:focus-visible, summary:focus-visible {{ outline: 2px solid var(--sent); outline-offset: 5px; }}
+.shell {{ max-width: 1560px; margin: auto; padding: 0 48px 36px; }}
+.masthead {{ display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--rule); }}
+.brand {{ font: 700 18px 'Avenir Next', 'Segoe UI', sans-serif; letter-spacing: -.7px; }} .brand span {{ color: var(--sent); }}
+.eyebrow, .capture-tag, .unit, .section-index {{ font: 11px/1.5 var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }}
+.capture-tag {{ display: flex; align-items: center; gap: 8px; }} .capture-tag::before {{ content: ''; width: 6px; height: 6px; background: var(--muted); border-radius: 50%; }}
+.intro {{ display: flex; justify-content: space-between; align-items: end; gap: 24px; margin: 32px 0 22px; }}
+h1 {{ font: 500 clamp(28px, 3.3vw, 44px)/1.2 'Avenir Next', 'Segoe UI', sans-serif; letter-spacing: -1.6px; margin: 7px 0 8px; }}
+h1 span {{ color: var(--muted); }} .run-name {{ color: var(--muted); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; margin: 0; }}
+.summary-link {{ font: 12px var(--mono); white-space: nowrap; padding-bottom: 6px; }}
+.host-strip {{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }}
+.host-strip .eyebrow {{ margin-right: 12px; }} .host-link {{ font: 12px var(--mono); padding: 7px 13px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); }}
+.host-link:hover {{ background: var(--surface); color: var(--text); }} .host-link[aria-current="page"] {{ color: var(--sent); background: #53d8b10c; border-color: #53d8b14d; }}
+.traffic-stage {{ border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); overflow: hidden; }}
+.stage-head {{ display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 22px 26px 16px; }}
+h2 {{ font: 500 17px 'Avenir Next', 'Segoe UI', sans-serif; letter-spacing: -.3px; margin: 0; }} .stage-head .eyebrow {{ margin-bottom: 5px; }}
+.view-control {{ display: flex; align-items: center; gap: 9px; color: var(--muted); font: 11px var(--mono); cursor: pointer; white-space: nowrap; }} .view-control input {{ accent-color: var(--sent); width: 15px; height: 15px; margin: 0; }}
+.readouts {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: 30px; padding: 0 26px 4px; }}
+.readout {{ display: flex; align-items: baseline; gap: 10px; }} .readout .label {{ font: 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; }}
+.readout b {{ font: 500 22px/1.4 var(--mono); letter-spacing: -.9px; }} .out {{ color: var(--sent); }} .in {{ color: var(--received); }}
+.readout.quiet {{ margin-left: auto; color: var(--muted); }} .readout.quiet b {{ font-size: 13px; letter-spacing: 0; }}
+#timeline {{ width: 100%; height: 470px; }}
+.chart-foot {{ padding: 12px 26px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; color: var(--muted); font: 10px/1.5 var(--mono); }}
+.below {{ display: grid; grid-template-columns: minmax(0, 3fr) minmax(230px, 1fr); gap: 36px; margin-top: 32px; align-items: start; }}
+.section-heading {{ display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }}
+.section-index {{ font-size: 10px; text-transform: none; letter-spacing: 0; }}
+.table-scroll {{ overflow-x: auto; }} .peer-ledger {{ width: 100%; border-collapse: collapse; font: 11px/1.5 var(--mono); text-align: left; }}
+.peer-ledger th {{ font-weight: 400; color: var(--muted); padding: 0 12px 10px; border-bottom: 1px solid var(--rule); }}
+.peer-ledger td {{ padding: 11px 12px; border-bottom: 1px solid #29344377; font-variant-numeric: tabular-nums; }}
+.peer-ledger th:first-child, .peer-ledger td:first-child {{ padding-left: 0; }} .peer-ledger td:first-child {{ max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.peer-ledger tr:hover td {{ background: #ffffff03; }} .peer-ledger .numeric {{ text-align: right; white-space: nowrap; }}
+.mix {{ display: flex; height: 5px; width: 100%; min-width: 80px; border-radius: 3px; background: #293443; overflow: hidden; }} .mix i {{ height: 100%; }}
+.mix .out {{ background: var(--sent); }} .mix .in {{ background: var(--received); }}
+.notes {{ border-left: 1px solid var(--rule); padding-left: 24px; color: var(--muted); font-size: 12px; }}
+.notes h2 {{ color: var(--text); font-size: 15px; }} .notes p {{ margin: 12px 0; }}
+.notes details {{ margin-top: 18px; }} .notes summary {{ cursor: pointer; color: var(--text); font: 11px var(--mono); }}
+.notes dl {{ margin: 18px 0 0; }} .notes dt {{ font: 10px var(--mono); color: var(--text); text-transform: uppercase; letter-spacing: .05em; margin-top: 15px; }} .notes dd {{ margin: 4px 0 0; }}
+.footer {{ display: flex; justify-content: space-between; gap: 15px; border-top: 1px solid var(--rule); margin-top: 30px; padding-top: 16px; color: var(--muted); font: 10px var(--mono); }}
+@media (max-width: 800px) {{ .shell {{ padding: 0 18px 24px; }} .intro {{ margin-top: 24px; }} .below {{ grid-template-columns: 1fr; gap: 28px; }} .notes {{ border-left: 0; border-top: 1px solid var(--rule); padding: 20px 0 0; }} .stage-head {{ padding: 18px; }} .readouts {{ padding: 0 18px; gap: 12px 20px; }} .readout b {{ font-size: 17px; }} .readout.quiet {{ margin-left: 0; }} #timeline {{ height: 410px; }} .chart-foot {{ padding: 12px 18px; }} .capture-tag {{ font-size: 9px; }} }}
+@media (max-width: 460px) {{ .intro {{ align-items: start; }} .summary-link {{ font-size: 10px; }} .stage-head {{ align-items: start; }} .readout {{ gap: 6px; }} .host-strip .eyebrow {{ width: 100%; }} }}
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation: none !important; transition: none !important; }} }}
+</style></head><body><div class="shell">
+<header class="masthead"><a class="brand" href="summary.html">lean<span>Sim</span></a><span class="capture-tag">Recorded simulation / traffic</span></header>
+<div class="intro"><div><div class="eyebrow">Peer traffic analysis</div><h1>Node <span id="node">{node_id}</span></h1><p class="run-name" id="run"></p></div><a class="summary-link" href="summary.html">Run overview ↗</a></div>
+<nav class="host-strip" aria-label="Logged hosts"><span class="eyebrow">Tracked hosts</span>{host_links}</nav>
+<section class="traffic-stage" aria-labelledby="traffic-heading">
+<div class="stage-head"><div><div class="eyebrow">Duplex traffic · MB/s</div><h2 id="traffic-heading">Signature gossip to recursive proofs</h2></div><label class="view-control"><input type="checkbox" id="raw-buckets" aria-describedby="curve-note">Raw buckets</label></div>
+<div class="readouts"><div class="readout out"><span class="label">↑ Sent</span><b id="sent"></b></div><div class="readout in"><span class="label">↓ Received</span><b id="received"></b></div><div class="readout quiet"><span class="label">Peak bucket rate</span><b id="peak"></b></div></div>
+<div id="timeline" role="img" aria-label="Traffic timeline. Sent traffic above zero, received traffic below. Warmup is unmeasured."></div>
+<div class="chart-foot"><span id="curve-note">Curved display · raw values on hover</span><span>Time from run start · run-wide milestones</span></div>
 </section>
-<section class="grid two"><div class="panel"><div id="timeline"></div></div><div class="panel"><div id="peers"></div></div></section>
-<script id="traffic-data" type="application/json">{data}</script>
-<script>{plotly}</script>
-<script>{script}</script>
-</body></html>
+<div class="below"><section aria-labelledby="peers-heading"><div class="section-heading"><h2 id="peers-heading">Peer exchanges</h2><span class="section-index">{peer_caption}</span></div>
+<div class="table-scroll"><table class="peer-ledger"><thead><tr><th scope="col">Peer</th><th scope="col" class="numeric">Sent ↑</th><th scope="col" class="numeric">Received ↓</th><th scope="col">Traffic mix</th></tr></thead><tbody>{peer_rows}</tbody></table></div></section>
+<aside class="notes"><h2>Reading this trace</h2><p>Above the baseline is sent traffic. Below is received traffic. Colors identify message types; click a legend item to hide or restore a type.</p><dl><dt>Before signatures</dt><dd>Connections and subscriptions form during warmup. That traffic is not captured.</dd><dt>After signatures</dt><dd>Gossip arrives in a burst. Proof transfers follow as aggregation groups complete.</dd></dl><details><summary>Measurement notes</summary><p>Application-level traffic, not wire bandwidth. Outgoing gossip is estimated. IHAVE/IWANT, transport overhead and retransmissions are not measured.</p><p>Proof bytes are assigned when messages are handled, not spread over the transfer. Peaks can exceed physical link rates.</p><p>Curves are interpolation only. Totals, peak rates and hover values use the raw buckets.</p></details></aside></div>
+<footer class="footer"><span>leanSim / offline trace</span><span>Decimal MB · 1 MB = 1,000,000 bytes</span></footer>
+</div><script id="traffic-data" type="application/json">{data}</script><script>{plotly}</script><script>{script}</script></body></html>
 """
 
 
@@ -680,10 +751,48 @@ def generate_traffic_html(snapshot, directory, plotly_js):
     """One dark dashboard per host that kept traffic logs."""
     traffic = snapshot.get("metrics", {}).get("traffic") or {}
     run = Path(snapshot.get("output_dir", "")).name
+    metrics = snapshot.get("metrics", {})
+    recursive = metrics.get("recursive_aggregation") or {}
+    local_firsts = [stats["min"] for stats in metrics.get("local_proof_latency_ms_by_subnet", {}).values() if stats]
+    milestones = [
+        {"label": label, "time_ms": time_ms}
+        for label, value in (
+            ("Signature burst", metrics.get("stage_medians_ms", {}).get("signatures_sent")),
+            ("First subnet proof", min(local_firsts, default=None)),
+            ("Final proof", recursive.get("final_proof_ms")),
+        )
+        if (time_ms := number(value)) is not None and time_ms >= 0
+    ]
     for node_id, logged in traffic.items():
-        data = json_data({"node": node_id, "run": run, "traffic": logged})
+        host_links = " ".join(
+            f'<a class="host-link" href="traffic-{html.escape(str(host))}.html"'
+            + (' aria-current="page"' if host == node_id else '')
+            + f'>Node {html.escape(str(host))}</a>'
+            for host in sorted(traffic, key=int)
+        )
+        leaders = logged["peers"][:15]
+        rows = []
+        largest = max((peer["inbound"] + peer["outbound"] for peer in leaders), default=1) or 1
+        for peer in leaders:
+            label = html.escape(peer["peer"])
+            if str(peer.get("node_id")) in traffic:
+                label = f'<a href="traffic-{peer["node_id"]}.html">{label} ↗</a>'
+            sent_width = peer["outbound"] / largest * 100
+            received_width = peer["inbound"] / largest * 100
+            rows.append(
+                f'<tr><td title="{html.escape(peer["peer"], quote=True)}">{label}</td>'
+                f'<td class="numeric out">{peer["outbound"] / 1e6:,.2f} MB</td>'
+                f'<td class="numeric in">{peer["inbound"] / 1e6:,.2f} MB</td>'
+                f'<td><span class="mix" aria-hidden="true"><i class="out" style="width:{sent_width:.3f}%"></i>'
+                f'<i class="in" style="width:{received_width:.3f}%"></i></span></td></tr>'
+            )
+        data = json_data({"node": node_id, "run": run, "traffic": logged, "milestones": milestones,
+                          "warmup_ms": snapshot.get("metadata", {}).get("mesh_warmup_ms")})
         document = TRAFFIC_TEMPLATE.format(
             node_id=html.escape(str(node_id)),
+            host_links=host_links,
+            peer_caption=f'Top {len(leaders)} of {len(logged["peers"])} retained peer records',
+            peer_rows="".join(rows) or '<tr><td colspan="4">No per-peer records in this trace.</td></tr>',
             data=data,
             plotly=plotly_js,
             script=TRAFFIC_JS,
@@ -865,13 +974,18 @@ def self_test():
         # Host 7 logs two buckets; peer 9 is known by its PeerId, peer 5 by node id.
         stdout.write_text("\n".join((
             '{"event":"NodePeerId","node_id":9,"peer_id":"peer-9"}',
+            '{"event":"SigSent","node_id":7,"validator_id":0,"subnet_id":0,"ts_ms":4100}',
+            '{"event":"LocalProofGenerated","node_id":7,"subnet_id":0,"sig_count":1,"latency_ms":4200}',
+            '{"event":"RecursiveProofGenerated","node_id":7,"layer":1,"index":0,"inputs":2,"is_final":true,"ts_ms":4500}',
             '{"event":"TrafficBucket","node_id":7,"start_ms":4300,"width_ms":100,"inbound":{"signature":1200,"proof_payload":262144},"outbound":{"signature":2400}}',
             '{"event":"TrafficBucket","node_id":7,"start_ms":4400,"width_ms":100,"inbound":{},"outbound":{"proof_announce":128}}',
             '{"event":"TrafficPeer","node_id":7,"peer":"peer:peer-9","inbound_bytes":1200,"outbound_bytes":2400,"inbound_msgs":1,"outbound_msgs":2}',
             '{"event":"TrafficPeer","node_id":7,"peer":"node:5","inbound_bytes":262144,"outbound_bytes":0,"inbound_msgs":1,"outbound_msgs":0}',
         )), encoding="utf-8")
-        (traffic_dir / "run-manifest.json").write_text(json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8")
+        (traffic_dir / "run-manifest.json").write_text(json.dumps({"experiment": {"local_threshold": 1.0, "mesh_warmup_ms": 3000}}), encoding="utf-8")
         traffic_snapshot = build_snapshot(traffic_dir)
+        assert traffic_snapshot["metadata"]["mesh_warmup_ms"] == 3000
+        assert primary["metadata"]["mesh_warmup_ms"] is None
         traffic = traffic_snapshot["metrics"]["traffic"]
         assert traffic_snapshot["metrics"]["total_bytes"] == 0, "traffic events must not count as signature traffic"
         assert set(traffic) == {"7"}
@@ -879,6 +993,7 @@ def self_test():
         assert logged["bucket_ms"] == 100
         assert logged["received"] == 263344 and logged["sent"] == 2528
         assert [bucket["start_ms"] for bucket in logged["buckets"]] == [4300, 4400]
+        assert [bucket["width_ms"] for bucket in logged["buckets"]] == [100, 100]
         assert logged["peers"] == [
             {"peer": "node 5", "node_id": 5, "inbound": 262144, "outbound": 0, "inbound_msgs": 1, "outbound_msgs": 0},
             {"peer": "node 9", "node_id": 9, "inbound": 1200, "outbound": 2400, "inbound_msgs": 1, "outbound_msgs": 2},
@@ -889,6 +1004,18 @@ def self_test():
         generate_html(traffic_snapshot, [], report)
         dashboard = (report.parent / "traffic-7.html").read_text(encoding="utf-8")
         assert "node 7" in dashboard and "traffic-data" in dashboard
+        assert 'class="traffic-stage"' in dashboard, "timeline must be the full-width primary view"
+        assert '<table class="peer-ledger">' in dashboard
+        assert 'aria-label="Logged hosts"' in dashboard
+        assert 'id="peers"' not in dashboard, "a second chart must not compete with the timeline"
+        assert 'Measurement notes' in dashboard
+        embedded_traffic = json.loads(dashboard.split('<script id="traffic-data" type="application/json">', 1)[1].split('</script>', 1)[0])
+        assert embedded_traffic["warmup_ms"] == 3000
+        assert embedded_traffic["milestones"] == [
+            {"label": "Signature burst", "time_ms": 4100},
+            {"label": "First subnet proof", "time_ms": 4200},
+            {"label": "Final proof", "time_ms": 4500},
+        ]
         history = merge_history([], [primary, overlay], append=False)
         assert len(history) == 2
         assert len(merge_history(history, [primary, overlay], append=False)) == 2
@@ -905,6 +1032,81 @@ def self_test():
             traffic_js_path = root / "traffic.js"
             traffic_js_path.write_text(TRAFFIC_JS, encoding="utf-8")
             result = subprocess.run(["node", "--check", str(traffic_js_path)], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            # Exercise the real dashboard JS, not just its syntax. A gap must
+            # return to zero; rates use each bucket's width, not bytes per bucket.
+            rate_fixture = {
+                "node": "7", "run": "test", "warmup_ms": 800,
+                "milestones": [{"label": "Signature burst", "time_ms": 1100},
+                               {"label": "First subnet proof", "time_ms": 1200},
+                               {"label": "Final proof", "time_ms": 1400}], "traffic": {
+                    "bucket_ms": 100, "sent": 3000000, "received": 1000000, "peers": [],
+                    "buckets": [
+                        {"start_ms": 1000, "width_ms": 200, "outbound": {"signature": 2000000}, "inbound": {"proof_payload": 1000000}},
+                        {"start_ms": 1400, "width_ms": 100, "outbound": {"signature": 1000000}, "inbound": {}},
+                    ],
+                },
+            }
+            harness = "const fixture = " + json.dumps(rate_fixture) + ";\n" + r"""
+const assert = require('node:assert/strict');
+const elements = new Map();
+global.document = {getElementById(id) {
+  if (!elements.has(id)) elements.set(id, {textContent: id === 'traffic-data' ? JSON.stringify(fixture) : '', checked: false,
+    addEventListener(event, handler) { this[event] = handler; }});
+  return elements.get(id);
+}};
+const plots = new Map();
+global.Plotly = {
+  newPlot(id, traces, layout) { plots.set(id, {traces, layout}); },
+  restyle(id, changes) {
+    for (const trace of plots.get(id).traces) {
+      for (const [key, value] of Object.entries(changes)) {
+        const [field, property] = key.split('.');
+        trace[field][property] = value;
+      }
+    }
+  },
+};
+""" + TRAFFIC_JS + r"""
+const timeline = plots.get('timeline');
+assert.deepEqual(timeline.layout.xaxis.range, [0, 1.5], 'include the run start, not just traffic');
+assert.equal(timeline.layout.shapes[0].x0, 0);
+assert.equal(timeline.layout.shapes[0].x1, 0.8);
+assert.match(timeline.layout.annotations[0].text, /warmup.*traffic not.*captured/i);
+assert.ok(timeline.layout.shapes.some(shape => shape.type === 'line' && shape.x0 === 1.4));
+assert.ok(timeline.layout.annotations.some(note => note.text.includes('Final proof')));
+assert.notEqual(timeline.layout.annotations[1].y, timeline.layout.annotations[2].y, 'nearby milestones need separate label lanes');
+const sent = timeline.traces.find(trace => trace.legendgroup === 'signature' && trace.stackgroup === 'sent');
+const received = timeline.traces.find(trace => trace.legendgroup === 'proof_payload' && trace.stackgroup === 'received');
+assert.ok(sent, 'sent traffic must be stacked areas, not bars');
+assert.ok(received, 'received traffic must have its own stack');
+assert.equal(sent.type, 'scatter');
+assert.equal(sent.line.shape, 'spline', 'default timeline should have curved outlines');
+assert.ok(sent.line.smoothing > 0 && sent.line.smoothing <= 1);
+assert.deepEqual(sent.x, [1, 1.2, 1.4, 1.5]);
+assert.deepEqual(sent.y, [10, 0, 10, 0]);
+assert.deepEqual(received.y, [-5, 0, 0, 0]);
+assert.match(timeline.layout.yaxis.title.text, /MB\/s/);
+assert.equal(elements.get('peak').textContent, '10.00 MB/s');
+const rawToggle = document.getElementById('raw-buckets');
+assert.equal(typeof rawToggle.change, 'function', 'raw bucket toggle must be wired');
+rawToggle.checked = true;
+rawToggle.change();
+assert.ok(timeline.traces.every(trace => trace.line.shape === 'hv'));
+assert.deepEqual(sent.y, [10, 0, 10, 0], 'switching views must not alter measured rates');
+rawToggle.checked = false;
+rawToggle.change();
+assert.ok(timeline.traces.every(trace => trace.line.shape === 'spline'));
+assert.equal(elements.get('peak').textContent, '10.00 MB/s');
+"""
+            traffic_js_path.write_text(harness, encoding="utf-8")
+            result = subprocess.run(["node", str(traffic_js_path)], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            # Older snapshots may not carry warmup metadata: do not invent it.
+            unknown_warmup = harness.replace('"warmup_ms": 800', '"warmup_ms": null').split("const timeline = plots.get('timeline');", 1)[0]
+            unknown_warmup += "assert.equal(plots.get('timeline').layout.xaxis.range[0], 0);\nassert.ok(plots.get('timeline').layout.shapes.every(shape => shape.type !== 'rect'));"
+            traffic_js_path.write_text(unknown_warmup, encoding="utf-8")
+            result = subprocess.run(["node", str(traffic_js_path)], capture_output=True, text=True)
             assert result.returncode == 0, result.stderr
             # The dashboard is its own page: the summary report's helpers are not in scope.
             assert "number(" not in TRAFFIC_JS, "traffic.js must define its own formatters"
