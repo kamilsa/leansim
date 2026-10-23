@@ -51,3 +51,17 @@ pub const fn default_downlink_mbps() -> u64 {
 pub const fn default_latency_ms() -> u64 {
     50
 }
+
+/// leanVM's 2-to-1 recursion: 0.276 s on an M4 Max (`cargo leanvm recursion --n 2`).
+pub const fn default_recursive_aggregation_time_ms() -> u64 {
+    276
+}
+
+pub const fn default_recursive_proofs_per_child() -> usize {
+    1
+}
+
+/// EIP-8292's propagation target for one aggregate, 256 KiB.
+pub const fn default_aggregate_proof_bytes() -> usize {
+    262_144
+}

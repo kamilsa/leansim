@@ -13,6 +13,9 @@ fn base_config() -> ExperimentConfig {
         burst_jitter_ms: 500,
         signature_aggregation_rate: 1000,
         signature_payload_bytes: 3072,
+        recursive_aggregation_time_ms: 276,
+        recursive_proofs_per_child: 1,
+        aggregate_proof_bytes: 262_144,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,
@@ -180,6 +183,7 @@ fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
         validator_ids,
         subscribed_subnets: vec![],
         aggregated_subnets: vec![],
+        aggregation_plan: None,
         experiment: base_config(),
     }
 }
@@ -275,6 +279,60 @@ fn warmup_falls_back_to_the_host_dial_count() {
 
 #[test]
 fn mesh_warmup_defaults_to_unset() {
-    let exp: ExperimentConfig = toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    let exp: ExperimentConfig =
+        toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
     assert_eq!(exp.mesh_warmup_ms, None);
+}
+
+#[test]
+fn recursive_settings_default_from_toml() {
+    let exp: ExperimentConfig =
+        toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    assert_eq!(exp.recursive_aggregation_time_ms, 276);
+    assert_eq!(exp.recursive_proofs_per_child, 1);
+    assert_eq!(exp.aggregate_proof_bytes, 262_144);
+}
+
+#[test]
+fn zero_proofs_per_child_rejected() {
+    let mut exp = base_config();
+    exp.recursive_proofs_per_child = 0;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
+fn proofs_over_the_protocol_limit_rejected() {
+    let mut exp = base_config();
+    exp.aggregate_proof_bytes = 8 * 1024 * 1024 + 1;
+    assert!(exp.validate().is_err());
+    exp.aggregate_proof_bytes = 0;
+    assert!(exp.validate().is_err());
+}
+
+#[test]
+fn aggregation_plan_is_optional_in_node_toml() {
+    let node: NodeConfig = toml::from_str(
+        r#"
+node_id = 2
+role = "validator"
+subnet_id = 0
+listen_addr = "/ip4/10.0.0.3/udp/9090/quic-v1"
+seed_addrs = []
+aggregation_plan = "/tmp/aggregation-plan.json"
+
+[experiment]
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        node.aggregation_plan.as_deref(),
+        Some("/tmp/aggregation-plan.json")
+    );
+    assert_eq!(
+        node_config(NodeRole::Validator, vec![]).aggregation_plan,
+        None
+    );
 }
