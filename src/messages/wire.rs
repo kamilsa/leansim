@@ -146,17 +146,15 @@ mod tests {
 
     #[test]
     fn roundtrip_all_variants() {
-        let msgs = vec![
-            WireMessage::ValidatorSignature {
-                run_id: "r1".into(),
-                sender_id: 0,
-                validator_id: 0,
-                subnet_id: 1,
-                sequence_id: 42,
-                created_timestamp_ms: 1000,
-                padding: vec![7u8; 100],
-            },
-        ];
+        let msgs = vec![WireMessage::ValidatorSignature {
+            run_id: "r1".into(),
+            sender_id: 0,
+            validator_id: 0,
+            subnet_id: 1,
+            sequence_id: 42,
+            created_timestamp_ms: 1000,
+            padding: vec![7u8; 100],
+        }];
         for msg in msgs {
             let bytes = msg.encode();
             let decoded = WireMessage::decode(&bytes).unwrap();
@@ -178,7 +176,10 @@ mod tests {
         let sized = msg.with_payload_size(4096);
         let bytes = sized.encode();
         // Should be close to target (not exact due to length prefix, but within reason)
-        assert!(bytes.len() >= 4096 && bytes.len() < 4200,
-            "expected >= 4096, got {}", bytes.len());
+        assert!(
+            bytes.len() >= 4096 && bytes.len() < 4200,
+            "expected >= 4096, got {}",
+            bytes.len()
+        );
     }
 }
