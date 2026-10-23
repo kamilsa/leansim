@@ -23,7 +23,6 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_EXPERIMENT = REPO_ROOT / "experiments" / "geo-128.toml"
 LEANSIM_BIN_DOCKER = "/opt/leansim/leansim"
 LEANSIM_BIN_NATIVE = REPO_ROOT / "target" / "release" / "leansim"
 SEED_PEER_COUNT = 50
@@ -953,7 +952,7 @@ def resolve_path(value: str) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate and run leansim under Shadow.")
-    parser.add_argument("config", nargs="?", default=str(DEFAULT_EXPERIMENT), help="experiment TOML path (default: experiments/geo-128.toml)")
+    parser.add_argument("config", help="experiment TOML path, e.g. experiments/nodemap-small-65k-committees-sub64.toml")
     parser.add_argument("--dry-run", action="store_true", help="generate Shadow artifacts only")
     parser.add_argument("--rebuild", action="store_true", help="force a Docker image rebuild")
     parser.add_argument("--clean", action="store_true", help="remove prior run data and summary history")

@@ -21,32 +21,31 @@ Linux binaries, so macOS users should use Docker.
 
 ## Run
 
-The launcher defaults to `experiments/geo-128.toml`.
+The launcher takes an experiment TOML. `experiments/` holds the 65k
+(`nodes_small.csv`) and 131k (`nodes.csv`) node-map configs; both CSVs are kept
+out of git and must be present in the repo root.
 
 ```bash
-# Build (if needed) and run the default experiment.
-uv run shadow-sim.py
-
-# Run a specific experiment.
-uv run shadow-sim.py experiments/smoke.toml
+# Build (if needed) and run an experiment.
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml
 
 # Generate shadow.yaml, topology.gml, node TOMLs, and run-manifest.json only.
-uv run shadow-sim.py experiments/smoke.toml --dry-run
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --dry-run
 
 # Rebuild the Docker image and discard the output directory's prior campaign.
-uv run shadow-sim.py experiments/smoke.toml --rebuild --clean
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --rebuild --clean
 
 # Run and serve an offline interactive report at http://0.0.0.0:4321/summary.html.
-uv run shadow-sim.py experiments/smoke.toml --clean --serve
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --clean --serve
 
 # Rebuild and serve the report from existing results without simulating.
-uv run shadow-sim.py experiments/smoke.toml --serve-only
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --serve-only
 
 # Rebuild only the existing report.
-uv run shadow-sim.py experiments/smoke.toml --summary-only
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --summary-only
 
 # Include histories from other output directories in the served report.
-uv run shadow-sim.py experiments/smoke.toml --serve-only --overlay other-output
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --serve-only --overlay other-output
 ```
 
 `--serve` appends each completed run to `runs-history.json`, writes a
@@ -225,7 +224,7 @@ run to `shadow-sim.py`. It writes each run beneath the selected output root and
 collects the snapshots into `results.csv`.
 
 ```bash
-uv run sweep.py experiments/smoke.toml \
+uv run sweep.py experiments/nodemap-small-65k-committees-sub64.toml \
   --param signature_payload_bytes=1024,3072,8192 \
   --param network_defaults.uplink_mbps=25,50 \
   --output sweep-output
@@ -236,6 +235,6 @@ uv run sweep.py experiments/smoke.toml \
 ```bash
 cargo fmt --check
 cargo test
-uv run shadow-sim.py experiments/smoke.toml --dry-run
+uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --dry-run
 uv run --group analyze python scripts/analyze.py --self-test
 ```

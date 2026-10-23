@@ -103,7 +103,7 @@ def latest_snapshot(output_dir: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a leansim parameter sweep.")
-    parser.add_argument("config", nargs="?", default="experiments/geo-128.toml", help="template experiment TOML")
+    parser.add_argument("config", help="template experiment TOML")
     parser.add_argument("--param", action="append", required=True, metavar="KEY=VALUES", help="repeatable values, e.g. signature_payload_bytes=1024,3072")
     parser.add_argument("--output", default="sweep-output", help="directory for per-point results and results.csv")
     parser.add_argument("--rebuild", action="store_true", help="rebuild the Docker image before the first point")

@@ -1,5 +1,5 @@
-# 131,072 validators (2^17) across 64 subnets of 2,048 — a power-of-two scale
-# between the 512-validator smoke run and the full 728k mainnet run. Hosts,
+# 131,072 validators (2^17) across 64 subnets of 2,048, about a sixth of
+# mainnet's ~728k. Hosts,
 # validator co-location, and the no_validator relay share are sampled from
 # nodes.csv; every node subscribes to 2 random subnets; big operators
 # (>= 100 real validators) are supernodes; 16 local aggregators per subnet.
