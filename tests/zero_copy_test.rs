@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use leansim::config::experiment::ExperimentConfig;
-use leansim::network::swarm::build_swarm;
+use leansim::network::swarm::{build_swarm, SimBehaviourEvent};
 use libp2p::{gossipsub, swarm::SwarmEvent};
 
 fn config() -> ExperimentConfig {
@@ -30,8 +30,12 @@ async fn published_messages_arrive_intact_and_share_their_data_with_quic() {
     let mut sender = build_swarm(0, "/ip4/127.0.0.1/udp/0/quic-v1", &config).unwrap();
     let mut receiver = build_swarm(1, "/ip4/127.0.0.1/udp/0/quic-v1", &config).unwrap();
     let topic = gossipsub::IdentTopic::new("zero-copy");
-    sender.behaviour_mut().subscribe(&topic).unwrap();
-    receiver.behaviour_mut().subscribe(&topic).unwrap();
+    sender.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+    receiver
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic)
+        .unwrap();
 
     let receiver_addr = loop {
         if let SwarmEvent::NewListenAddr { address, .. } = receiver.select_next_some().await {
@@ -51,14 +55,14 @@ async fn published_messages_arrive_intact_and_share_their_data_with_quic() {
         tokio::select! {
             _ = sender.select_next_some() => {}
             event = receiver.select_next_some() => {
-                if let SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) = event {
+                if let SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(gossipsub::Event::Message { message, .. })) = event {
                     received.push(message.data);
                 }
             }
             _ = tick.tick(), if !published => {
-                if sender.behaviour().mesh_peers(&topic.hash()).any(|p| *p == receiver_id) {
+                if sender.behaviour().gossipsub.mesh_peers(&topic.hash()).any(|p| *p == receiver_id) {
                     for message in &messages {
-                        sender.behaviour_mut().publish(topic.clone(), message.clone()).unwrap();
+                        sender.behaviour_mut().gossipsub.publish(topic.clone(), message.clone()).unwrap();
                     }
                     published = true;
                 }
