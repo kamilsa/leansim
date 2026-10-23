@@ -91,31 +91,15 @@ particular, `validator_count` must be divisible by `subnet_count`.
 
 ### Several validators per physical node
 
-As on Ethereum mainnet, one physical node can run many validators. Set
-`validator_map` to a located-map CSV (`validator_index,peer_key,routes,n_windows`)
-to sample validators and their physical peers from real data:
-
-```toml
-validator_count = 1024
-validator_map = "located-map.csv"   # relative to the repo root
-```
-
-Each run samples `validator_count` distinct validators from the map, seeded by
-`geo_seed`. Validators that share a `peer_key` run on the same Shadow host, so a
-1024-validator run has fewer than 1024 hosts (about 510 with `located-map.csv`).
-A validator seen behind several peers is placed on the peer observed in the
-most windows. See `experiments/located-1024.toml`.
+As on Ethereum mainnet, one physical node can run many validators. Co-location
+comes from a nodes.csv node map (below); without `node_map`, every validator
+runs on its own host.
 
 A host publishes one signature per validator it runs, back to back after a
-single burst delay, and subscribes to the subnet of each of them. Validator ids
-are split into contiguous subnets of `validator_count / subnet_count`. Local
-aggregators are hosts: walking each subnet's validators in id order, the hosts
-of the first ones are promoted until `local_aggregators_per_subnet` hosts
-aggregate it, and an aggregating host counts its own validators' signatures
-immediately. Countries, supernodes, and bandwidth are assigned per host.
-
-Without `validator_map`, every validator runs on its own host and runs behave as
-before.
+single burst delay. Validator ids are split into contiguous subnets of
+`validator_count / subnet_count`, and an aggregating host counts its own
+validators' signatures immediately. Countries, supernodes, and bandwidth are
+assigned per host.
 
 ### Ethereum-style node map (nodes.csv)
 
