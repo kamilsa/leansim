@@ -870,21 +870,10 @@ def analyze(output_dir: Path, overlays: list[Path], *, serve: bool, append: bool
     subprocess.run(command, cwd=REPO_ROOT, check=False, env=environment)
 
 
-def netviz(output_dir: Path, runner: str, image: str | None) -> None:
-    trace = output_dir / "netviz-trace.bctrace"
-    args = ["netviz", "--manifest", "run-manifest.json", "--shadow-data", "shadow.data", "--out", trace.name]
-    log(f"writing {trace}")
-    if runner == "native":
-        subprocess.run([str(LEANSIM_BIN_NATIVE), *args], cwd=output_dir, check=True)
-    else:
-        assert image is not None
-        subprocess.run(["docker", "run", "--rm", "--platform", "linux/arm64", "-v", f"{output_dir}:{output_dir}", "-w", str(output_dir), "--entrypoint", LEANSIM_BIN_DOCKER, image, *args], check=True)
-
-
 def clean_output(output_dir: Path) -> None:
     for name in ("shadow.data", "configs"):
         shutil.rmtree(output_dir / name, ignore_errors=True)
-    for name in ("runs-history.json", "summary.html", "netviz-trace.bctrace", "run-meta.json", "run-manifest.json"):
+    for name in ("runs-history.json", "summary.html", "run-meta.json", "run-manifest.json"):
         (output_dir / name).unlink(missing_ok=True)
 
 
@@ -902,7 +891,6 @@ def main() -> None:
     parser.add_argument("--summary-only", action="store_true", help="rebuild the summary without simulating")
     parser.add_argument("--serve", "-s", action="store_true", help="run, summarize, and serve http://0.0.0.0:4321/summary.html")
     parser.add_argument("--serve-only", action="store_true", help="serve existing summary history without simulating")
-    parser.add_argument("--netviz", action="store_true", help="write netviz-trace.bctrace after each run")
     parser.add_argument("--overlay", action="append", default=[], metavar="DIR", help="additional output directory to merge into summary history")
     args = parser.parse_args()
 
@@ -969,8 +957,6 @@ def main() -> None:
             native_run_shadow(output_dir, parallelism)
         write_run_meta(output_dir, manifest)
         analyze(output_dir, overlays, serve=False, append=True)
-        if args.netviz:
-            netviz(output_dir, runner, image)
     if args.serve:
         analyze(output_dir, overlays, serve=True, append=False)
     elif not args.dry_run:

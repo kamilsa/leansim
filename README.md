@@ -44,9 +44,6 @@ uv run shadow-sim.py experiments/smoke.toml --serve-only
 # Rebuild only the existing report.
 uv run shadow-sim.py experiments/smoke.toml --summary-only
 
-# Also generate output/netviz-trace.bctrace for the external netviz UI.
-uv run shadow-sim.py experiments/smoke.toml --netviz
-
 # Include histories from other output directories in the served report.
 uv run shadow-sim.py experiments/smoke.toml --serve-only --overlay other-output
 ```
@@ -188,12 +185,11 @@ output/
 ├── run-meta.json               # runner, seed, and campaign index
 ├── shadow.data/hosts/.../*.stdout
 ├── runs-history.json           # persisted analysis snapshots
-├── summary.html                # offline interactive report
-└── netviz-trace.bctrace        # present when --netviz is used
+└── summary.html                # offline interactive report
 ```
 
-`run-manifest.json` is the topology source of truth. The netviz exporter reads
-it rather than reconstructing seeded geo or supernode assignments.
+`run-manifest.json` is the topology source of truth: read it rather than
+reconstructing seeded geo or supernode assignments.
 
 ## Analysis
 
@@ -221,13 +217,6 @@ uv run sweep.py experiments/smoke.toml \
   --param network_defaults.uplink_mbps=25,50 \
   --output sweep-output
 ```
-
-## Netviz
-
-`--netviz` produces JSONL `.bctrace` data with `decoderName: "leansim"`. Load
-the trace in the external netviz Vite app. The trace uses observed forwarding
-paths for mesh edges and the generated run manifest for role, country, and
-bandwidth metadata.
 
 ## Development
 

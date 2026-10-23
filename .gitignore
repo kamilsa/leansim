@@ -14,4 +14,3 @@ topology.gml
 /.venv/
 __pycache__/
 *.pyc
-*.bctrace

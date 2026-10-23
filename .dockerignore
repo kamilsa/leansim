@@ -9,7 +9,6 @@ output/
 .venv/
 __pycache__/
 *.pyc
-*.bctrace
 scripts/
 shadow-sim.py
 pyproject.toml
