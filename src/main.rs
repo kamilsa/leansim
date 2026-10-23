@@ -103,6 +103,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &node_config.seed_addrs,
         &mut explicit_peers,
         &selected_aggregator_topics,
+        node_config.experiment.mesh_warmup_ms,
     )
     .await?;
 

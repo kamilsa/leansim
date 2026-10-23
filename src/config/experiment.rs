@@ -74,6 +74,12 @@ pub struct ExperimentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gossipsub_heartbeat_initial_delay_ms: Option<u64>,
 
+    /// Mesh warmup before signing, the same for every host so all of them vote at
+    /// once. The launcher sets it from the busiest host's dial count; unset falls
+    /// back to a per-host value (`network::swarm::warmup_ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_warmup_ms: Option<u64>,
+
     /// Same-subnet local aggregators that every signing node keeps as explicit peers.
     #[serde(default)]
     pub gossipsub_explicit_aggregator_count: usize,

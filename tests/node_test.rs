@@ -23,6 +23,7 @@ fn test_config() -> ExperimentConfig {
         gossipsub_mesh_outbound_min: 2,
         gossipsub_heartbeat_interval_ms: 1000,
         gossipsub_heartbeat_initial_delay_ms: None,
+        mesh_warmup_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
         network_defaults: NetworkDefaults::default(),
