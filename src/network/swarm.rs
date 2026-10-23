@@ -253,13 +253,32 @@ pub struct ReceivedMessage {
     pub is_duplicate: bool,
 }
 
-/// Runs the main event loop until the swarm is done or timeout.
-/// Returns on gossipsub messages, forwarding deserialized WireMessages and the
-/// propagation source PeerId (the immediate mesh peer that forwarded the message).
-pub async fn next_message(
+/// What the node's event loop handles next.
+pub enum NetEvent {
+    Gossip(ReceivedMessage),
+    /// An announcement or a pull; answer it through `channel`.
+    ProofRequest {
+        request: ProofRequest,
+        channel: request_response::ResponseChannel<ProofResponse>,
+    },
+    /// The answer to one of this host's requests.
+    ProofResponse {
+        request_id: request_response::OutboundRequestId,
+        response: ProofResponse,
+    },
+    /// One of this host's requests failed (dial failure, timeout, closed connection).
+    ProofFailed {
+        request_id: request_response::OutboundRequestId,
+    },
+}
+
+/// Runs the swarm until the next gossip message or proof-protocol event.
+/// Gossip messages carry the propagation source PeerId (the immediate mesh peer
+/// that forwarded the message).
+pub async fn next_event(
     swarm: &mut Swarm<SimBehaviour>,
     explicit_peers: &mut ExplicitPeerManager,
-) -> Option<ReceivedMessage> {
+) -> Option<NetEvent> {
     loop {
         let event = swarm.next().await?;
         match event {
@@ -277,11 +296,11 @@ pub async fn next_message(
                             &peer_id,
                             MessageAcceptance::Accept,
                         );
-                    return Some(ReceivedMessage {
+                    return Some(NetEvent::Gossip(ReceivedMessage {
                         wire_msg,
                         from_peer: peer_id,
                         is_duplicate: false,
-                    });
+                    }));
                 }
                 Err(_) => {
                     let _ = swarm
@@ -314,12 +333,36 @@ pub async fn next_message(
                             &peer_id,
                             MessageAcceptance::Ignore,
                         );
-                    return Some(ReceivedMessage {
+                    return Some(NetEvent::Gossip(ReceivedMessage {
                         wire_msg,
                         from_peer: peer_id,
                         is_duplicate: true,
-                    });
+                    }));
                 }
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
+                request_response::Event::Message { message, .. },
+            )) => {
+                return Some(match message {
+                    request_response::Message::Request {
+                        request, channel, ..
+                    } => NetEvent::ProofRequest { request, channel },
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    } => NetEvent::ProofResponse {
+                        request_id,
+                        response,
+                    },
+                });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
+                request_response::Event::OutboundFailure {
+                    request_id, error, ..
+                },
+            )) => {
+                tracing::warn!("proof request {request_id} failed: {error:?}");
+                return Some(NetEvent::ProofFailed { request_id });
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("listening on {address}");
