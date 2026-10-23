@@ -6,6 +6,13 @@
 
 use std::collections::BTreeMap;
 
+/// Wire sizes of the proof protocol's control frames: a CBOR enum tag, a
+/// [`crate::messages::proof::ProofId`], and a node id. They are approximate; what
+/// matters is that they are negligible next to a proof payload.
+pub const ANNOUNCE_BYTES: u64 = 64;
+pub const REQUEST_BYTES: u64 = 64;
+pub const CONTROL_BYTES: u64 = 32;
+
 /// What a byte belongs to, as the dashboard breaks it down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {

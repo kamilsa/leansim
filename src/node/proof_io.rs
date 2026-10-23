@@ -8,6 +8,9 @@ use tokio::time::Instant;
 
 use crate::messages::proof::{ProofId, ProofRequest, ProofResponse};
 use crate::metrics::events::{emit, JsonlEvent};
+use crate::metrics::traffic::{
+    Direction, Kind, TrafficMeter, ANNOUNCE_BYTES, CONTROL_BYTES, REQUEST_BYTES,
+};
 use crate::network::swarm::{peer_id_for, SimBehaviour};
 use crate::node::recursive::{Action, ProofExchange};
 
@@ -28,7 +31,13 @@ impl ProofIo {
         }
     }
 
-    pub fn execute(&mut self, swarm: &mut Swarm<SimBehaviour>, actions: Vec<Action>, ts_ms: u64) {
+    pub fn execute(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        mut meter: Option<&mut TrafficMeter>,
+        actions: Vec<Action>,
+        ts_ms: u64,
+    ) {
         for action in actions {
             match action {
                 Action::Announce { to, proof } => {
@@ -40,6 +49,15 @@ impl ProofIo {
                         .behaviour_mut()
                         .proofs
                         .send_request(&peer_id_for(to), request);
+                    if let Some(meter) = meter.as_deref_mut() {
+                        meter.record(
+                            ts_ms,
+                            Direction::Out,
+                            Kind::ProofAnnounce,
+                            ANNOUNCE_BYTES,
+                            &format!("node:{to}"),
+                        );
+                    }
                     emit(&JsonlEvent::ProofAnnounced {
                         node_id: self.node_id,
                         to_id: to,
@@ -58,6 +76,15 @@ impl ProofIo {
                         .proofs
                         .send_request(&peer_id_for(from), request);
                     self.pulls.insert(request_id, (proof, from));
+                    if let Some(meter) = meter.as_deref_mut() {
+                        meter.record(
+                            ts_ms,
+                            Direction::Out,
+                            Kind::ProofRequest,
+                            REQUEST_BYTES,
+                            &format!("node:{from}"),
+                        );
+                    }
                     emit(&JsonlEvent::ProofRequested {
                         node_id: self.node_id,
                         from_id: from,
@@ -75,6 +102,7 @@ impl ProofIo {
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         exchange: &mut ProofExchange,
+        mut meter: Option<&mut TrafficMeter>,
         request: ProofRequest,
         channel: ResponseChannel<ProofResponse>,
         ts_ms: u64,
@@ -85,8 +113,25 @@ impl ProofIo {
                     .behaviour_mut()
                     .proofs
                     .send_response(channel, ProofResponse::Ack);
+                if let Some(meter) = meter.as_deref_mut() {
+                    let peer = format!("node:{from}");
+                    meter.record(
+                        ts_ms,
+                        Direction::In,
+                        Kind::ProofAnnounce,
+                        ANNOUNCE_BYTES,
+                        &peer,
+                    );
+                    meter.record(
+                        ts_ms,
+                        Direction::Out,
+                        Kind::ProofControl,
+                        CONTROL_BYTES,
+                        &peer,
+                    );
+                }
                 let actions = exchange.announcement(proof, from);
-                self.execute(swarm, actions, ts_ms);
+                self.execute(swarm, meter, actions, ts_ms);
             }
             ProofRequest::Fetch { proof, from } => {
                 let response = if exchange.holds(proof) {
@@ -106,6 +151,22 @@ impl ProofIo {
                 } else {
                     ProofResponse::Missing
                 };
+                if let Some(meter) = meter.as_deref_mut() {
+                    let peer = format!("node:{from}");
+                    meter.record(
+                        ts_ms,
+                        Direction::In,
+                        Kind::ProofRequest,
+                        REQUEST_BYTES,
+                        &peer,
+                    );
+                    let (kind, bytes) = if exchange.holds(proof) {
+                        (Kind::ProofPayload, self.payload.len() as u64)
+                    } else {
+                        (Kind::ProofControl, CONTROL_BYTES)
+                    };
+                    meter.record(ts_ms, Direction::Out, kind, bytes, &peer);
+                }
                 let _ = swarm
                     .behaviour_mut()
                     .proofs
@@ -119,6 +180,7 @@ impl ProofIo {
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         exchange: &mut ProofExchange,
+        mut meter: Option<&mut TrafficMeter>,
         request_id: OutboundRequestId,
         response: ProofResponse,
         now: Instant,
@@ -130,6 +192,15 @@ impl ProofIo {
         };
         match response {
             ProofResponse::Proof { payload, .. } => {
+                if let Some(meter) = meter.as_deref_mut() {
+                    meter.record(
+                        ts_ms,
+                        Direction::In,
+                        Kind::ProofPayload,
+                        payload.len() as u64,
+                        &format!("node:{from}"),
+                    );
+                }
                 emit(&JsonlEvent::ProofFetched {
                     node_id: self.node_id,
                     from_id: from,
@@ -140,10 +211,19 @@ impl ProofIo {
                     byte_size: payload.len() as u64,
                 });
                 let actions = exchange.fetched(proof, now);
-                self.execute(swarm, actions, ts_ms);
+                self.execute(swarm, meter, actions, ts_ms);
             }
             ProofResponse::Ack | ProofResponse::Missing => {
-                self.pull_failed(swarm, exchange, proof, from, ts_ms)
+                if let Some(meter) = meter.as_deref_mut() {
+                    meter.record(
+                        ts_ms,
+                        Direction::In,
+                        Kind::ProofControl,
+                        CONTROL_BYTES,
+                        &format!("node:{from}"),
+                    );
+                }
+                self.pull_failed(swarm, exchange, meter, proof, from, ts_ms)
             }
         }
     }
@@ -152,18 +232,21 @@ impl ProofIo {
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         exchange: &mut ProofExchange,
+        meter: Option<&mut TrafficMeter>,
         request_id: OutboundRequestId,
         ts_ms: u64,
     ) {
         if let Some((proof, from)) = self.pulls.remove(&request_id) {
-            self.pull_failed(swarm, exchange, proof, from, ts_ms);
+            self.pull_failed(swarm, exchange, meter, proof, from, ts_ms);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pull_failed(
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         exchange: &mut ProofExchange,
+        meter: Option<&mut TrafficMeter>,
         proof: ProofId,
         from: u32,
         ts_ms: u64,
@@ -176,6 +259,6 @@ impl ProofIo {
             ts_ms,
         });
         let actions = exchange.fetch_failed(proof);
-        self.execute(swarm, actions, ts_ms);
+        self.execute(swarm, meter, actions, ts_ms);
     }
 }

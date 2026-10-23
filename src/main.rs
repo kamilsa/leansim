@@ -5,13 +5,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use libp2p::Swarm;
 
 use leansim::config::experiment::{NodeConfig, NodeRole};
 use leansim::config::plan::AggregationPlan;
 use leansim::messages::proof::ProofId;
 use leansim::messages::wire::WireMessage;
 use leansim::metrics::events::{emit, JsonlEvent};
-use leansim::network::swarm::{peer_id_for, NetEvent, ReceivedMessage};
+use leansim::metrics::traffic::{Bucket, Direction, Kind, TrafficMeter};
+use leansim::network::swarm::{peer_id_for, NetEvent, ReceivedMessage, SimBehaviour};
 use leansim::node::proof_io::ProofIo;
 use leansim::node::recursive::ProofExchange;
 use leansim::node::state::NodeState;
@@ -123,6 +125,10 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         Duration::from_millis(experiment.recursive_aggregation_time_ms),
     );
     let mut proof_io = ProofIo::new(state.node_id, experiment.aggregate_proof_bytes);
+    // Traffic logs only on the hosts the launcher flags, so the rest stay untouched.
+    let mut meter = node_config
+        .traffic_log
+        .then(|| TrafficMeter::new(experiment.traffic_log_bucket_ms));
 
     let selected_aggregator_topics: Vec<_> = signing_subnets
         .iter()
@@ -169,10 +175,13 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         .await;
 
         match event {
-            Ok(Some(NetEvent::Gossip(received))) => handle_signature(&state, received),
+            Ok(Some(NetEvent::Gossip(received))) => {
+                handle_signature(&state, &swarm, meter.as_mut(), received)
+            }
             Ok(Some(NetEvent::ProofRequest { request, channel })) => proof_io.on_request(
                 &mut swarm,
                 &mut exchange,
+                meter.as_mut(),
                 request,
                 channel,
                 state.elapsed_ms(),
@@ -183,14 +192,19 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             })) => proof_io.on_response(
                 &mut swarm,
                 &mut exchange,
+                meter.as_mut(),
                 request_id,
                 response,
                 tokio::time::Instant::now(),
                 state.elapsed_ms(),
             ),
-            Ok(Some(NetEvent::ProofFailed { request_id })) => {
-                proof_io.on_failure(&mut swarm, &mut exchange, request_id, state.elapsed_ms())
-            }
+            Ok(Some(NetEvent::ProofFailed { request_id })) => proof_io.on_failure(
+                &mut swarm,
+                &mut exchange,
+                meter.as_mut(),
+                request_id,
+                state.elapsed_ms(),
+            ),
             Ok(None) => break,
             // A proof came due or the run ended; handled below / at the loop top.
             Err(_elapsed) => {}
@@ -199,7 +213,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         let now = tokio::time::Instant::now();
         for proof in leansim::node::local_aggregator::complete_due_proofs(&state) {
             let actions = exchange.proof_ready(ProofId::subnet(proof.subnet), now);
-            proof_io.execute(&mut swarm, actions, state.elapsed_ms());
+            proof_io.execute(&mut swarm, meter.as_mut(), actions, state.elapsed_ms());
         }
         for done in exchange.take_due(now) {
             emit(&JsonlEvent::RecursiveProofGenerated {
@@ -211,7 +225,28 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 ts_ms: state.elapsed_ms(),
             });
             let actions = exchange.proof_ready(done.proof, now);
-            proof_io.execute(&mut swarm, actions, state.elapsed_ms());
+            proof_io.execute(&mut swarm, meter.as_mut(), actions, state.elapsed_ms());
+        }
+        if let Some(meter) = meter.as_mut() {
+            for bucket in meter.drain_due(state.elapsed_ms()) {
+                emit_bucket(&state, bucket);
+            }
+        }
+    }
+
+    if let Some(meter) = meter.as_mut() {
+        for bucket in meter.finish() {
+            emit_bucket(&state, bucket);
+        }
+        for (peer, totals) in meter.peers() {
+            emit(&JsonlEvent::TrafficPeer {
+                node_id: state.node_id,
+                peer: peer.clone(),
+                inbound_bytes: totals.inbound_bytes,
+                outbound_bytes: totals.outbound_bytes,
+                inbound_msgs: totals.inbound_msgs,
+                outbound_msgs: totals.outbound_msgs,
+            });
         }
     }
 
@@ -234,7 +269,14 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 }
 
 /// Counts one gossiped signature, unique or duplicate, and feeds local aggregation.
-fn handle_signature(state: &NodeState, received: ReceivedMessage) {
+/// On a traffic-logging host it also records the bytes, incoming per forwarding
+/// peer and outgoing per mesh peer it estimates a forward to.
+fn handle_signature(
+    state: &NodeState,
+    swarm: &Swarm<SimBehaviour>,
+    mut meter: Option<&mut TrafficMeter>,
+    received: ReceivedMessage,
+) {
     let wire_msg = received.wire_msg;
     let from_peer_str = received.from_peer.to_base58();
     let msg_id = wire_msg.message_id();
@@ -250,6 +292,28 @@ fn handle_signature(state: &NodeState, received: ReceivedMessage) {
         ..
     } = &wire_msg;
     let size = wire_msg.encode().len() as u64;
+    // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
+    let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil() as u64).max(1);
+    let ts_ms = state.elapsed_ms();
+    if let Some(meter) = meter.as_deref_mut() {
+        let included = if is_dup {
+            Kind::DuplicateSignature
+        } else {
+            Kind::Signature
+        };
+        meter.record(
+            ts_ms,
+            Direction::In,
+            included,
+            size,
+            &format!("peer:{from_peer_str}"),
+        );
+        if !is_dup {
+            for peer in forwarding_peers(swarm, &state.config.run_id, *subnet_id, d_lazy) {
+                meter.record(ts_ms, Direction::Out, Kind::Signature, size, &peer);
+            }
+        }
+    }
     // Track download bandwidth (both unique and duplicate)
     state.bytes_recv_sig.fetch_add(size, Ordering::Relaxed);
     state.msgs_recv_sig.fetch_add(1, Ordering::Relaxed);
@@ -260,14 +324,12 @@ fn handle_signature(state: &NodeState, received: ReceivedMessage) {
         from_peer_id: from_peer_str,
         subnet_id: *subnet_id,
         duplicate: is_dup,
-        ts_ms: state.elapsed_ms(),
+        ts_ms,
         byte_size: size,
     });
     // Approximate lazy gossip traffic. Full-message forwarding to mesh and
     // explicit peers is not observable at this layer.
     if !is_dup {
-        // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
-        let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil() as u64).max(1);
         state
             .bytes_sent_sig
             .fetch_add(size * d_lazy, Ordering::Relaxed);
@@ -277,4 +339,42 @@ fn handle_signature(state: &NodeState, received: ReceivedMessage) {
     if state.role == NodeRole::LocalAggregator {
         leansim::node::local_aggregator::handle_message(state, &wire_msg);
     }
+}
+
+/// The mesh peers a unique signature on `subnet` would be forwarded to, up to the
+/// lazy fan-out. The gossip layer does not expose forwards, so a traffic log
+/// attributes one copy to each mesh peer it can see.
+fn forwarding_peers(
+    swarm: &Swarm<SimBehaviour>,
+    run_id: &str,
+    subnet: u32,
+    copies: u64,
+) -> Vec<String> {
+    let topic =
+        libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(run_id, subnet));
+    swarm
+        .behaviour()
+        .gossipsub
+        .mesh_peers(&topic.hash())
+        .take(copies as usize)
+        .map(|peer| format!("peer:{}", peer.to_base58()))
+        .collect()
+}
+
+fn emit_bucket(state: &NodeState, bucket: Bucket) {
+    emit(&JsonlEvent::TrafficBucket {
+        node_id: state.node_id,
+        start_ms: bucket.start_ms,
+        width_ms: bucket.width_ms,
+        inbound: bucket
+            .inbound
+            .iter()
+            .map(|(kind, bytes)| (kind.as_str().to_string(), *bytes))
+            .collect(),
+        outbound: bucket
+            .outbound
+            .iter()
+            .map(|(kind, bytes)| (kind.as_str().to_string(), *bytes))
+            .collect(),
+    });
 }

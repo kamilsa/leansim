@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 /// Structured event emitted as one JSON line to stdout.
@@ -96,6 +97,25 @@ pub enum JsonlEvent {
         bytes_received: u64,
         msgs_sent: u64,
         msgs_received: u64,
+    },
+    /// One bucket of a traffic-logging host, by message kind. No `byte_size`
+    /// field, so these never count towards the run's signature traffic.
+    TrafficBucket {
+        node_id: u32,
+        start_ms: u64,
+        width_ms: u64,
+        inbound: BTreeMap<String, u64>,
+        outbound: BTreeMap<String, u64>,
+    },
+    /// One peer's traffic over the whole run, on a traffic-logging host.
+    /// `peer` is `node:<id>` when the peer's node is known, else `peer:<base58>`.
+    TrafficPeer {
+        node_id: u32,
+        peer: String,
+        inbound_bytes: u64,
+        outbound_bytes: u64,
+        inbound_msgs: u64,
+        outbound_msgs: u64,
     },
 }
 
