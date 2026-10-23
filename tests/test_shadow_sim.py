@@ -603,6 +603,19 @@ class RecursiveSeatTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             shadow_sim.validate_experiment(self.experiment(subnet_count=1))
 
+    def test_nodes_list_their_seats(self) -> None:
+        by_peer = {node["peer_key"]: node for node in shadow_sim.assign_nodes(self.experiment())}
+        self.assertEqual(by_peer["BIG"]["recursive_seats"], [[1, 0]])
+        self.assertEqual(by_peer["BIG"]["recursive_validator_ids"], [6, 10])
+        self.assertEqual(by_peer["MID"]["recursive_seats"], [[1, 0]])
+        self.assertEqual(by_peer["S5"]["recursive_seats"], [])
+        # A seat does not change the role: BIG also aggregates subnets 0 and 1.
+        self.assertEqual(by_peer["BIG"]["role"], "local_aggregator")
+
+    def test_without_recursion_nodes_have_no_seats(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment(recursive_aggregation=False))
+        self.assertTrue(all(node["recursive_seats"] == [] for node in nodes))
+
 
 class RecursiveConfigTests(unittest.TestCase):
     def config(self, **overrides: object) -> dict:
