@@ -148,6 +148,13 @@ def validate_experiment(config: dict) -> None:
             die("subscribe_to_duty_subnets must be a boolean")
         if node_map is None:
             die("subscribe_to_duty_subnets requires node_map")
+    if config.get("committee_aggregators") is not None:
+        if not isinstance(config["committee_aggregators"], bool):
+            die("committee_aggregators must be a boolean")
+        if node_map is None:
+            die("committee_aggregators requires node_map")
+        if config["committee_aggregators"] and local_aggregators < 1:
+            die("committee_aggregators needs local_aggregators_per_subnet >= 1 (the lottery's target)")
     if config.get("random_peer_count") is not None:
         if node_map is None:
             die("random_peer_count requires node_map")
@@ -564,24 +571,44 @@ def select_committee_aggregators(hosts: list[dict], experiment: dict) -> Aggrega
     return {index: dict(subnets) for index, subnets in duties.items()}
 
 
+def select_subscriber_aggregators(subscribed: list[set[int]], experiment: dict, rng: random.Random) -> AggregatorDuties:
+    """Legacy selection: promote local_aggregators_per_subnet hosts among each
+    subnet's subscribers, one subnet per host, whether or not they run validators."""
+    aggregator_for: dict[int, int] = {}
+    subscribers_by_subnet: dict[int, list[int]] = defaultdict(list)
+    for index, subnets in enumerate(subscribed):
+        for subnet in subnets:
+            subscribers_by_subnet[subnet].append(index)
+    # Scarcest subnet first, so greedy selection does not strand a subnet whose
+    # subscribers were taken elsewhere.
+    for subnet in sorted(range(experiment["subnet_count"]), key=lambda s: len(subscribers_by_subnet.get(s, []))):
+        candidates = sorted(index for index in subscribers_by_subnet.get(subnet, []) if index not in aggregator_for)
+        if len(candidates) < experiment["local_aggregators_per_subnet"]:
+            die(
+                f"subnet {subnet} has only {len(candidates)} subscribed hosts available as local "
+                f"aggregators; lower local_aggregators_per_subnet or raise subnet_subscriptions_per_node"
+            )
+        for index in rng.sample(candidates, experiment["local_aggregators_per_subnet"]):
+            aggregator_for[index] = subnet
+    return {index: {subnet: []} for index, subnet in aggregator_for.items()}
+
+
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     """Ethereum-style assignment: hosts and validator co-location come from a
     nodes.csv node map; every node subscribes to subnet_subscriptions_per_node
     random subnets — plus, with subscribe_to_duty_subnets, the subnets its
-    validators publish in — and local aggregators are promoted among the nodes
-    subscribed to each subnet.
+    validators publish in. Local aggregators are the hosts of each committee's
+    lottery winners with committee_aggregators, and otherwise promoted among
+    the nodes subscribed to each subnet.
     """
     subnet_count = experiment["subnet_count"]
     subscriptions_per_node = as_int(experiment["subnet_subscriptions_per_node"], "subnet_subscriptions_per_node", minimum=1)
     if subscriptions_per_node > subnet_count:
         die(f"subnet_subscriptions_per_node {subscriptions_per_node} exceeds subnet_count {subnet_count}")
     duty_subscriptions = experiment.get("subscribe_to_duty_subnets", False)
-    validators_per_subnet = experiment["validator_count"] // subnet_count
 
     def subnet_of(validator: int) -> int:
-        # Mirrors Rust's subnet_for_validator clamp; divisibility is validated at
-        # launch, this guards direct assign_nodes calls with uneven splits.
-        return min(validator // validators_per_subnet, subnet_count - 1)
+        return subnet_for_committee(committee_of(validator, experiment), experiment)
 
     hosts = place_nodes(experiment)
     rng = random.Random(experiment["geo_seed"] + 5)
@@ -597,32 +624,21 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
             subs |= {subnet_of(validator) for validator in host["validator_ids"]}
         subscribed.append(subs)
 
-    # Local aggregators: for each subnet, promote hosts among its subscribers.
-    aggregator_for: dict[int, int] = {}  # host index -> subnet it aggregates
-    subscribers_by_subnet: dict[int, list[int]] = defaultdict(list)
-    for index in range(len(hosts)):
-        for subnet in subscribed[index]:
-            subscribers_by_subnet[subnet].append(index)
-    # Promote one subscribed host per subnet, scarcest subnet first so greedy
-    # selection does not strand a subnet whose subscribers were taken elsewhere.
-    for subnet in sorted(range(subnet_count), key=lambda s: len(subscribers_by_subnet.get(s, []))):
-        candidates = sorted(index for index in subscribers_by_subnet.get(subnet, []) if index not in aggregator_for)
-        if len(candidates) < experiment["local_aggregators_per_subnet"]:
-            die(
-                f"subnet {subnet} has only {len(candidates)} subscribed hosts available as local "
-                f"aggregators; lower local_aggregators_per_subnet or raise subnet_subscriptions_per_node"
-            )
-        for index in rng.sample(candidates, experiment["local_aggregators_per_subnet"]):
-            aggregator_for[index] = subnet
+    if experiment.get("committee_aggregators"):
+        duties = select_committee_aggregators(hosts, experiment)
+    else:
+        duties = select_subscriber_aggregators(subscribed, experiment, rng)
 
     nodes: list[dict] = []
     subnet_counter: Counter[int] = Counter()
     for index, host in enumerate(hosts):
         validator_ids = host["validator_ids"]
         signing_subnets = sorted({subnet_of(validator) for validator in validator_ids})
-        role = "local_aggregator" if index in aggregator_for else ("relay" if not validator_ids else "validator")
+        host_duties = duties.get(index, {})
+        aggregated = sorted(host_duties)
+        role = "local_aggregator" if aggregated else ("relay" if not validator_ids else "validator")
         subscriptions = sorted(subscribed[index])
-        subnet_id = aggregator_for.get(index, subscriptions[0] if subscriptions else 0)
+        subnet_id = aggregated[0] if aggregated else (subscriptions[0] if subscriptions else 0)
         node = {
             "node_id": len(nodes),
             "role": role,
@@ -630,7 +646,9 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
             "ip": subnet_ip(subnet_id, subnet_counter[subnet_id]),
             "validator_ids": validator_ids,
             "signing_subnets": signing_subnets,
-            "subscribed_subnets": sorted(subscribed[index] | ({subnet_id} if index in aggregator_for else set())),
+            "subscribed_subnets": sorted(subscribed[index] | set(aggregated)),
+            "aggregated_subnets": aggregated,
+            "aggregator_validator_ids": sorted(v for validators in host_duties.values() for v in validators),
             "source_node_type": "no_validator" if host["no_validator"] else "validator",
         }
         subnet_counter[subnet_id] += 1
@@ -649,8 +667,8 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     if explicit_count:
         aggregators_by_subnet: defaultdict[int, list[dict]] = defaultdict(list)
         for node in nodes:
-            if node["role"] == "local_aggregator":
-                aggregators_by_subnet[node["subnet_id"]].append(node)
+            for subnet in node.get("aggregated_subnets", []):
+                aggregators_by_subnet[subnet].append(node)
         for node in nodes:
             rng = random.Random(experiment["geo_seed"] + node["node_id"])
             # A host selects aggregators in every subnet its validators sign in.
@@ -837,6 +855,20 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     if experiment.get("node_map"):
         relays = [node for node in nodes if node["role"] == "relay"]
         log(f"added {len(relays)} gossip-only relay hosts (no validators)")
+    if experiment.get("committee_aggregators"):
+        aggregators = [node for node in nodes if node["role"] == "local_aggregator"]
+        winners = Counter(committee_of(v, experiment) for node in aggregators for v in node["aggregator_validator_ids"])
+        hosts_per = Counter(subnet for node in aggregators for subnet in node["aggregated_subnets"])
+        empty = [subnet for subnet in range(experiment["subnet_count"]) if subnet not in hosts_per]
+        log(
+            f"committee aggregators (lottery, target {experiment['local_aggregators_per_subnet']}): "
+            f"{sum(winners.values())} validators on {len(aggregators)} hosts; "
+            f"{min(winners.values(), default=0)}-{max(winners.values(), default=0)} per committee, "
+            f"{min(hosts_per.values(), default=0)}-{max(hosts_per.values(), default=0)} distinct hosts per committee, "
+            f"up to {max((len(node['aggregated_subnets']) for node in aggregators), default=0)} committees per host"
+        )
+        if empty:
+            log(f"WARNING: committees without an aggregator (no local proof): {empty}")
     countries: list[str] | None = None
     latency: dict | None = None
     if experiment["use_geo_latency"]:
@@ -861,6 +893,7 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
                 "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
                 "validator_ids": node["validator_ids"],
                 "subscribed_subnets": node.get("subscribed_subnets", []),
+                "aggregated_subnets": node.get("aggregated_subnets", []),
                 "experiment": experiment,
             },
         )
