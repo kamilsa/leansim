@@ -20,6 +20,7 @@ fn test_config() -> ExperimentConfig {
         recursive_aggregation_time_ms: 276,
         recursive_proofs_per_child: 1,
         aggregate_proof_bytes: 262_144,
+        traffic_log_bucket_ms: 100,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,

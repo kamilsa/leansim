@@ -70,6 +70,10 @@ pub struct ExperimentConfig {
     #[serde(default = "defaults::default_aggregate_proof_bytes")]
     pub aggregate_proof_bytes: usize,
 
+    /// Width of a traffic-log bucket on hosts with `traffic_log = true`.
+    #[serde(default = "defaults::default_traffic_log_bucket_ms")]
+    pub traffic_log_bucket_ms: u64,
+
     #[serde(default = "defaults::default_mesh_n_low")]
     pub gossipsub_mesh_n_low: usize,
 
@@ -185,6 +189,9 @@ impl ExperimentConfig {
                 "aggregate_proof_bytes must be in 1..={MAX_PROOF_BYTES}"
             ));
         }
+        if self.traffic_log_bucket_ms == 0 {
+            return Err("traffic_log_bucket_ms must be > 0".into());
+        }
         Ok(())
     }
 
@@ -247,6 +254,10 @@ pub struct NodeConfig {
     /// proof duty in a run with recursive aggregation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregation_plan: Option<String>,
+    /// Whether this host logs per-bucket and per-peer traffic (the launcher sets
+    /// it only for the experiment's `traffic_log_nodes`).
+    #[serde(default)]
+    pub traffic_log: bool,
     pub experiment: ExperimentConfig,
 }
 

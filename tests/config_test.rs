@@ -16,6 +16,7 @@ fn base_config() -> ExperimentConfig {
         recursive_aggregation_time_ms: 276,
         recursive_proofs_per_child: 1,
         aggregate_proof_bytes: 262_144,
+        traffic_log_bucket_ms: 100,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,
@@ -184,6 +185,7 @@ fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
         subscribed_subnets: vec![],
         aggregated_subnets: vec![],
         aggregation_plan: None,
+        traffic_log: false,
         experiment: base_config(),
     }
 }
@@ -335,4 +337,51 @@ subnet_count = 1
         node_config(NodeRole::Validator, vec![]).aggregation_plan,
         None
     );
+}
+
+#[test]
+fn traffic_logging_is_off_unless_the_config_asks() {
+    let node: NodeConfig = toml::from_str(
+        r#"
+node_id = 2
+role = "validator"
+subnet_id = 0
+listen_addr = "/ip4/10.0.0.3/udp/9090/quic-v1"
+seed_addrs = []
+
+[experiment]
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert!(!node.traffic_log);
+    assert_eq!(node.experiment.traffic_log_bucket_ms, 100);
+    let flagged: NodeConfig = toml::from_str(
+        r#"
+node_id = 2
+role = "validator"
+subnet_id = 0
+listen_addr = "/ip4/10.0.0.3/udp/9090/quic-v1"
+seed_addrs = []
+traffic_log = true
+
+[experiment]
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert!(flagged.traffic_log);
+}
+
+#[test]
+fn traffic_bucket_width_must_be_positive() {
+    let mut exp = base_config();
+    exp.traffic_log_bucket_ms = 0;
+    assert!(exp.validate().is_err());
+    exp.traffic_log_bucket_ms = 100;
+    assert!(exp.validate().is_ok());
 }

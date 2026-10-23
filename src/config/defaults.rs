@@ -65,3 +65,8 @@ pub const fn default_recursive_proofs_per_child() -> usize {
 pub const fn default_aggregate_proof_bytes() -> usize {
     262_144
 }
+
+/// Bucket width of the per-node traffic logs, fine enough to see a slot's shape.
+pub const fn default_traffic_log_bucket_ms() -> u64 {
+    100
+}
