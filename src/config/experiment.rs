@@ -166,7 +166,10 @@ impl ExperimentConfig {
         self.validator_count / self.subnet_count
     }
 
-    /// Validators are split into contiguous, equally sized subnets by id.
+    /// Validator → committee → subnet. Committees are contiguous, equally sized
+    /// blocks of validator ids (the launcher deals ids over randomly sampled
+    /// slots, so each block is a random committee), and committee i attests on
+    /// subnet i: one slot of `subnet_count` committees.
     pub fn subnet_for_validator(&self, validator_id: u32) -> u32 {
         let subnet = validator_id as usize / self.validators_per_subnet().max(1);
         subnet.min(self.subnet_count.saturating_sub(1)) as u32
@@ -205,6 +208,10 @@ pub struct NodeConfig {
     /// subnet they collect. Other roles default to the signing subnets.
     #[serde(default)]
     pub subscribed_subnets: Vec<u32>,
+    /// Subnets (committees) this host aggregates. Empty on a local aggregator
+    /// means just `subnet_id`, as in configs written before committee aggregators.
+    #[serde(default)]
+    pub aggregated_subnets: Vec<u32>,
     pub experiment: ExperimentConfig,
 }
 
@@ -217,6 +224,20 @@ impl NodeConfig {
             NodeRole::Relay => Vec::new(),
             NodeRole::Validator if self.validator_ids.is_empty() => vec![self.node_id],
             _ => self.validator_ids.clone(),
+        }
+    }
+
+    /// Subnets whose signatures this host collects into local proofs.
+    pub fn aggregated_subnets(&self) -> Vec<u32> {
+        match self.role {
+            NodeRole::LocalAggregator if self.aggregated_subnets.is_empty() => vec![self.subnet_id],
+            NodeRole::LocalAggregator => {
+                let mut subnets = self.aggregated_subnets.clone();
+                subnets.sort_unstable();
+                subnets.dedup();
+                subnets
+            }
+            _ => Vec::new(),
         }
     }
 }
