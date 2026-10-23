@@ -492,6 +492,14 @@ def subnet_for_committee(committee: int, experiment: dict) -> int:
     return committee % experiment["subnet_count"]
 
 
+def _seeded_hash(label: bytes, validator: int, experiment: dict) -> bytes:
+    """SHA-256 of a label, geo_seed, and a validator id: the stand-in for a
+    validator's slot signature in every lottery."""
+    return hashlib.sha256(
+        label + experiment["geo_seed"].to_bytes(8, "little") + validator.to_bytes(8, "little")
+    ).digest()
+
+
 def is_aggregator(validator: int, experiment: dict) -> bool:
     """Ethereum's is_aggregator lottery: a validator aggregates its committee when
     bytes_to_uint64(hash(slot_signature)[0:8]) % modulo == 0, with
@@ -502,10 +510,7 @@ def is_aggregator(validator: int, experiment: dict) -> bool:
     independent of placement.
     """
     modulo = max(1, committee_size(experiment) // experiment["local_aggregators_per_subnet"])
-    digest = hashlib.sha256(
-        b"leansim-aggregator" + experiment["geo_seed"].to_bytes(8, "little") + validator.to_bytes(8, "little")
-    ).digest()
-    return int.from_bytes(digest[:8], "little") % modulo == 0
+    return int.from_bytes(_seeded_hash(b"leansim-aggregator", validator, experiment)[:8], "little") % modulo == 0
 
 
 def select_committee_aggregators(hosts: list[dict], experiment: dict) -> AggregatorDuties:
@@ -574,6 +579,22 @@ def recursive_groups(experiment: dict) -> list[dict]:
             })
         below = size
     return groups
+
+
+def recursive_pools(experiment: dict, group_count: int) -> list[list[int]]:
+    """One validator pool per recursive group, as committees are for subnets:
+    validator ids in a geo_seed-keyed hash order, cut into group_count equal
+    blocks (the last takes the remainder). The hash order keeps pools
+    independent of committees, which are contiguous id blocks."""
+    order = sorted(
+        range(experiment["validator_count"]),
+        key=lambda validator: _seeded_hash(b"leansim-recursive-pool", validator, experiment),
+    )
+    size = max(1, len(order) // group_count)
+    return [
+        order[index * size:(index + 1) * size] if index < group_count - 1 else order[index * size:]
+        for index in range(group_count)
+    ]
 
 
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
