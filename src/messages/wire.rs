@@ -18,23 +18,6 @@ pub enum WireMessage {
         created_timestamp_ms: u64,
         padding: Vec<u8>,
     },
-    LocalProof {
-        run_id: String,
-        sender_id: u32,
-        subnet_id: u32,
-        covered_validator_count: usize,
-        sequence_id: u64,
-        created_timestamp_ms: u64,
-        padding: Vec<u8>,
-    },
-    GlobalProof {
-        run_id: String,
-        sender_id: u32,
-        covered_signature_count: usize,
-        sequence_id: u64,
-        created_timestamp_ms: u64,
-        padding: Vec<u8>,
-    },
 }
 
 impl WireMessage {
@@ -72,38 +55,6 @@ impl WireMessage {
                 created_timestamp_ms,
                 padding: vec![0u8; needed],
             },
-            Self::LocalProof {
-                run_id,
-                sender_id,
-                subnet_id,
-                covered_validator_count,
-                sequence_id,
-                created_timestamp_ms,
-                ..
-            } => Self::LocalProof {
-                run_id,
-                sender_id,
-                subnet_id,
-                covered_validator_count,
-                sequence_id,
-                created_timestamp_ms,
-                padding: vec![0u8; needed],
-            },
-            Self::GlobalProof {
-                run_id,
-                sender_id,
-                covered_signature_count,
-                sequence_id,
-                created_timestamp_ms,
-                ..
-            } => Self::GlobalProof {
-                run_id,
-                sender_id,
-                covered_signature_count,
-                sequence_id,
-                created_timestamp_ms,
-                padding: vec![0u8; needed],
-            },
         }
     }
 
@@ -117,17 +68,13 @@ impl WireMessage {
 
     pub fn run_id(&self) -> &str {
         match self {
-            Self::ValidatorSignature { run_id, .. }
-            | Self::LocalProof { run_id, .. }
-            | Self::GlobalProof { run_id, .. } => run_id,
+            Self::ValidatorSignature { run_id, .. } => run_id,
         }
     }
 
     pub fn sender_id(&self) -> u32 {
         match self {
-            Self::ValidatorSignature { sender_id, .. }
-            | Self::LocalProof { sender_id, .. }
-            | Self::GlobalProof { sender_id, .. } => *sender_id,
+            Self::ValidatorSignature { sender_id, .. } => *sender_id,
         }
     }
 }
@@ -209,23 +156,6 @@ mod tests {
                 created_timestamp_ms: 1000,
                 padding: vec![7u8; 100],
             },
-            WireMessage::LocalProof {
-                run_id: "r1".into(),
-                sender_id: 10,
-                subnet_id: 1,
-                covered_validator_count: 900,
-                sequence_id: 1,
-                created_timestamp_ms: 2000,
-                padding: vec![0u8; 1000],
-            },
-            WireMessage::GlobalProof {
-                run_id: "r1".into(),
-                sender_id: 100,
-                covered_signature_count: 7200,
-                sequence_id: 1,
-                created_timestamp_ms: 3000,
-                padding: vec![],
-            },
         ];
         for msg in msgs {
             let bytes = msg.encode();
@@ -236,10 +166,11 @@ mod tests {
 
     #[test]
     fn with_payload_size_approximates_target() {
-        let msg = WireMessage::GlobalProof {
+        let msg = WireMessage::ValidatorSignature {
             run_id: "r".into(),
             sender_id: 0,
-            covered_signature_count: 0,
+            validator_id: 0,
+            subnet_id: 0,
             sequence_id: 0,
             created_timestamp_ms: 0,
             padding: vec![],

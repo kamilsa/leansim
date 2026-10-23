@@ -7,15 +7,11 @@ fn base_config() -> ExperimentConfig {
         validator_count: 100,
         subnet_count: 4,
         local_aggregators_per_subnet: 2,
-        global_aggregator_count: 5,
         local_threshold: 0.9,
-        global_proof_target: 0.66,
         burst_time_ms: 2000,
         burst_jitter_ms: 500,
         signature_aggregation_rate: 1000,
-        global_aggregation_rate: 10,
         signature_payload_bytes: 3072,
-        proof_payload_bytes: 131072,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,
@@ -140,25 +136,9 @@ fn invalid_local_threshold_rejected() {
 }
 
 #[test]
-fn invalid_global_target_rejected() {
-    let mut exp = base_config();
-    exp.global_proof_target = 0.0;
-    assert!(exp.validate().is_err());
-    exp.global_proof_target = 1.5;
-    assert!(exp.validate().is_err());
-}
-
-#[test]
 fn zero_aggregation_rate_rejected() {
     let mut exp = base_config();
     exp.signature_aggregation_rate = 0;
-    assert!(exp.validate().is_err());
-}
-
-#[test]
-fn zero_global_rate_rejected() {
-    let mut exp = base_config();
-    exp.global_aggregation_rate = 0;
     assert!(exp.validate().is_err());
 }
 
@@ -167,9 +147,6 @@ fn zero_payload_bytes_rejected() {
     let mut exp = base_config();
     exp.signature_payload_bytes = 0;
     assert!(exp.validate().is_err());
-    exp.signature_payload_bytes = 3072;
-    exp.proof_payload_bytes = 0;
-    assert!(exp.validate().is_err());
 }
 
 #[test]
@@ -177,13 +154,6 @@ fn validators_per_subnet_rounds_down() {
     let exp = base_config();
     // 100 validators / 4 subnets = 25
     assert_eq!(exp.validators_per_subnet(), 25);
-}
-
-#[test]
-fn total_nodes_count() {
-    let exp = base_config();
-    // 100 validators, including 2 local aggregators in each subnet, + 5 global = 105
-    assert_eq!(exp.total_nodes(), 105);
 }
 
 #[test]
@@ -234,12 +204,6 @@ fn host_without_validator_ids_signs_as_its_node_id() {
 fn host_signs_for_every_colocated_validator() {
     let node = node_config(NodeRole::LocalAggregator, vec![3, 40, 41]);
     assert_eq!(node.signing_validator_ids(), vec![3, 40, 41]);
-}
-
-#[test]
-fn global_aggregator_never_signs() {
-    let node = node_config(NodeRole::GlobalAggregator, vec![]);
-    assert!(node.signing_validator_ids().is_empty());
 }
 
 #[test]

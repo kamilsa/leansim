@@ -207,7 +207,6 @@ fn role_str(role: NodeRole) -> &'static str {
     match role {
         NodeRole::Validator => "validator",
         NodeRole::LocalAggregator => "local_aggregator",
-        NodeRole::GlobalAggregator => "global_aggregator",
         NodeRole::Relay => "relay",
     }
 }
@@ -265,8 +264,6 @@ fn event_ts_us(event: &JsonlEvent) -> u64 {
         JsonlEvent::SigSent { ts_ms, .. } => ts_ms * 1000,
         JsonlEvent::SigReceived { ts_ms, .. } => ts_ms * 1000,
         JsonlEvent::LocalProofGenerated { latency_ms, .. } => latency_ms * 1000,
-        JsonlEvent::LocalProofReceived { ts_ms, .. } => ts_ms * 1000,
-        JsonlEvent::GlobalProofCompleted { latency_ms, .. } => latency_ms * 1000,
         JsonlEvent::NodeStats { .. } => u64::MAX,
     }
 }
@@ -301,11 +298,6 @@ fn build_mesh_edges(
     for (event, _) in events {
         let (receiver, from_peer_id) = match event {
             JsonlEvent::SigReceived {
-                node_id,
-                from_peer_id,
-                ..
-            } => (*node_id, from_peer_id),
-            JsonlEvent::LocalProofReceived {
                 node_id,
                 from_peer_id,
                 ..
@@ -406,51 +398,13 @@ fn convert_event(event: &JsonlEvent, peer_to_node: &HashMap<String, u32>) -> Opt
             subnet_id,
             sig_count,
             latency_ms,
-            byte_size,
         } => Some(format!(
-            "[{}, {}, \"pg\", {}, {}, {}]",
+            // The last field was the proof's byte size; proofs are no longer transmitted.
+            "[{}, {}, \"pg\", {}, {}, 0]",
             latency_ms * 1000,
             node_id,
             subnet_id,
-            sig_count,
-            byte_size
-        )),
-        JsonlEvent::LocalProofReceived {
-            node_id,
-            from_id,
-            from_peer_id,
-            subnet_id,
-            covered_sigs,
-            duplicate,
-            ts_ms,
-            byte_size,
-        } => {
-            let code = if *duplicate { "pd" } else { "pr" };
-            let peer_idx = peer_to_node.get(from_peer_id).copied().unwrap_or(*from_id);
-            Some(format!(
-                "[{}, {}, \"{}\", {}, {}, {}, {}, {}]",
-                ts_ms * 1000,
-                node_id,
-                code,
-                from_id,
-                peer_idx,
-                subnet_id,
-                covered_sigs,
-                byte_size
-            ))
-        }
-        JsonlEvent::GlobalProofCompleted {
-            node_id,
-            total_sigs,
-            proof_count,
-            latency_ms,
-        } => Some(format!(
-            "[{}, {}, \"gc\", {}, {}, {}]",
-            latency_ms * 1000,
-            node_id,
-            total_sigs,
-            proof_count,
-            latency_ms
+            sig_count
         )),
         JsonlEvent::NodeStats { .. } => None,
     }

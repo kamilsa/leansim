@@ -12,15 +12,11 @@ fn test_config() -> ExperimentConfig {
         validator_count: 100,
         subnet_count: 4,
         local_aggregators_per_subnet: 2,
-        global_aggregator_count: 5,
         local_threshold: 0.9,
-        global_proof_target: 0.66,
         burst_time_ms: 2000,
         burst_jitter_ms: 500,
         signature_aggregation_rate: 1000,
-        global_aggregation_rate: 10,
         signature_payload_bytes: 3072,
-        proof_payload_bytes: 131072,
         gossipsub_mesh_n_low: 4,
         gossipsub_mesh_n: 6,
         gossipsub_mesh_n_high: 12,
@@ -129,30 +125,6 @@ fn snark1_sent_gate_prevents_double_publish() {
 }
 
 #[test]
-fn global_aggregator_proof_tracking() {
-    let state = make_state(NodeRole::GlobalAggregator, 0);
-    // Insert proofs from different subnets
-    state.received_proofs.insert((10, 0), 22); // sender 10, subnet 0, 22 sigs
-    state.received_proofs.insert((11, 1), 20); // sender 11, subnet 1, 20 sigs
-    state.received_proofs.insert((12, 0), 25); // sender 12, subnet 0 overwrites sender 10 for same subnet
-
-    // Note: using (sender_id, subnet_id) as key — different senders in same subnet are different keys
-    // So we have 3 unique entries
-    assert_eq!(state.received_proofs.len(), 3);
-
-    let total: usize = state.received_proofs.iter().map(|e| *e.value()).sum();
-    assert_eq!(total, 22 + 20 + 25);
-}
-
-#[test]
-fn global_threshold_calculation() {
-    let _state = make_state(NodeRole::GlobalAggregator, 0);
-    // 100 total validators, 66% threshold = 66
-    let target = (100usize as f64 * 0.66) as usize;
-    assert_eq!(target, 66);
-}
-
-#[test]
 fn seq_counter_monotonic() {
     let state = make_state(NodeRole::Validator, 0);
     let a = state.next_seq();
@@ -182,11 +154,4 @@ fn signing_subnets_cover_every_colocated_validator() {
         state.signing_subnets().into_iter().collect::<Vec<_>>(),
         vec![0, 1, 3]
     );
-}
-
-#[test]
-fn global_aggregator_has_no_validators() {
-    let state = make_state(NodeRole::GlobalAggregator, 0);
-    assert!(state.validator_ids.is_empty());
-    assert!(state.signing_subnets().is_empty());
 }

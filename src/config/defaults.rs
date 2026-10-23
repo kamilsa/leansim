@@ -4,24 +4,12 @@ pub const fn default_signature_payload_bytes() -> usize {
     3072
 }
 
-pub const fn default_proof_payload_bytes() -> usize {
-    128 * 1024
-}
-
 pub const fn default_signature_aggregation_rate() -> u64 {
     1000
 }
 
-pub const fn default_global_aggregation_rate() -> u64 {
-    10
-}
-
 pub const fn default_local_threshold() -> f64 {
     0.9
-}
-
-pub const fn default_global_proof_target() -> f64 {
-    0.66
 }
 
 pub const fn default_burst_time_ms() -> u64 {

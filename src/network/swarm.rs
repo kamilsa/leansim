@@ -194,10 +194,6 @@ pub fn subscribe_to_topics(
         let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
         swarm.behaviour_mut().subscribe(&topic)?;
     }
-    if role == NodeRole::GlobalAggregator {
-        let agg_topic = IdentTopic::new(topics::aggregation_topic(run_id));
-        swarm.behaviour_mut().subscribe(&agg_topic)?;
-    }
     Ok(())
 }
 

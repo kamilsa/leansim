@@ -33,28 +33,11 @@ pub enum JsonlEvent {
         ts_ms: u64,
         byte_size: u64,
     },
+    /// A local aggregator finished its subnet proof (computed, not transmitted).
     LocalProofGenerated {
         node_id: u32,
         subnet_id: u32,
         sig_count: usize,
-        latency_ms: u64,
-        byte_size: u64,
-    },
-    LocalProofReceived {
-        node_id: u32,
-        from_id: u32,
-        #[serde(default)]
-        from_peer_id: String,
-        subnet_id: u32,
-        covered_sigs: usize,
-        duplicate: bool,
-        ts_ms: u64,
-        byte_size: u64,
-    },
-    GlobalProofCompleted {
-        node_id: u32,
-        total_sigs: usize,
-        proof_count: usize,
         latency_ms: u64,
     },
     NodeStats {
