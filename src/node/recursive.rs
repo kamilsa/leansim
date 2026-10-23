@@ -43,7 +43,6 @@ struct Pull {
 pub struct ProofExchange {
     duties: NodeDuties,
     proofs_per_child: usize,
-    #[allow(dead_code)]
     proof_time: Duration,
     /// Child proof → the seat whose group aggregates it.
     seat_of_child: HashMap<ProofId, usize>,
@@ -52,6 +51,10 @@ pub struct ProofExchange {
     /// (proof, host) pairs where the host already knows this host holds, or
     /// itself holds, the proof: never announce those.
     announced: HashSet<(ProofId, u32)>,
+    /// Seats whose recursive proof was started.
+    started: HashSet<usize>,
+    /// Recursive proofs computing: (due, seat).
+    pending: Vec<(Instant, usize)>,
 }
 
 impl ProofExchange {
@@ -76,6 +79,8 @@ impl ProofExchange {
             held: HashSet::new(),
             pulls: HashMap::new(),
             announced: HashSet::new(),
+            started: HashSet::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -160,8 +165,9 @@ impl ProofExchange {
     }
 
     /// Records `proof` as held and announces it to `targets` plus, when one of
-    /// this host's groups aggregates it, that group's other members.
-    fn hold(&mut self, proof: ProofId, mut targets: Vec<u32>, _now: Instant) -> Vec<Action> {
+    /// this host's groups aggregates it, that group's other members, and starts
+    /// the group's recursive proof once every child is held.
+    fn hold(&mut self, proof: ProofId, mut targets: Vec<u32>, now: Instant) -> Vec<Action> {
         if !self.held.insert(proof) {
             return Vec::new();
         }
@@ -175,6 +181,54 @@ impl ProofExchange {
                 actions.push(Action::Announce { to, proof });
             }
         }
+        if let Some(seat) = seat {
+            self.try_start(seat, now);
+        }
         actions
+    }
+
+    pub fn next_due(&self) -> Option<Instant> {
+        self.pending.iter().map(|(due, _)| *due).min()
+    }
+
+    /// Recursive proofs whose compute finished by `now`, earliest first.
+    pub fn take_due(&mut self, now: Instant) -> Vec<RecursiveProof> {
+        let (mut due, waiting): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|(at, _)| *at <= now);
+        self.pending = waiting;
+        due.sort_by_key(|&(at, seat)| {
+            (
+                at,
+                self.duties.seats[seat].layer,
+                self.duties.seats[seat].index,
+            )
+        });
+        due.into_iter()
+            .map(|(_, seat)| {
+                let duty = &self.duties.seats[seat];
+                RecursiveProof {
+                    proof: ProofId {
+                        layer: duty.layer,
+                        index: duty.index,
+                    },
+                    inputs: duty.children.len(),
+                    is_final: duty.is_final,
+                }
+            })
+            .collect()
+    }
+
+    /// Starts the seat's recursive proof, once, when every child is held.
+    fn try_start(&mut self, seat: usize, now: Instant) {
+        let duty = &self.duties.seats[seat];
+        let ready = duty.children.iter().all(|&child| {
+            self.held.contains(&ProofId {
+                layer: duty.layer - 1,
+                index: child,
+            })
+        });
+        if ready && self.started.insert(seat) {
+            self.pending.push((now + self.proof_time, seat));
+        }
     }
 }
