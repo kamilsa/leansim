@@ -145,6 +145,11 @@ def validate_experiment(config: dict) -> None:
             die("all_hosts must be a boolean")
         if node_map is None:
             die("all_hosts requires node_map")
+    if config.get("subscribe_to_duty_subnets") is not None:
+        if not isinstance(config["subscribe_to_duty_subnets"], bool):
+            die("subscribe_to_duty_subnets must be a boolean")
+        if node_map is None:
+            die("subscribe_to_duty_subnets requires node_map")
     if config.get("random_peer_count") is not None:
         if node_map is None:
             die("random_peer_count requires node_map")
@@ -515,20 +520,35 @@ def assign_nodes(experiment: dict) -> list[dict]:
 def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     """Ethereum-style assignment: hosts and validator co-location come from a
     nodes.csv node map; every node subscribes to subnet_subscriptions_per_node
-    random subnets, independent of the subnets its validators publish to; local
-    aggregators are promoted among the nodes subscribed to each subnet.
+    random subnets — plus, with subscribe_to_duty_subnets, the subnets its
+    validators publish in — and local aggregators are promoted among the nodes
+    subscribed to each subnet.
     """
     subnet_count = experiment["subnet_count"]
     subscriptions_per_node = as_int(experiment["subnet_subscriptions_per_node"], "subnet_subscriptions_per_node", minimum=1)
     if subscriptions_per_node > subnet_count:
         die(f"subnet_subscriptions_per_node {subscriptions_per_node} exceeds subnet_count {subnet_count}")
+    duty_subscriptions = experiment.get("subscribe_to_duty_subnets", False)
+    validators_per_subnet = experiment["validator_count"] // subnet_count
+
+    def subnet_of(validator: int) -> int:
+        # Mirrors Rust's subnet_for_validator clamp; divisibility is validated at
+        # launch, this guards direct assign_nodes calls with uneven splits.
+        return min(validator // validators_per_subnet, subnet_count - 1)
+
     hosts = place_nodes(experiment)
     rng = random.Random(experiment["geo_seed"] + 5)
 
     # Random gossip subscriptions, drawn per host so co-located validators share them.
+    # With subscribe_to_duty_subnets, a validator host also joins the subnets its
+    # validators publish in — their attestation duties — as beacon nodes on mainnet
+    # do; a host running many validators lands on proportionally more subnets.
     subscribed: list[set[int]] = []
     for host in hosts:
-        subscribed.append(set(rng.sample(range(subnet_count), subscriptions_per_node)))
+        subs = set(rng.sample(range(subnet_count), subscriptions_per_node))
+        if duty_subscriptions and host["validator_ids"]:
+            subs |= {subnet_of(validator) for validator in host["validator_ids"]}
+        subscribed.append(subs)
 
     # Local aggregators: for each subnet, promote hosts among its subscribers.
     aggregator_for: dict[int, int] = {}  # host index -> subnet it aggregates
@@ -552,7 +572,7 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     subnet_counter: Counter[int] = Counter()
     for index, host in enumerate(hosts):
         validator_ids = host["validator_ids"]
-        signing_subnets = sorted({validator // (experiment["validator_count"] // subnet_count) for validator in validator_ids})
+        signing_subnets = sorted({subnet_of(validator) for validator in validator_ids})
         role = "local_aggregator" if index in aggregator_for else ("relay" if not validator_ids else "validator")
         subscriptions = sorted(subscribed[index])
         subnet_id = aggregator_for.get(index, subscriptions[0] if subscriptions else 0)

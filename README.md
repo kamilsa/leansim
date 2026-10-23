@@ -143,9 +143,13 @@ Every node subscribes to `subnet_subscriptions_per_node` random subnets,
 independent of the subnets its validators publish to — as on Ethereum, a
 validator's attestations go to the subnet duty assigns, not the subnets its
 node is subscribed to. Publishing to a non-subscribed subnet works through
-gossipsub's fanout cache. Local aggregators are promoted from each subnet's
-subscribers, so an aggregator always collects a subnet it is subscribed to.
-With `node_map`, node ids are unrelated to validator ids.
+gossipsub's fanout cache. With `subscribe_to_duty_subnets = true`, validator
+hosts additionally subscribe to the subnets their validators publish in, so a
+node's subscription count scales with the validators it runs, as beacon nodes
+on mainnet (duty subnets plus the random gossip ones); relays keep the random
+ones only. Local aggregators are promoted from each subnet's subscribers, so
+an aggregator always collects a subnet it is subscribed to. With `node_map`,
+node ids are unrelated to validator ids.
 
 Gossipsub publication uses the normal mesh by default:
 
