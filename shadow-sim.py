@@ -872,15 +872,43 @@ def proof_peers(duty: dict) -> set[int]:
     return peers
 
 
-def mesh_warmup_ms(nodes: list[dict]) -> int:
+def log_recursive_summary(plan: dict, nodes: list[dict]) -> None:
+    groups = plan["groups"]
+    per_layer = Counter(group["layer"] for group in groups)
+    members = [len(group["members"]) for group in groups]
+    seated = [node for node in nodes if node.get("recursive_seats")]
+    peers = [len(proof_peers(duty)) for duty in plan["duties"].values()]
+    log(
+        f"recursive aggregation (arity {plan['arity']}): {len(groups)} groups in {len(per_layer)} layers "
+        f"({'/'.join(str(per_layer[layer]) for layer in sorted(per_layer))}); "
+        f"{sum(len(node['recursive_validator_ids']) for node in seated)} validators won {sum(members)} seats "
+        f"on {len(seated)} hosts; {min(members)}-{max(members)} members per group, "
+        f"up to {max((len(node['recursive_seats']) for node in seated), default=0)} seats per host, "
+        f"up to {max(peers, default=0)} proof peers per host"
+    )
+    empty = [f"{group['layer']}/{group['index']}" for group in groups if not group["members"]]
+    if empty:
+        log(f"WARNING: recursive groups without members (their parent groups never complete): {empty}")
+
+
+def mesh_warmup_ms(nodes: list[dict], plan: dict | None = None) -> int:
     """One mesh warmup for the whole run, so every host signs at the same time.
 
-    A node counts its dials as seed_addrs plus explicit peers (swarm::dial_seeds);
-    the busiest host decides. Per-host warmups let hosts past the dial threshold
-    start late and, with gossip validation on, swallow every message that
-    reached them while still warming up.
+    A node counts its dials as seed_addrs plus explicit peers plus the hosts its
+    proof duties announce to (swarm::dial_seeds); the busiest host decides.
+    Per-host warmups let hosts past the dial threshold start late and, with
+    gossip validation on, swallow every message that reached them while still
+    warming up.
     """
-    busiest = max((len(node["seed_addrs"]) + len(node["explicit_peer_addrs"]) for node in nodes), default=0)
+    duties = plan["duties"] if plan else {}
+    busiest = max(
+        (
+            len(node["seed_addrs"]) + len(node["explicit_peer_addrs"])
+            + len(proof_peers(duties.get(str(node.get("node_id")), {})))
+            for node in nodes
+        ),
+        default=0,
+    )
     return LONG_WARMUP_MS if busiest > WARMUP_DIAL_THRESHOLD else SHORT_WARMUP_MS
 
 
@@ -984,8 +1012,9 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
     shutil.rmtree(configs_dir, ignore_errors=True)
     configs_dir.mkdir()
     nodes = assign_nodes(experiment)
+    plan = build_aggregation_plan(nodes, experiment) if experiment.get("recursive_aggregation") else None
     if "mesh_warmup_ms" not in experiment:
-        experiment["mesh_warmup_ms"] = mesh_warmup_ms(nodes)
+        experiment["mesh_warmup_ms"] = mesh_warmup_ms(nodes, plan)
     log(f"mesh warmup {experiment['mesh_warmup_ms']} ms for every host")
     if experiment.get("node_map"):
         per_host = [len(node["validator_ids"]) for node in nodes if node["validator_ids"]]
@@ -1010,6 +1039,11 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
         )
         if empty:
             log(f"WARNING: committees without an aggregator (no local proof): {empty}")
+    plan_path = (output_dir / "aggregation-plan.json").resolve()
+    plan_path.unlink(missing_ok=True)
+    if plan is not None:
+        plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")
+        log_recursive_summary(plan, nodes)
     countries: list[str] | None = None
     latency: dict | None = None
     if experiment["use_geo_latency"]:
@@ -1022,22 +1056,22 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
         node["downlink_mbps"] = experiment["supernode_downlink_mbps"] if node["supernode"] else experiment["network_defaults"]["downlink_mbps"]
         config_path = (configs_dir / f"node_{node['node_id']}.toml").resolve()
         node["config_path"] = str(config_path)
-        write_toml(
-            config_path,
-            {
-                "node_id": node["node_id"],
-                "role": node["role"],
-                "subnet_id": node["subnet_id"],
-                "listen_addr": node["listen_addr"],
-                "seed_addrs": node["seed_addrs"],
-                "explicit_peer_addrs": node["explicit_peer_addrs"],
-                "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
-                "validator_ids": node["validator_ids"],
-                "subscribed_subnets": node.get("subscribed_subnets", []),
-                "aggregated_subnets": node.get("aggregated_subnets", []),
-                "experiment": experiment,
-            },
-        )
+        node_toml = {
+            "node_id": node["node_id"],
+            "role": node["role"],
+            "subnet_id": node["subnet_id"],
+            "listen_addr": node["listen_addr"],
+            "seed_addrs": node["seed_addrs"],
+            "explicit_peer_addrs": node["explicit_peer_addrs"],
+            "selected_aggregator_addrs": [nodes[node_id]["listen_addr"] for node_id in node["selected_aggregator_ids"]],
+            "validator_ids": node["validator_ids"],
+            "subscribed_subnets": node.get("subscribed_subnets", []),
+            "aggregated_subnets": node.get("aggregated_subnets", []),
+            "experiment": experiment,
+        }
+        if plan is not None and str(node["node_id"]) in plan["duties"]:
+            node_toml["aggregation_plan"] = str(plan_path)
+        write_toml(config_path, node_toml)
     write_topology(output_dir / "topology.gml", nodes, experiment, countries, latency)
     write_shadow_yaml(output_dir / "shadow.yaml", nodes, experiment, binary)
     manifest = {
@@ -1114,7 +1148,7 @@ def analyze(output_dir: Path, overlays: list[Path], *, serve: bool, append: bool
 def clean_output(output_dir: Path) -> None:
     for name in ("shadow.data", "configs"):
         shutil.rmtree(output_dir / name, ignore_errors=True)
-    for name in ("runs-history.json", "summary.html", "run-meta.json", "run-manifest.json"):
+    for name in ("runs-history.json", "summary.html", "run-meta.json", "run-manifest.json", "aggregation-plan.json"):
         (output_dir / name).unlink(missing_ok=True)
 
 
