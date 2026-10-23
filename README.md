@@ -4,8 +4,9 @@
 `rust-libp2p` QUIC and gossipsub nodes running in the
 [Shadow](https://shadow.github.io/) discrete-event network simulator.
 
-Validators publish signatures, local aggregators collect each subnet's
-threshold, and global aggregators combine local proofs. Experiments can model
+Validators publish signatures and local aggregators collect each subnet's
+threshold into a local proof (computed, not transmitted: global aggregation was
+removed and will be redesigned). Experiments can model
 uniform or country-based latency, supernode bandwidth, sparse network graphs,
 and gossipsub mesh settings.
 
@@ -81,10 +82,9 @@ multi-run campaign is retained in `runs-history.json` even though Shadow's raw
 logs are replaced on the next run.
 
 `validator_count` is the number of signing validators. In each subnet, the first
-`local_aggregators_per_subnet` validators also collect signatures and publish
-local proofs; they are not additional hosts. Global aggregators remain
-dedicated hosts, so total nodes equal `validator_count + global_aggregator_count`
-unless validators share hosts (see below).
+`local_aggregators_per_subnet` validators also collect signatures and compute
+local proofs; they are not additional hosts, so there are `validator_count`
+hosts unless validators share hosts (see below).
 
 The launcher validates experiment counts and thresholds before building. In
 particular, `validator_count` must be divisible by `subnet_count`.
@@ -194,7 +194,7 @@ reconstructing seeded geo or supernode assignments.
 ## Analysis
 
 The generated report contains signature-arrival CDFs, threshold timing,
-per-subnet local proof latency, global proof latency, duplicate traffic, and
+per-subnet local proof latency, duplicate traffic, and
 per-node byte/message counters. It has no web framework or npm dependency.
 
 Run the analyzer directly when needed:

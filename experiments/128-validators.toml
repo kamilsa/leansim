@@ -4,16 +4,12 @@ run_timeout_secs = 600
 validator_count = 512
 subnet_count = 1
 local_aggregators_per_subnet = 4
-global_aggregator_count = 1
 
 local_threshold = 0.95
-global_proof_target = 0.75
 burst_time_ms = 2000
 burst_jitter_ms = 100
 signature_aggregation_rate = 1000
-global_aggregation_rate = 10
 signature_payload_bytes = 1024
-proof_payload_bytes = 131072
 gossipsub_mesh_n_low = 4
 gossipsub_mesh_n = 6
 gossipsub_mesh_n_high = 12

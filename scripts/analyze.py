@@ -19,8 +19,6 @@ EVENT_NAMES = {
     "SigSent",
     "SigReceived",
     "LocalProofGenerated",
-    "LocalProofReceived",
-    "GlobalProofCompleted",
     "NodeStats",
 }
 
@@ -136,7 +134,6 @@ def build_snapshot(output_dir):
     received_by_node_subnet = defaultdict(dict)
     validator_arrivals = {}
     local_latencies = defaultdict(list)
-    global_latencies = []
     node_stats = {}
     total_bytes = 0
     total_sig_received = 0
@@ -214,10 +211,6 @@ def build_snapshot(output_dir):
                 if latency is not None and subnet_id is not None:
                     local_latencies[subnet_id].append(latency)
                     local_proofs.append((node_id, subnet_id, latency))
-            elif name == "GlobalProofCompleted":
-                latency = number(event.get("latency_ms"))
-                if latency is not None:
-                    global_latencies.append(latency)
             elif name == "NodeStats":
                 node_id = integer(event.get("node_id"))
                 if node_id is None:
@@ -331,7 +324,6 @@ def build_snapshot(output_dir):
             "signing_hosts": len(signing_hosts),
             "signature_arrival_ms": {"p50": arrival_at(50), "p90": arrival_at(90), "p95": arrival_at(95), "p99": arrival_at(99)},
             "local_proof_latency_ms_by_subnet": local_by_subnet,
-            "global_proof_latency_ms": latency_stats(global_latencies),
             "stage_medians_ms": {
                 "signatures_sent": median(sent_times),
                 "threshold_reached": median(threshold_times),
@@ -521,8 +513,7 @@ def self_test():
                 '{"event":"SigReceived","node_id":10,"from_id":0,"subnet_id":0,"duplicate":false,"ts_ms":130,"byte_size":20}',
                 '{"event":"SigReceived","node_id":10,"from_id":1,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":20}',
                 '{"event":"SigReceived","node_id":10,"from_id":0,"subnet_id":0,"duplicate":true,"ts_ms":155,"byte_size":20}',
-                '{"event":"LocalProofGenerated","node_id":10,"subnet_id":0,"sig_count":2,"latency_ms":170,"byte_size":50}',
-                '{"event":"GlobalProofCompleted","node_id":20,"total_sigs":2,"proof_count":1,"latency_ms":200}',
+                '{"event":"LocalProofGenerated","node_id":10,"subnet_id":0,"sig_count":2,"latency_ms":170}',
                 '{"event":"NodeStats","node_id":10,"bytes_sent":70,"bytes_received":60,"msgs_sent":2,"msgs_received":3}',
             )), encoding="utf-8")
             (directory / "run-meta.json").write_text(json.dumps({"runner": "test", "seed": seed, "run_index": run_index}), encoding="utf-8")
@@ -534,7 +525,8 @@ def self_test():
         primary = build_snapshot(primary_dir)
         overlay = build_snapshot(overlay_dir)
         metrics = primary["metrics"]
-        assert metrics["total_bytes"] == 130
+        # 2 sends x 10 + 3 receives x 20; local proofs are not transmitted.
+        assert metrics["total_bytes"] == 80
         assert metrics["unique_signature_events"] == 2
         assert metrics["duplicate_signature_events"] == 1
         assert metrics["unique_validators"] == 2
@@ -547,7 +539,7 @@ def self_test():
             '{"event":"SigSent","node_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
             '{"event":"SigSent","node_id":1,"subnet_id":0,"seq":0,"ts_ms":110,"byte_size":10}',
             '{"event":"SigReceived","node_id":0,"from_id":1,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":10}',
-            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":2,"latency_ms":170,"byte_size":50}',
+            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":2,"latency_ms":170}',
         )), encoding="utf-8")
         (overlay_dir / "run-manifest.json").write_text(
             json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8"
@@ -566,7 +558,7 @@ def self_test():
             '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":140,"byte_size":10}',
             '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":1,"subnet_id":0,"duplicate":false,"ts_ms":141,"byte_size":10}',
             '{"event":"SigReceived","node_id":0,"from_id":1,"validator_id":2,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":10}',
-            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":3,"latency_ms":170,"byte_size":50}',
+            '{"event":"LocalProofGenerated","node_id":0,"subnet_id":0,"sig_count":3,"latency_ms":170}',
         )), encoding="utf-8")
         (colocated_dir / "run-manifest.json").write_text(
             json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8"
