@@ -687,6 +687,15 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
     else:
         duties = select_subscriber_aggregators(subscribed, experiment, rng)
 
+    # Recursive seats: host index -> its [layer, group] seats and the validators that won them.
+    seats_by_host: defaultdict[int, list[list[int]]] = defaultdict(list)
+    seat_validators: defaultdict[int, list[int]] = defaultdict(list)
+    if experiment.get("recursive_aggregation"):
+        for group in select_recursive_seats(hosts, experiment):
+            for index, validators in group["seats"].items():
+                seats_by_host[index].append([group["layer"], group["index"]])
+                seat_validators[index].extend(validators)
+
     nodes: list[dict] = []
     subnet_counter: Counter[int] = Counter()
     for index, host in enumerate(hosts):
@@ -707,6 +716,8 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
             "subscribed_subnets": sorted(subscribed[index] | set(aggregated)),
             "aggregated_subnets": aggregated,
             "aggregator_validator_ids": sorted(v for validators in host_duties.values() for v in validators),
+            "recursive_seats": seats_by_host.get(index, []),
+            "recursive_validator_ids": sorted(seat_validators.get(index, [])),
             "source_node_type": "no_validator" if host["no_validator"] else "validator",
         }
         subnet_counter[subnet_id] += 1
