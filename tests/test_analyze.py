@@ -127,7 +127,11 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(self.metrics["subnet_hosts"], {
             0: {"classes": {"supernode": 1, "regular": 1, "unknown": 0},
                 "countries": [{"country": "finland", "supernode": 1, "regular": 0, "unknown": 0, "validators": 3},
-                              {"country": "germany", "supernode": 0, "regular": 1, "unknown": 0, "validators": 1}]}})
+                              {"country": "germany", "supernode": 0, "regular": 1, "unknown": 0, "validators": 1}],
+                "aggregators": [{"node": 0, "country": "finland", "class": "supernode",
+                                 "uplink_mbps": 1000, "downlink_mbps": 1000, "validators": 3}],
+                "aggregator_countries": [{"country": "finland", "supernode": 1, "regular": 0, "unknown": 0,
+                                          "validators": 3}]}})
         self.assertEqual(self.metrics["signature_cdf_by_subnet"], {
             0: {"first_seen": [[50, 25.0], [100, 50.0], [200, 75.0], [300, 100.0]],
                 "supernode": [[50, 100.0]],

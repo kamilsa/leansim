@@ -149,27 +149,39 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
     return rows
 
 
+def country_rows(hosts):
+    """Hosts per country split by class, plus the validators they run; most hosts first."""
+    countries = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
+    for host in hosts:
+        country = countries[host.get("country") or "unknown"]
+        country[node_class(host)] += 1
+        country["validators"] += len(host.get("validator_ids") or [])
+    return sorted(
+        ({"country": name, **totals} for name, totals in countries.items()),
+        key=lambda row: (-(row["supernode"] + row["regular"] + row["unknown"]), row["country"]),
+    )
+
+
 def subnet_host_summary(hosts):
-    """Per subnet, the classes and countries of the hosts subscribed to it."""
-    subnets = sorted({subnet for host in hosts.values() for subnet in host.get("subscribed_subnets") or []})
+    """Per subnet, the classes and countries of the hosts subscribed to it, and
+    the hosts that aggregate it (manifest aggregated_subnets)."""
+    subnets = sorted({subnet for host in hosts.values()
+                      for subnet in (host.get("subscribed_subnets") or []) + (host.get("aggregated_subnets") or [])})
     summary = {}
     for subnet_id in subnets:
-        classes = defaultdict(int)
-        countries = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
-        for host in hosts.values():
-            if subnet_id not in (host.get("subscribed_subnets") or []):
-                continue
-            kind = node_class(host)
-            classes[kind] += 1
-            country = countries[host.get("country") or "unknown"]
-            country[kind] += 1
-            country["validators"] += len(host.get("validator_ids") or [])
+        subscribers = [host for host in hosts.values() if subnet_id in (host.get("subscribed_subnets") or [])]
+        aggregators = [hosts[node_id] for node_id in sorted(hosts)
+                       if subnet_id in (hosts[node_id].get("aggregated_subnets") or [])]
+        classes = Counter(node_class(host) for host in subscribers)
         summary[subnet_id] = {
             "classes": {kind: classes[kind] for kind in NODE_CLASSES},
-            "countries": sorted(
-                ({"country": name, **totals} for name, totals in countries.items()),
-                key=lambda row: (-(row["supernode"] + row["regular"] + row["unknown"]), row["country"]),
-            ),
+            "countries": country_rows(subscribers),
+            "aggregators": [{
+                "node": host["node_id"], "country": host.get("country"), "class": node_class(host),
+                "uplink_mbps": host.get("uplink_mbps"), "downlink_mbps": host.get("downlink_mbps"),
+                "validators": len(host.get("validator_ids") or []),
+            } for host in aggregators],
+            "aggregator_countries": country_rows(aggregators),
         }
     return summary
 

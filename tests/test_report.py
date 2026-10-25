@@ -304,6 +304,26 @@ class PageTests(unittest.TestCase):
         for figure_id in data["figures"]:
             self.assertTrue(f'id="{figure_id}"' in page, f"figure {figure_id} needs a chart div with that id")
         self.assertTrue('id="subnet-subscribers" style="height:162px"' in page, "the div must fit the figure height")
+        self.assertIn("subnet-aggregators", data["figures"])
+        self.assertTrue("1 host aggregates this subnet: 1 supernode, 0 regular nodes, in 1 country." in page,
+                        "the aggregator caption counts hosts by class and country")
+        self.assertTrue('<tr><td>0</td><td>Finland</td><td><span class="swatch" style="background:#2a78d6"></span>Supernode</td>'
+                        '<td>1,000 Mbps</td><td>1,000 Mbps</td><td>3</td><td>1.00 s</td></tr>' in page,
+                        "one table row per aggregator with its subnet proof time")
+
+    def test_aggregator_table_orders_by_proof_time_and_links_logged_hosts(self) -> None:
+        info = {"aggregators": [
+            {"node": 4, "country": "japan", "class": "regular", "uplink_mbps": 50, "downlink_mbps": 100, "validators": 1},
+            {"node": 7, "country": "germany", "class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000, "validators": 12},
+            {"node": 9, "country": None, "class": "unknown", "uplink_mbps": None, "downlink_mbps": None, "validators": 0},
+        ]}
+        row = {"proofs": [[1500, 7, "supernode"], [2250, 4, "regular"]]}
+        table = report.aggregator_table(info, row, logged={"4"})
+        self.assertLess(table.index("<td>7</td>"), table.index('<a href="traffic-4.html">4</a>'))
+        self.assertLess(table.index('<a href="traffic-4.html">4</a>'), table.index("<td>9</td>"),
+                        "aggregators without a subnet proof go last")
+        self.assertTrue("<td>2.25 s</td>" in table and "<td>Unknown</td>" in table and "<td>–</td>" in table)
+        self.assertEqual(report.aggregator_table({}, row, logged=set()), "")
 
     def test_subnet_page_survives_a_json_round_trip(self) -> None:
         snapshot = json.loads(json.dumps(fixture_snapshot(Path(self.temporary.name) / "json-round-trip")))

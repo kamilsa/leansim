@@ -7,6 +7,7 @@ is inlined and the data is embedded as JSON, so nothing loads from the network.
 
 import html
 import json
+from collections import Counter
 from pathlib import Path
 from string import Template
 
@@ -17,6 +18,7 @@ CLASS_STYLE = {
     "regular": ("Regular nodes", "regular node", "#e34948"),
     "unknown": ("Unclassified", "unclassified", "#898781"),
 }
+SINGULAR_LABEL = {kind: singular.capitalize() for kind, (_, singular, _) in CLASS_STYLE.items()}
 # Peers listed in a traffic page's peer table.
 PEER_ROWS = 15
 
@@ -227,6 +229,57 @@ def subscribers_figure(info):
     return countries_figure({"countries": info["countries"]})
 
 
+def plural(number, singular, many=None):
+    return f"{number:,} {singular if number == 1 else many or singular + 's'}"
+
+
+def aggregator_table(info, row, logged):
+    """One row per aggregator of a subnet, ordered by when it finished the subnet proof
+    (aggregators without one last); node ids link to traffic pages when logged."""
+    aggregators = info.get("aggregators") or []
+    if not aggregators:
+        return ""
+    proof_ms = {node_id: time_ms for time_ms, node_id, _ in (row or {}).get("proofs") or []}
+    ordered = sorted(aggregators, key=lambda host: (host["node"] not in proof_ms, proof_ms.get(host["node"], 0), host["node"]))
+    rows = []
+    for host in ordered:
+        _, _, color = CLASS_STYLE.get(host["class"], CLASS_STYLE["unknown"])
+        node = str(host["node"])
+        cell = f'<a href="traffic-{node}.html">{node}</a>' if node in logged else node
+        finished = f'{proof_ms[host["node"]] / 1000:.2f} s' if host["node"] in proof_ms else "–"
+        rows.append(
+            f'<tr><td>{cell}</td><td>{html.escape((host.get("country") or "unknown").title())}</td>'
+            f'<td><span class="swatch" style="background:{color}"></span>{SINGULAR_LABEL[host["class"]]}</td>'
+            f'<td>{count(host.get("uplink_mbps"))} Mbps</td><td>{count(host.get("downlink_mbps"))} Mbps</td>'
+            f'<td>{count(host["validators"])}</td><td>{finished}</td></tr>'
+        )
+    return ('<div class="table-scroll"><table class="aggregators"><thead><tr><th>Node</th><th>Country</th><th>Class</th>'
+            '<th>Uplink</th><th>Downlink</th><th>Validators</th><th>Subnet proof</th></tr></thead><tbody>'
+            + "".join(rows) + "</tbody></table></div>")
+
+
+def aggregator_section(info, row, logged, height):
+    """Where this subnet's aggregators are and what kind of host they are."""
+    aggregators = info.get("aggregators") or []
+    if not aggregators:
+        return ""
+    classes = Counter(host["class"] for host in aggregators)
+    split = [plural(classes["supernode"], "supernode"), plural(classes["regular"], "regular node")]
+    if classes["unknown"]:
+        split.append(f'{classes["unknown"]:,} unclassified')
+    countries = len(info.get("aggregator_countries") or [])
+    verb = "aggregates" if len(aggregators) == 1 else "aggregate"
+    return (
+        '<section aria-labelledby="aggregators-heading"><h2 id="aggregators-heading">Aggregators</h2>'
+        f'<p class="caption">{plural(len(aggregators), "host")} {verb} this subnet: {", ".join(split)}, '
+        f'in {plural(countries, "country", "countries")}. The chart shows aggregators per country (stacked by host class) '
+        'and the validators they run. The table lists each aggregator, earliest subnet proof first; times are after the first '
+        'signature was sent.</p>'
+        f'<div class="chart" id="subnet-aggregators" style="height:{height}px"></div>'
+        + aggregator_table(info, row, logged) + "</section>"
+    )
+
+
 def subnet_info(metrics, subnet_id):
     """Subscriber info for one subnet; keys may be strings after a JSON round-trip."""
     hosts = metrics.get("subnet_hosts") or {}
@@ -238,10 +291,13 @@ def subnet_page_figures(metrics, subnet_id):
     info = subnet_info(metrics, subnet_id)
     by_subnet = metrics.get("signature_cdf_by_subnet") or {}
     lines = by_subnet.get(subnet_id) or by_subnet.get(str(subnet_id)) or {}
-    return {
+    figures = {
         "subnet-cdf": cdf_figure_for(lines),
         "subnet-subscribers": subscribers_figure(info),
     }
+    if info.get("aggregators"):
+        figures["subnet-aggregators"] = countries_figure({"countries": info["aggregator_countries"]})
+    return figures
 
 
 PAGE_CSS = r"""
@@ -276,6 +332,7 @@ section { margin: 0 0 44px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
 th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .arrivals td:nth-child(2), .arrivals th:nth-child(2) { text-align: left; }
+.aggregators td:nth-child(-n+3), .aggregators th:nth-child(-n+3) { text-align: left; }
 .table-scroll { overflow-x: auto; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
 .previews { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
@@ -639,6 +696,7 @@ SUBNET_TEMPLATE = Template("""<!doctype html>
 <section aria-labelledby="propagation-heading"><h2 id="propagation-heading">Signature propagation in subnet $subnet</h2>
 <p class="caption">Delivery of this subnet's signatures to the hosts that received them. <b>First seen</b> is the first arrival of each signature on any host; the other lines are the first arrival on a host of each class. t = 0 is the first signature sent in the run.</p>
 <div class="chart tall" id="subnet-cdf" role="img" aria-label="CDF of signature delivery in this subnet"></div></section>
+$aggregators
 <section aria-labelledby="subscribers-heading"><h2 id="subscribers-heading">Subscribed hosts</h2>
 <p class="caption">Hosts subscribed to this subnet by country (stacked by host class), with the validators they run. The left bars are hosts, the right bars validators.</p>
 <div class="chart" id="subnet-subscribers" style="height:${subscribers_height}px"></div></section>
@@ -721,6 +779,7 @@ def generate_subnet_html(snapshot, directory, plotly_js):
     if not rows:
         return
     run = Path(snapshot.get("output_dir", "")).name
+    logged = {str(node_id) for node_id in metrics.get("traffic") or {}}
     for row in rows:
         subnet_id = row["subnet"]
         info = subnet_info(metrics, subnet_id)
@@ -738,6 +797,8 @@ def generate_subnet_html(snapshot, directory, plotly_js):
             facts=html.escape(" · ".join(facts)),
             run=html.escape(run),
             subscribers_height=figures["subnet-subscribers"]["layout"]["height"],
+            aggregators=aggregator_section(info, row, logged,
+                                           figures.get("subnet-aggregators", {}).get("layout", {}).get("height")),
             data=json_data({"subnet": subnet_id, "info": info, "figures": figures}),
             plotly=plotly_js,
             common=COMMON_JS,
