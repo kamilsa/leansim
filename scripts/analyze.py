@@ -103,6 +103,21 @@ def frequency_cdf(counts, limit=MAX_CDF_POINTS):
     return points
 
 
+def manifest_hosts(manifest):
+    """Manifest node records by node id; empty when the manifest has no node list."""
+    nodes = manifest.get("nodes")
+    if not isinstance(nodes, list):
+        return {}
+    return {node["node_id"]: node for node in nodes if isinstance(node, dict) and isinstance(node.get("node_id"), int)}
+
+
+def node_class(host):
+    """'supernode' or 'regular' from the manifest flag; 'unknown' without one."""
+    if not host or not isinstance(host.get("supernode"), bool):
+        return "unknown"
+    return "supernode" if host["supernode"] else "regular"
+
+
 def json_data(value):
     """Serialize data safely for an application/json script element."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c").replace(

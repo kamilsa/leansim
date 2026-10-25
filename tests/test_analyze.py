@@ -31,5 +31,13 @@ class FrequencyTests(unittest.TestCase):
         self.assertEqual(points[-1], [999, 100.0])
 
 
+class NodeClassTests(unittest.TestCase):
+    def test_classes_follow_the_manifest_flag(self) -> None:
+        self.assertEqual(analyze.node_class({"supernode": True}), "supernode")
+        self.assertEqual(analyze.node_class({"supernode": False}), "regular")
+        self.assertEqual(analyze.node_class({"node_id": 4}), "unknown")
+        self.assertEqual(analyze.node_class(None), "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()
