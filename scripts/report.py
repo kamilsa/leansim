@@ -160,6 +160,7 @@ h3 { font-size: 16px; font-weight: 600; margin: 0 0 2px; }
 .facts { color: var(--ink-2); margin: 0; }
 section { margin: 0 0 44px; }
 .caption { color: var(--ink-2); font-size: 14px; margin: 0 0 12px; max-width: 860px; }
+.caption-list { padding-left: 20px; } .caption-list li { margin: 2px 0; } .caption-list b { color: var(--ink); font-weight: 600; }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 44px; }
 .kpi { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px; }
 .kpi .label, .kpi .note { display: block; color: var(--ink-2); font-size: 13px; } .kpi .note { color: var(--muted); }
@@ -387,7 +388,12 @@ $network
 <p class="caption">Share of signatures received by time t. The dotted line counts each validator's signature once, when the first host saw it. The solid lines count every delivery to a host of that class. Hosts receive only the subnets they subscribe to.</p>
 <div class="chart" id="cdf"></div></section>
 <section aria-labelledby="arrivals"><h2 id="arrivals">Arrival times across hosts</h2>
-<p class="caption">When hosts first held each message. Whiskers span p5 to p95, the box p25 to p75, the line is the median. Signatures count once per receiving host and validator. Proofs count once per host and proof, whether the host built it or fetched it.</p>
+<p class="caption">Each row shows, across hosts, when a host first held a message. Whiskers span p5 to p95, the box p25 to p75, and the line is the median.</p>
+<ul class="caption caption-list">
+<li><b>Signatures:</b> one sample per receiving host and validator, at the first copy the host received.</li>
+<li><b>Subnet proofs and layer proofs:</b> one sample per host and proof, at the moment the host finished building it or finished fetching it, whichever came first.</li>
+<li><b>Final proof:</b> one sample per root-group member, at the moment it finished building the final proof. No host fetches the final proof, so this row is not when the root members received their input proofs; those fetches are in the row of the layer below.</li>
+</ul>
 <div class="chart" id="arrival" style="height:${arrival_height}px"></div>
 <div class="table-scroll">$arrival_table</div></section>
 $previews

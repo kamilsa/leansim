@@ -186,6 +186,12 @@ class PageTests(unittest.TestCase):
         self.assertNotIn("history-body", self.summary, "the summary shows the primary run only")
         self.assertIn("Supernodes are hosts running at least 2 validators.", self.summary)
 
+    def test_arrival_caption_says_what_each_row_measures(self) -> None:
+        caption = self.summary.split('id="arrivals"', 1)[1].split('id="arrival"', 1)[0]
+        self.assertIn("finished building the final proof", caption)
+        self.assertIn("not when the root members received their input proofs", caption)
+        self.assertIn("finished building it or finished fetching it", caption)
+
     def test_summary_embeds_figures_and_previews(self) -> None:
         data = embedded(self.summary, "report-data")
         self.assertEqual(set(data["figures"]), {"cdf", "arrival", "validators", "countries"})
