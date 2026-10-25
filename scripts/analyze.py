@@ -7,7 +7,7 @@ import json
 import math
 import shutil
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -116,6 +116,37 @@ def node_class(host):
     if not host or not isinstance(host.get("supernode"), bool):
         return "unknown"
     return "supernode" if host["supernode"] else "regular"
+
+
+def proof_label(layer, final_layer):
+    if layer == 0:
+        return "Subnet proofs"
+    if layer == final_layer:
+        return "Final proof"
+    return f"Layer {layer} proofs"
+
+
+def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
+    """Box-plot rows: per message and host class, the spread of the times
+    (ms after t0) at which hosts first held it. Signatures count once per
+    (receiving host, validator); proofs once per (host, proof), whether the
+    host built the proof or fetched it."""
+    rows = []
+
+    def add(message, counts_by_class):
+        for kind in NODE_CLASSES:
+            stats = frequency_percentiles(counts_by_class.get(kind, {}))
+            if stats:
+                rows.append({"message": message, "class": kind, **stats})
+
+    add("Signatures", signature_counts)
+    for layer in sorted(proof_held):
+        counts = defaultdict(Counter)
+        for held in proof_held[layer].values():
+            for node_id, time_ms in held.items():
+                counts[node_class(hosts.get(node_id))][time_ms - t0] += 1
+        add(proof_label(layer, final_layer), counts)
+    return rows
 
 
 def json_data(value):
@@ -293,6 +324,17 @@ def build_snapshot(output_dir):
     }
     traffic_buckets = defaultdict(dict)
     traffic_peers = defaultdict(dict)
+    # layer -> proof index -> node id -> first time the host held that proof.
+    proof_held = defaultdict(lambda: defaultdict(dict))
+    final_layer = None
+
+    def hold(layer, index, node_id, time_ms):
+        if layer is None or index is None or node_id is None or time_ms is None:
+            return
+        held = proof_held[layer][index]
+        if node_id not in held or time_ms < held[node_id]:
+            held[node_id] = time_ms
+
     for path in event_files(output_dir):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -360,11 +402,13 @@ def build_snapshot(output_dir):
                 if latency is not None and subnet_id is not None:
                     local_latencies[subnet_id].append(latency)
                     local_proofs.append((node_id, subnet_id, latency))
+                    hold(0, subnet_id, node_id, latency)
             elif name == "ProofAnnounced":
                 proof_traffic["announcements"] += 1
             elif name == "ProofRequested":
                 proof_traffic["pulls"] += 1
             elif name == "ProofFetched":
+                hold(integer(event.get("layer")), integer(event.get("index")), integer(event.get("node_id")), number(event.get("ts_ms")))
                 proof_traffic["proofs_fetched"] += 1
                 if event.get("duplicate") is True:
                     proof_traffic["extra_proofs_fetched"] += 1
@@ -381,8 +425,10 @@ def build_snapshot(output_dir):
                 timestamp = number(event.get("ts_ms"))
                 if layer_id is not None and group_index is not None and timestamp is not None:
                     recursive_done[(layer_id, group_index)].append(timestamp)
+                    hold(layer_id, group_index, integer(event.get("node_id")), timestamp)
                     if event.get("is_final") is True:
                         final_times.append(timestamp)
+                        final_layer = layer_id
             elif name == "TrafficBucket":
                 node_id = integer(event.get("node_id"))
                 start_ms = integer(event.get("start_ms"))
@@ -501,6 +547,20 @@ def build_snapshot(output_dir):
     unique_validators = len(arrival_times)
     ratio = duplicate_sigs / unique_receive_events if unique_receive_events else 0.0
 
+    manifest = read_json(output_dir / "run-manifest.json")
+    hosts = manifest_hosts(manifest)
+    # Every chart in summary.html measures time from the first signature sent.
+    t0 = min(sent_times) if sent_times else 0
+    signature_counts = defaultdict(Counter)
+    for (node_id, _), seen in received_by_node_subnet.items():
+        counter = signature_counts[node_class(hosts.get(node_id))]
+        for time_ms in seen.values():
+            counter[time_ms - t0] += 1
+    signature_cdf = {"first_seen": frequency_cdf(Counter(time_ms - t0 for time_ms in arrival_times))}
+    for kind in NODE_CLASSES:
+        if signature_counts.get(kind):
+            signature_cdf[kind] = frequency_cdf(signature_counts[kind])
+
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -529,6 +589,9 @@ def build_snapshot(output_dir):
             "node_threshold_ms": node_threshold,
             "recursive_aggregation": recursive_summary(output_dir, recursive_done, final_times, proof_traffic, local_latencies),
             "traffic": traffic_summary(traffic_buckets, traffic_peers, peer_ids),
+            "t0_ms": t0,
+            "signature_cdf": signature_cdf,
+            "arrivals": arrival_rows(signature_counts, proof_held, final_layer, t0, hosts),
         },
         "cdf": cdf,
         "node_stats": nodes,
