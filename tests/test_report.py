@@ -43,6 +43,23 @@ class FigureTests(unittest.TestCase):
         self.assertEqual(report.host_facts(card), "Finland · supernode · ↑ 1,000 / ↓ 1,000 Mbps · 3 validators · local aggregator")
         self.assertEqual(report.host_facts(None), "No manifest entry for this host")
 
+    def test_cdf_has_first_seen_and_one_line_per_class(self) -> None:
+        figure = report.cdf_figure(self.metrics)
+        self.assertEqual([trace["name"] for trace in figure["data"]],
+                         ["First seen by any host", "Delivered to supernodes", "Delivered to regular nodes"])
+        self.assertEqual(figure["data"][2]["x"], [0.1, 0.2, 0.3, 0.4])
+        self.assertEqual(figure["data"][2]["y"], [25.0, 50.0, 75.0, 100.0])
+
+    def test_arrival_boxes_use_precomputed_percentiles_in_seconds(self) -> None:
+        figure = report.arrival_figure(self.metrics)
+        supernodes, regular = figure["data"]
+        self.assertEqual((supernodes["name"], regular["name"]), ("Supernodes", "Regular nodes"))
+        self.assertEqual(regular["y"], ["Signatures", "Subnet proofs", "Final proof"])
+        self.assertEqual(regular["lowerfence"], [0.1, 1.3, 2.0])
+        self.assertEqual(regular["median"], [0.2, 1.3, 2.0])
+        self.assertEqual(regular["upperfence"], [0.4, 1.3, 2.0])
+        self.assertEqual(figure["layout"]["yaxis"]["categoryarray"], ["Signatures", "Subnet proofs", "Final proof"])
+
 
 if __name__ == "__main__":
     unittest.main()

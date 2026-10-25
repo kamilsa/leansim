@@ -53,3 +53,51 @@ def host_facts(card):
     if card.get("role"):
         parts.append(card["role"].replace("_", " "))
     return " · ".join(parts)
+
+
+def cdf_figure(metrics):
+    """Signature propagation: first sighting anywhere, and delivery to each host class."""
+    lines = metrics.get("signature_cdf") or {}
+    series = [("first_seen", "First seen by any host", "#0b0b0b", "dot")]
+    series += [(kind, "Delivered to " + label.lower(), color, "solid") for kind, (label, _, color) in CLASS_STYLE.items()]
+    data = []
+    for key, name, color, dash in series:
+        points = lines.get(key) or []
+        if points:
+            data.append({
+                "type": "scatter", "mode": "lines", "name": name,
+                "x": [point[0] / 1000 for point in points], "y": [point[1] for point in points],
+                "line": {"color": color, "width": 2.5, "dash": dash},
+                "hovertemplate": "%{y:.1f}% by %{x:.3f} s<extra>" + name + "</extra>",
+            })
+    return {"data": data, "layout": {
+        "xaxis": {"title": {"text": "time after the first signature was sent (s)"}, "rangemode": "tozero"},
+        "yaxis": {"title": {"text": "signatures"}, "range": [0, 101], "ticksuffix": "%"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.12},
+    }}
+
+
+def arrival_figure(metrics):
+    """Slide-8 style boxes: p5–p95 whiskers, p25–p75 box, median line, per message and host class."""
+    rows = metrics.get("arrivals") or []
+    data = []
+    for kind, (label, _, color) in CLASS_STYLE.items():
+        own = [row for row in rows if row["class"] == kind]
+        if not own:
+            continue
+        data.append({
+            "type": "box", "orientation": "h", "name": label, "y": [row["message"] for row in own],
+            "lowerfence": [row["p5"] / 1000 for row in own], "q1": [row["p25"] / 1000 for row in own],
+            "median": [row["p50"] / 1000 for row in own], "q3": [row["p75"] / 1000 for row in own],
+            "upperfence": [row["p95"] / 1000 for row in own],
+            "marker": {"color": color}, "line": {"color": color, "width": 1.5}, "fillcolor": color + "40",
+            "hoverinfo": "skip",
+        })
+    messages = list(dict.fromkeys(row["message"] for row in rows))
+    return {"data": data, "layout": {
+        "boxmode": "group", "boxgroupgap": 0.25, "boxgap": 0.2,
+        "xaxis": {"title": {"text": "time after the first signature was sent (s)"}, "rangemode": "tozero"},
+        "yaxis": {"categoryorder": "array", "categoryarray": messages, "autorange": "reversed"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.1},
+        "margin": {"l": 120},
+    }}
