@@ -239,8 +239,8 @@ def subnet_page_figures(metrics, subnet_id):
     by_subnet = metrics.get("signature_cdf_by_subnet") or {}
     lines = by_subnet.get(subnet_id) or by_subnet.get(str(subnet_id)) or {}
     return {
-        "cdf": cdf_figure_for(lines),
-        "subscribers": subscribers_figure(info),
+        "subnet-cdf": cdf_figure_for(lines),
+        "subnet-subscribers": subscribers_figure(info),
     }
 
 
@@ -641,7 +641,7 @@ SUBNET_TEMPLATE = Template("""<!doctype html>
 <div class="chart tall" id="subnet-cdf" role="img" aria-label="CDF of signature delivery in this subnet"></div></section>
 <section aria-labelledby="subscribers-heading"><h2 id="subscribers-heading">Subscribed hosts</h2>
 <p class="caption">Hosts subscribed to this subnet by country (stacked by host class), with the validators they run. The left bars are hosts, the right bars validators.</p>
-<div class="chart" id="subnet-subscribers"></div></section>
+<div class="chart" id="subnet-subscribers" style="height:${subscribers_height}px"></div></section>
 </main><script id="subnet-data" type="application/json">$data</script><script>$plotly</script><script>$common</script><script>$script</script></body></html>
 """)
 
@@ -731,12 +731,14 @@ def generate_subnet_html(snapshot, directory, plotly_js):
             f"{count(validators)} validators on them",
             f"{count(row['count'])} subnet aggregator" + ("s" if row["count"] != 1 else ""),
         ]
+        figures = subnet_page_figures(metrics, subnet_id)
         document = SUBNET_TEMPLATE.substitute(
             subnet=subnet_id,
             css=PAGE_CSS,
             facts=html.escape(" · ".join(facts)),
             run=html.escape(run),
-            data=json_data({"subnet": subnet_id, "info": info, "figures": subnet_page_figures(metrics, subnet_id)}),
+            subscribers_height=figures["subnet-subscribers"]["layout"]["height"],
+            data=json_data({"subnet": subnet_id, "info": info, "figures": figures}),
             plotly=plotly_js,
             common=COMMON_JS,
             script=SUBNET_JS,

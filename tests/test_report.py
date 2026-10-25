@@ -301,6 +301,9 @@ class PageTests(unittest.TestCase):
         self.assertEqual(data["info"]["classes"], {"supernode": 1, "regular": 1, "unknown": 0})
         self.assertEqual(data["info"]["countries"][0]["country"], "finland")
         self.assertIn("subnet-subscribers", page)
+        for figure_id in data["figures"]:
+            self.assertTrue(f'id="{figure_id}"' in page, f"figure {figure_id} needs a chart div with that id")
+        self.assertTrue('id="subnet-subscribers" style="height:162px"' in page, "the div must fit the figure height")
 
     def test_subnet_page_survives_a_json_round_trip(self) -> None:
         snapshot = json.loads(json.dumps(fixture_snapshot(Path(self.temporary.name) / "json-round-trip")))
@@ -311,7 +314,7 @@ class PageTests(unittest.TestCase):
             page = (output.parent / "subnet-0.html").read_text(encoding="utf-8")
         data = embedded(page, "subnet-data")
         self.assertEqual(data["info"]["classes"], {"supernode": 1, "regular": 1, "unknown": 0})
-        self.assertEqual(len(data["figures"]["cdf"]["data"]), 3)
+        self.assertEqual(len(data["figures"]["subnet-cdf"]["data"]), 3)
 
     def test_subnet_labels_open_subnet_pages(self) -> None:
         self.assertIn("#subnet-proofs .ytick text { pointer-events: all; cursor: pointer; }", self.summary,
