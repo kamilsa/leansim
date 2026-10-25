@@ -144,3 +144,163 @@ def countries_figure(population):
         "legend": {"orientation": "h", "x": 0, "y": 1.06, "traceorder": "normal"},
         "margin": {"l": 120},
     }}
+
+
+PAGE_CSS = """
+:root { color-scheme: light; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --link: #2a78d6; --font: system-ui, -apple-system, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #ffffff; color: var(--ink); font: 15px/1.5 var(--font); }
+main { max-width: 1200px; margin: 0 auto; padding: 40px 40px 56px; }
+a { color: var(--link); text-decoration: none; } a:hover { text-decoration: underline; }
+header.page { border-bottom: 1px solid var(--grid); padding-bottom: 20px; margin-bottom: 28px; }
+.eyebrow { color: var(--muted); font-size: 13px; margin: 0 0 4px; overflow-wrap: anywhere; }
+h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 6px; overflow-wrap: anywhere; }
+h2 { font-size: 21px; font-weight: 650; margin: 0 0 4px; }
+h3 { font-size: 16px; font-weight: 600; margin: 0 0 2px; }
+.facts { color: var(--ink-2); margin: 0; }
+section { margin: 0 0 44px; }
+.caption { color: var(--ink-2); font-size: 14px; margin: 0 0 12px; max-width: 860px; }
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 44px; }
+.kpi { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px; }
+.kpi .label, .kpi .note { display: block; color: var(--ink-2); font-size: 13px; } .kpi .note { color: var(--muted); }
+.kpi b { display: block; font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.chart { width: 100%; height: 380px; } .chart.tall { height: 460px; }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; align-items: start; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
+th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .arrivals td:nth-child(2), .arrivals th:nth-child(2) { text-align: left; }
+.table-scroll { overflow-x: auto; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
+.previews { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
+.preview { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px 10px; }
+.preview .meta { color: var(--ink-2); font-size: 13px; margin: 0; }
+.preview .totals { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+.mini { width: 100%; height: 150px; margin-top: 8px; }
+.host-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink-2); font-size: 14px; margin: 0 0 24px; }
+.host-strip a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.stage-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.toggle { color: var(--ink-2); font-size: 14px; cursor: pointer; white-space: nowrap; } .toggle input { margin: 0 6px 0 0; }
+.readouts { color: var(--ink-2); margin: 0 0 4px; } .readouts b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.peer-ledger td:first-child { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.mix { display: flex; height: 6px; min-width: 90px; border-radius: 3px; background: var(--grid); overflow: hidden; } .mix i { height: 100%; }
+.mix .out { background: #52514e; } .mix .in { background: #c3c2b7; }
+details summary { cursor: pointer; font-weight: 600; } details p { color: var(--ink-2); max-width: 860px; }
+footer.page { border-top: 1px solid var(--grid); padding-top: 14px; color: var(--muted); font-size: 13px; }
+@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis { grid-template-columns: 1fr 1fr; } .two { grid-template-columns: 1fr; } }
+"""
+
+COMMON_JS = r"""
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+const AXIS = {gridcolor: '#e1e0d9', linecolor: '#c3c2b7', tickcolor: '#c3c2b7', zeroline: false, automargin: true};
+const PLOT_CONFIG = {responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+  toImageButtonOptions: {format: 'png', scale: 2}};
+function plotLayout(extra) {
+  const layout = Object.assign({paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
+    font: {family: FONT, size: 13, color: '#52514e'}, margin: {t: 36, r: 16, b: 52, l: 64},
+    hoverlabel: {bgcolor: '#0b0b0b', bordercolor: '#0b0b0b', font: {color: '#ffffff', family: FONT, size: 13}}}, extra);
+  layout.margin = Object.assign({t: 36, r: 16, b: 52, l: 64}, extra.margin);
+  for (const key of ['xaxis', 'yaxis', ...Object.keys(layout).filter(key => /^[xy]axis\d+$/.test(key))]) {
+    layout[key] = Object.assign({}, AXIS, layout[key]);
+  }
+  return layout;
+}
+const KIND_COLORS = {signature: '#0072B2', duplicate_signature: '#56B4E9', proof_payload: '#009E73',
+  proof_announce: '#E69F00', proof_request: '#CC79A7', proof_control: '#999999'};
+const KIND_NAMES = {signature: 'Signatures', duplicate_signature: 'Duplicate signatures', proof_payload: 'Proof payloads',
+  proof_announce: 'Announcements', proof_request: 'Pull requests', proof_control: 'Proof control'};
+const mb = bytes => bytes / 1e6;
+// Sent above zero, received below, one stacked area per traffic kind, in MB/s per bucket.
+// Idle gaps and the final bucket end get zero-valued frames so areas return to zero.
+function trafficSeries(traffic) {
+  const kinds = [...new Set(traffic.buckets.flatMap(bucket => [...Object.keys(bucket.inbound), ...Object.keys(bucket.outbound)]))].sort();
+  const frames = [];
+  let previousEnd = null;
+  for (const bucket of traffic.buckets) {
+    if (previousEnd !== null && bucket.start_ms > previousEnd) {
+      frames.push({start_ms: previousEnd, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+    }
+    frames.push(bucket);
+    previousEnd = bucket.start_ms + bucket.width_ms;
+  }
+  if (previousEnd !== null) frames.push({start_ms: previousEnd, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+  const x = frames.map(bucket => bucket.start_ms / 1000);
+  const rate = (bytes, bucket) => mb(bytes) * 1000 / bucket.width_ms;
+  const traces = [];
+  for (const [direction, field, sign] of [['sent', 'outbound', 1], ['received', 'inbound', -1]]) {
+    for (const kind of kinds) {
+      const values = frames.map(bucket => rate(bucket[field][kind] || 0, bucket));
+      traces.push({name: KIND_NAMES[kind] || kind, type: 'scatter', mode: 'lines', x,
+        y: values.map(value => value === 0 ? 0 : sign * value), customdata: values,
+        stackgroup: direction, line: {color: '#ffffff', width: 0.6, shape: 'spline', smoothing: 0.65},
+        fillcolor: KIND_COLORS[kind] || '#999999', legendgroup: kind, showlegend: direction === 'sent',
+        hovertemplate: '%{customdata:.2f} MB/s ' + direction + ' at %{x:.1f} s<extra>' + (KIND_NAMES[kind] || kind) + '</extra>'});
+    }
+  }
+  const peak = frames.reduce((best, bucket) => Math.max(best,
+    rate(Object.values(bucket.inbound).reduce((a, b) => a + b, 0), bucket),
+    rate(Object.values(bucket.outbound).reduce((a, b) => a + b, 0), bucket)), 0);
+  return {traces, peak, end: (previousEnd || 0) / 1000};
+}
+function mirroredAxis(peak) {
+  const extent = peak > 0 ? peak * 1.12 : 1;
+  return {range: [-extent, extent], zeroline: true, zerolinecolor: '#898781', zerolinewidth: 1,
+    tickvals: [-extent * 0.9, -extent * 0.45, 0, extent * 0.45, extent * 0.9],
+    ticktext: [extent * 0.9, extent * 0.45, 0, extent * 0.45, extent * 0.9].map(value => value.toFixed(1))};
+}
+"""
+
+SUMMARY_JS = r"""
+const report = JSON.parse(document.getElementById('report-data').textContent);
+for (const [id, figure] of Object.entries(report.figures)) {
+  Plotly.newPlot(id, figure.data, plotLayout(figure.layout), PLOT_CONFIG);
+}
+// Previews share one time axis so hosts can be compared at a glance.
+const previews = Object.entries(report.previews).map(([node, traffic]) => [node, trafficSeries(traffic)]);
+const previewEnd = Math.max(1, ...previews.map(([, series]) => series.end));
+for (const [node, series] of previews) {
+  Plotly.newPlot('preview-' + node, series.traces, plotLayout({
+    showlegend: false, margin: {t: 4, r: 8, b: 26, l: 40},
+    xaxis: {range: [0, previewEnd], ticksuffix: ' s'},
+    yaxis: mirroredAxis(series.peak),
+  }), {staticPlot: true, responsive: true});
+}
+"""
+
+TRAFFIC_JS = r"""
+const data = JSON.parse(document.getElementById('traffic-data').textContent);
+const traffic = data.traffic;
+const series = trafficSeries(traffic);
+const warmupSeconds = Number.isFinite(data.warmup_ms) && data.warmup_ms > 0 ? data.warmup_ms / 1000 : 0;
+const milestones = (data.milestones || []).filter(point => Number.isFinite(point.time_ms));
+const endSeconds = Math.max(series.end, warmupSeconds, ...milestones.map(point => point.time_ms / 1000), 1);
+const shapes = warmupSeconds > 0 ? [{type: 'rect', xref: 'x', yref: 'paper', x0: 0, x1: warmupSeconds, y0: 0, y1: 1,
+  fillcolor: '#898781', opacity: 0.08, line: {width: 0}, layer: 'below'}] : [];
+const annotations = warmupSeconds > 0 ? [{xref: 'x', yref: 'paper', x: warmupSeconds / 2, y: 0.9,
+  text: 'Warmup<br>traffic not<br>captured', showarrow: false, font: {color: '#898781', size: 12}, align: 'center'}] : [];
+for (const [index, point] of milestones.entries()) {
+  const at = point.time_ms / 1000;
+  shapes.push({type: 'line', xref: 'x', yref: 'paper', x0: at, x1: at, y0: 0, y1: 1,
+    line: {color: '#898781', width: 1, dash: 'dot'}, layer: 'below'});
+  annotations.push({xref: 'x', yref: 'paper', x: at, y: index % 2 ? 1.14 : 1.01, yanchor: 'bottom',
+    text: point.label + ' · ' + at.toFixed(2) + ' s', xanchor: index === milestones.length - 1 ? 'right' : 'center',
+    showarrow: false, font: {color: '#52514e', size: 12}, align: 'center'});
+}
+Plotly.newPlot('timeline', series.traces, plotLayout({
+  xaxis: {title: {text: 'time from run start (s)'}, range: [0, endSeconds], autorange: false},
+  yaxis: Object.assign({title: {text: 'MB/s · sent above, received below'}}, mirroredAxis(series.peak)),
+  shapes, annotations, margin: {t: 70, b: 90},
+  legend: {orientation: 'h', x: 0, y: -0.2, groupclick: 'togglegroup'},
+  uirevision: data.run + data.node,
+}), PLOT_CONFIG);
+document.getElementById('run').textContent = data.run + ' · ' + traffic.bucket_ms + ' ms buckets · ' + traffic.buckets.length + ' buckets with traffic';
+document.getElementById('received').textContent = mb(traffic.received).toFixed(2) + ' MB';
+document.getElementById('sent').textContent = mb(traffic.sent).toFixed(2) + ' MB';
+document.getElementById('peak').textContent = series.peak.toFixed(2) + ' MB/s';
+document.getElementById('raw-buckets').addEventListener('change', () => {
+  const raw = document.getElementById('raw-buckets').checked;
+  Plotly.restyle('timeline', {'line.shape': raw ? 'hv' : 'spline', 'line.smoothing': raw ? 0 : 0.65});
+  document.getElementById('curve-note').textContent = raw
+    ? 'Raw buckets: flat rate within each measured interval.'
+    : 'Curved display: interpolation only; totals, peak and hover values use raw buckets.';
+});
+"""

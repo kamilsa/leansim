@@ -72,5 +72,96 @@ class FigureTests(unittest.TestCase):
         self.assertEqual(figure["data"][-1]["xaxis"], "x2")
 
 
+TRAFFIC_FIXTURE = {
+    "node": "7", "run": "test", "warmup_ms": 800,
+    "milestones": [{"label": "Signature burst", "time_ms": 1100}, {"label": "First subnet proof", "time_ms": 1200},
+                   {"label": "Final proof", "time_ms": 1400}],
+    "traffic": {"bucket_ms": 100, "sent": 3000000, "received": 1000000, "peers": [], "buckets": [
+        {"start_ms": 1000, "width_ms": 200, "outbound": {"signature": 2000000}, "inbound": {"proof_payload": 1000000}},
+        {"start_ms": 1400, "width_ms": 100, "outbound": {"signature": 1000000}, "inbound": {}},
+    ]},
+}
+
+DOM_AND_PLOTLY_MOCK = r"""
+const assert = require('node:assert/strict');
+const elements = new Map();
+global.document = {getElementById(id) {
+  if (!elements.has(id)) elements.set(id, {textContent: PAGE_DATA[id] || '', checked: false,
+    addEventListener(event, handler) { this[event] = handler; }});
+  return elements.get(id);
+}};
+const plots = new Map();
+global.Plotly = {
+  newPlot(id, traces, layout, config) { plots.set(id, {traces, layout, config}); },
+  restyle(id, changes) {
+    for (const trace of plots.get(id).traces) {
+      for (const [key, value] of Object.entries(changes)) {
+        const [field, property] = key.split('.');
+        trace[field][property] = value;
+      }
+    }
+  },
+};
+"""
+
+
+@unittest.skipUnless(HAS_NODE, "needs node to run the page scripts")
+class ScriptTests(unittest.TestCase):
+    def run_node(self, page_data: dict, script: str, checks: str) -> None:
+        source = ("const PAGE_DATA = " + json.dumps({key: json.dumps(value) for key, value in page_data.items()}) + ";\n"
+                  + DOM_AND_PLOTLY_MOCK + report.COMMON_JS + script + checks)
+        with tempfile.TemporaryDirectory(prefix="leansim-js-") as temporary:
+            path = Path(temporary) / "page.js"
+            path.write_text(source, encoding="utf-8")
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_traffic_timeline(self) -> None:
+        self.run_node({"traffic-data": TRAFFIC_FIXTURE}, report.TRAFFIC_JS, r"""
+const timeline = plots.get('timeline');
+assert.deepEqual(timeline.layout.xaxis.range, [0, 1.5], 'include the run start, not just traffic');
+assert.equal(timeline.layout.paper_bgcolor, '#ffffff');
+assert.equal(timeline.layout.shapes[0].x0, 0);
+assert.equal(timeline.layout.shapes[0].x1, 0.8);
+assert.match(timeline.layout.annotations[0].text, /warmup.*traffic not.*captured/i);
+assert.ok(timeline.layout.shapes.some(shape => shape.type === 'line' && shape.x0 === 1.4));
+assert.ok(timeline.layout.annotations.some(note => note.text.includes('Final proof')));
+assert.notEqual(timeline.layout.annotations[1].y, timeline.layout.annotations[2].y, 'nearby milestones need separate label lanes');
+const sent = timeline.traces.find(trace => trace.legendgroup === 'signature' && trace.stackgroup === 'sent');
+const received = timeline.traces.find(trace => trace.legendgroup === 'proof_payload' && trace.stackgroup === 'received');
+assert.equal(sent.type, 'scatter');
+assert.equal(sent.line.shape, 'spline', 'default timeline should have curved outlines');
+assert.deepEqual(sent.x, [1, 1.2, 1.4, 1.5]);
+assert.deepEqual(sent.y, [10, 0, 10, 0]);
+assert.deepEqual(received.y, [-5, 0, 0, 0]);
+assert.match(timeline.layout.yaxis.title.text, /MB\/s/);
+assert.equal(elements.get('peak').textContent, '10.00 MB/s');
+const rawToggle = document.getElementById('raw-buckets');
+rawToggle.checked = true;
+rawToggle.change();
+assert.ok(timeline.traces.every(trace => trace.line.shape === 'hv'));
+assert.deepEqual(sent.y, [10, 0, 10, 0], 'switching views must not alter measured rates');
+""")
+
+    def test_traffic_timeline_without_warmup_metadata(self) -> None:
+        self.run_node({"traffic-data": dict(TRAFFIC_FIXTURE, warmup_ms=None)}, report.TRAFFIC_JS, r"""
+assert.equal(plots.get('timeline').layout.xaxis.range[0], 0);
+assert.ok(plots.get('timeline').layout.shapes.every(shape => shape.type !== 'rect'));
+""")
+
+    def test_summary_plots_figures_and_previews_on_one_time_axis(self) -> None:
+        later = dict(TRAFFIC_FIXTURE["traffic"], buckets=[
+            {"start_ms": 2900, "width_ms": 100, "outbound": {"signature": 100}, "inbound": {}}])
+        figures = {"cdf": {"data": [], "layout": {"xaxis": {"title": {"text": "t"}}}}}
+        self.run_node({"report-data": {"figures": figures, "previews": {"7": TRAFFIC_FIXTURE["traffic"], "8": later}}},
+                      report.SUMMARY_JS, r"""
+assert.equal(plots.get('cdf').layout.xaxis.gridcolor, '#e1e0d9', 'figures get the shared white theme');
+assert.equal(plots.get('cdf').layout.xaxis.title.text, 't');
+assert.deepEqual(plots.get('preview-7').layout.xaxis.range, [0, 3]);
+assert.deepEqual(plots.get('preview-8').layout.xaxis.range, [0, 3]);
+assert.equal(plots.get('preview-7').config.staticPlot, true);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
