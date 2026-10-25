@@ -301,7 +301,8 @@ rates, validators per host, hosts and validators per country, the signature
 CDF (first seen anywhere and delivered per host class), arrival-time boxes
 (p5–p95 whiskers, p25–p75 box, median) for signatures, subnet proofs, every
 recursive layer and the final proof per host class with the numbers in a
-table, and a preview card per traffic-logging host. Summary times start at the
+table, a candle per subnet showing when each of its aggregators finished its
+subnet proof (one dot per aggregator), and a preview card per traffic-logging host. Summary times start at the
 first signature sent. `scripts/report.py` renders both page types; it has no
 web framework or npm dependency.
 

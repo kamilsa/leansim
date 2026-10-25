@@ -75,6 +75,33 @@ class FigureTests(unittest.TestCase):
         ])
         self.assertEqual(report.config_groups({}, {}), [])
 
+    def test_subnet_proof_candles_and_one_dot_per_aggregator(self) -> None:
+        metrics = {"subnet_proofs": [
+            {"subnet": 2, "count": 2, "min": 0, "p25": 0, "p50": 0, "p75": 700, "max": 700,
+             "proofs": [[0, 1, "supernode"], [700, None, "unknown"]]},
+            {"subnet": 5, "count": 3, "min": 100, "p25": 100, "p50": 200, "p75": 300, "max": 300,
+             "proofs": [[100, 2, "regular"], [200, 3, "regular"], [300, 1, "supernode"]]},
+        ]}
+        figure = report.subnet_proofs_figure(metrics)
+        candles, *dots = figure["data"]
+        self.assertEqual((candles["type"], candles["orientation"]), ("box", "h"))
+        self.assertEqual(candles["y"], [2, 5])
+        self.assertEqual(candles["lowerfence"], [0.0, 0.1])
+        self.assertEqual(candles["q1"], [0.0, 0.1])
+        self.assertEqual(candles["median"], [0.0, 0.2])
+        self.assertEqual(candles["q3"], [0.7, 0.3])
+        self.assertEqual(candles["upperfence"], [0.7, 0.3])
+        self.assertEqual([trace["name"] for trace in dots], ["Supernodes", "Regular nodes", "Unclassified"])
+        regular = dots[1]
+        self.assertEqual(regular["x"], [0.1, 0.2])
+        self.assertEqual(regular["y"], [5.0, 4.8], "dots of one subnet alternate across its row")
+        self.assertEqual(regular["text"], ["node 2", "node 3"])
+        self.assertEqual(dots[2]["text"], ["unknown node"])
+        self.assertEqual(figure["layout"]["yaxis"]["autorange"], "reversed")
+        self.assertEqual(figure["layout"]["yaxis"]["tickvals"], [2, 5])
+        self.assertEqual(figure["layout"]["yaxis"]["ticktext"], ["subnet 2", "subnet 5"])
+        self.assertEqual(report.subnet_proofs_figure({}), None)
+
     def test_host_facts_line(self) -> None:
         card = {"country": "finland", "class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000,
                 "validators": 3, "role": "local_aggregator"}
@@ -229,7 +256,7 @@ class PageTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def test_summary_has_every_section(self) -> None:
-        for marker in ('id="cdf"', 'id="arrival"', 'id="validators"', 'id="countries"', 'class="classes"',
+        for marker in ('id="cdf"', 'id="arrival"', 'id="subnet-proofs"', 'id="validators"', 'id="countries"', 'class="classes"',
                        'class="arrivals"', 'id="preview-1"', 'href="traffic-1.html"', "Open traffic profile"):
             self.assertIn(marker, self.summary)
         self.assertTrue('<p class="duties">Not an aggregator</p>' in self.summary.split('id="traffic"', 1)[1],
@@ -251,7 +278,7 @@ class PageTests(unittest.TestCase):
 
     def test_summary_embeds_figures_and_previews(self) -> None:
         data = embedded(self.summary, "report-data")
-        self.assertEqual(set(data["figures"]), {"cdf", "arrival", "validators", "countries"})
+        self.assertEqual(set(data["figures"]), {"cdf", "arrival", "subnet-proofs", "validators", "countries"})
         self.assertEqual(set(data["previews"]), {"1"})
 
     def test_summary_is_white(self) -> None:

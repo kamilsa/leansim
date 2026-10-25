@@ -149,6 +149,21 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
     return rows
 
 
+def subnet_proof_rows(local_proofs, t0, hosts):
+    """Per subnet, when each of its aggregators finished a subnet proof (ms
+    after t0): min/p25/median/p75/max, and every proof as [ms, node, class]."""
+    by_subnet = defaultdict(list)
+    for node_id, subnet_id, time_ms in local_proofs:
+        by_subnet[subnet_id].append([time_ms - t0, node_id, node_class(hosts.get(node_id))])
+    rows = []
+    for subnet_id, proofs in sorted(by_subnet.items()):
+        proofs.sort(key=lambda proof: (proof[0], -1 if proof[1] is None else proof[1]))
+        stats = frequency_percentiles(Counter(proof[0] for proof in proofs), (25, 50, 75))
+        rows.append({"subnet": subnet_id, "count": stats["count"], "min": proofs[0][0], "p25": stats["p25"],
+                     "p50": stats["p50"], "p75": stats["p75"], "max": proofs[-1][0], "proofs": proofs})
+    return rows
+
+
 def host_duties(host, top_layer):
     """Which proofs a host aggregates: its subnets, its group seats per tree
     layer, and whether it sits in the final (top-layer) group."""
@@ -683,6 +698,7 @@ def build_snapshot(output_dir):
             "t0_ms": t0,
             "signature_cdf": signature_cdf,
             "arrivals": arrival_rows(signature_counts, proof_held, final_layer, t0, hosts),
+            "subnet_proofs": subnet_proof_rows(local_proofs, t0, hosts),
             "population": host_population(hosts, experiment),
         },
         "cdf": cdf,

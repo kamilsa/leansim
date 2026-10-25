@@ -101,6 +101,22 @@ class SnapshotTests(unittest.TestCase):
             "validators": 1, "role": "validator", "duties": {"subnets": [], "layers": {}, "final": False},
         })
 
+    def test_subnet_proofs_in_the_snapshot(self) -> None:
+        self.assertEqual(self.metrics["subnet_proofs"], [
+            {"subnet": 0, "count": 1, "min": 1000, "p25": 1000, "p50": 1000, "p75": 1000, "max": 1000,
+             "proofs": [[1000, 0, "supernode"]]},
+        ])
+
+    def test_subnet_proof_rows_spread_every_aggregator(self) -> None:
+        hosts = {1: {"supernode": True}, 2: {"supernode": False}, 3: {"supernode": False}}
+        local_proofs = [(1, 5, 1300), (2, 5, 1100), (3, 5, 1200), (4, 5, 1500), (1, 2, 1000), (None, 2, 1700)]
+        self.assertEqual(analyze.subnet_proof_rows(local_proofs, 1000, hosts), [
+            {"subnet": 2, "count": 2, "min": 0, "p25": 0, "p50": 0, "p75": 700, "max": 700,
+             "proofs": [[0, 1, "supernode"], [700, None, "unknown"]]},
+            {"subnet": 5, "count": 4, "min": 100, "p25": 100, "p50": 200, "p75": 300, "max": 500,
+             "proofs": [[100, 2, "regular"], [200, 3, "regular"], [300, 1, "supernode"], [500, 4, "unknown"]]},
+        ])
+
     def test_duties_split_subnets_tree_layers_and_the_final_proof(self) -> None:
         host = {"aggregated_subnets": [40, 12], "recursive_seats": [[2, 3], [1, 11], [1, 10], [3, 0]]}
         self.assertEqual(analyze.host_duties(host, top_layer=3),

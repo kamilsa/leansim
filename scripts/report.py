@@ -128,6 +128,52 @@ def arrival_figure(metrics):
     }}
 
 
+def subnet_proofs_figure(metrics):
+    """One candle per subnet (first to last aggregator, p25–p75 box, median line)
+    and one dot per aggregator's subnet proof, coloured by host class."""
+    rows = metrics.get("subnet_proofs") or []
+    if not rows:
+        return None
+    data = [{
+        "type": "box", "orientation": "h", "name": "Aggregators", "y": [row["subnet"] for row in rows],
+        "lowerfence": [row["min"] / 1000 for row in rows], "q1": [row["p25"] / 1000 for row in rows],
+        "median": [row["p50"] / 1000 for row in rows], "q3": [row["p75"] / 1000 for row in rows],
+        "upperfence": [row["max"] / 1000 for row in rows], "width": 0.7,
+        "marker": {"color": "#52514e"}, "line": {"color": "#52514e", "width": 1.2}, "fillcolor": "#c3c2b780",
+        "hoverinfo": "skip", "showlegend": False,
+    }]
+    # Alternate dots across the row so aggregators that finished together stay visible.
+    offsets = (0, -0.2, 0.2)
+    dots = {kind: {"x": [], "y": [], "text": [], "customdata": []} for kind in CLASS_STYLE}
+    for row in rows:
+        for rank, (time_ms, node_id, kind) in enumerate(row["proofs"]):
+            dot = dots[kind if kind in dots else "unknown"]
+            dot["x"].append(time_ms / 1000)
+            dot["y"].append(round(row["subnet"] + offsets[rank % len(offsets)], 3))
+            dot["text"].append("unknown node" if node_id is None else f"node {node_id}")
+            dot["customdata"].append(row["subnet"])
+    for kind, (label, _, color) in CLASS_STYLE.items():
+        if dots[kind]["x"]:
+            data.append({
+                "type": "scatter", "mode": "markers", "name": label, **dots[kind],
+                "marker": {"color": color, "size": 6, "opacity": 0.8, "line": {"color": "#ffffff", "width": 0.5}},
+                "hovertemplate": "%{text} · subnet %{customdata} · %{x:.3f} s<extra>" + label + "</extra>",
+            })
+    subnets = [row["subnet"] for row in rows]
+    return {"data": data, "layout": {
+        "height": subnet_proofs_height(rows),
+        "xaxis": {"title": {"text": "time after the first signature was sent (s)"}, "rangemode": "tozero"},
+        "yaxis": {"autorange": "reversed", "tickvals": subnets, "ticktext": [f"subnet {subnet}" for subnet in subnets],
+                  "tickfont": {"size": 11}, "showgrid": False, "zeroline": False},
+        "legend": {"orientation": "h", "x": 0, "y": 1.02, "yanchor": "bottom"},
+        "margin": {"l": 90, "t": 40},
+    }}
+
+
+def subnet_proofs_height(rows):
+    return 18 * len(rows) + 130
+
+
 def validators_figure(population):
     """Hosts per validator-count bin, stacked by class, with each bar's total above it."""
     bins = population["validators_per_host"]
@@ -512,6 +558,7 @@ $network
 </ul>
 <div class="chart" id="arrival" style="height:${arrival_height}px"></div>
 <div class="table-scroll">$arrival_table</div></section>
+$subnet_proofs
 $previews
 <footer class="page">Generated $generated from $output_dir. Times are simulated; t = 0 is the first signature sent ($t0).</footer>
 </main><script id="report-data" type="application/json">$data</script><script>$plotly</script><script>$common</script><script>$script</script></body></html>
@@ -619,6 +666,18 @@ def generate_html(snapshot, output):
     traffic = metrics.get("traffic") or {}
     run = metadata.get("run_id") or Path(snapshot["output_dir"]).name
     figures = {"cdf": cdf_figure(metrics), "arrival": arrival_figure(metrics)}
+    subnet_proofs = subnet_proofs_figure(metrics)
+    subnet_section = ""
+    if subnet_proofs:
+        figures["subnet-proofs"] = subnet_proofs
+        rows = metrics["subnet_proofs"]
+        subnet_section = (
+            '<section aria-labelledby="subnet-proofs-heading"><h2 id="subnet-proofs-heading">Subnet proof times</h2>'
+            f'<p class="caption">When each aggregator of a subnet finished its subnet proof: {sum(row["count"] for row in rows):,} proofs '
+            f'over {len(rows)} subnets. Whiskers span the first to the last aggregator, the box p25 to p75, and the line is the median. '
+            'Each dot is one aggregator, coloured by host class; hover a dot for its node.</p>'
+            f'<div class="chart" id="subnet-proofs" style="height:{subnet_proofs_height(rows)}px"></div></section>'
+        )
     if population:
         figures["validators"] = validators_figure(population)
         figures["countries"] = countries_figure(population)
@@ -640,6 +699,7 @@ def generate_html(snapshot, output):
         network=network_section(population),
         arrival_height=max(260, 70 * messages + 110),
         arrival_table=arrival_table(metrics),
+        subnet_proofs=subnet_section,
         previews=previews,
         generated=html.escape(snapshot.get("generated_at", "")[:19].replace("T", " ") + " UTC"),
         output_dir=html.escape(snapshot["output_dir"]),
