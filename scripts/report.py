@@ -55,6 +55,31 @@ def host_facts(card):
     return " · ".join(parts)
 
 
+def duty_text(duties):
+    """One line naming the proofs a host aggregates, or None when the snapshot predates duties."""
+    if duties is None:
+        return None
+
+    def which(noun, ids):
+        if len(ids) <= 3:
+            return f"{noun} {', '.join(map(str, ids))}" if len(ids) == 1 else f"{noun}s {', '.join(map(str, ids))}"
+        return f"{len(ids)} {noun}s"
+
+    parts = []
+    if duties.get("subnets"):
+        parts.append(f"Subnet aggregator ({which('subnet', duties['subnets'])})")
+    for layer, groups in sorted((duties.get("layers") or {}).items(), key=lambda item: int(item[0])):
+        parts.append(f"Layer {layer} aggregator ({which('group', groups)})")
+    if duties.get("final"):
+        parts.append("Final proof aggregator")
+    return " · ".join(parts) or "Not an aggregator"
+
+
+def duty_line(card):
+    text = duty_text((card or {}).get("duties"))
+    return f'<p class="duties">{html.escape(text)}</p>' if text else ""
+
+
 def cdf_figure(metrics):
     """Signature propagation: first sighting anywhere, and delivery to each host class."""
     lines = metrics.get("signature_cdf") or {}
@@ -181,6 +206,7 @@ th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .a
 .previews { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
 .preview { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px 10px; }
 .preview .meta { color: var(--ink-2); font-size: 13px; margin: 0; }
+.duties { color: var(--ink); font-size: 13px; font-weight: 600; margin: 2px 0 0; } header.page .duties { font-size: 15px; margin-top: 4px; }
 .preview .totals { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin: 6px 0 0; }
 .mini { width: 100%; height: 150px; margin-top: 8px; }
 .host-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink-2); font-size: 14px; margin: 0 0 24px; }
@@ -460,6 +486,7 @@ def preview_cards(traffic):
         cards.append(
             f'<article class="preview"><h3><a href="traffic-{node}.html">Node {node}</a></h3>'
             f'<p class="meta">{html.escape(host_facts(logged.get("host")))}</p>'
+            + duty_line(logged.get("host")) +
             f'<div class="mini" id="preview-{node}" role="img" aria-label="Traffic of node {node}: sent above, received below"></div>'
             f'<p class="totals"><span>↑ {logged["sent"] / 1e6:,.1f} MB sent · ↓ {logged["received"] / 1e6:,.1f} MB received</span>'
             f'<a href="traffic-{node}.html">Open traffic profile →</a></p></article>'
@@ -494,7 +521,7 @@ TRAFFIC_TEMPLATE = Template("""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>leanSim traffic: node $node</title><style>$css</style></head><body><main>
 <header class="page"><p class="eyebrow"><a href="summary.html">← Run summary</a> · <span id="run"></span></p>
-<h1>Node $node traffic</h1><p class="facts">$facts</p></header>
+<h1>Node $node traffic</h1><p class="facts">$facts</p>$duties</header>
 <nav class="host-strip" aria-label="Logged hosts"><span>Tracked hosts:</span>$host_links</nav>
 <section class="traffic-stage" aria-labelledby="traffic-heading">
 <div class="stage-head"><h2 id="traffic-heading">Sent and received traffic</h2><label class="toggle"><input type="checkbox" id="raw-buckets" aria-describedby="curve-note">Raw buckets</label></div>
@@ -566,6 +593,7 @@ def generate_traffic_html(snapshot, directory, plotly_js):
             node=html.escape(node_id),
             css=PAGE_CSS,
             facts=html.escape(host_facts(logged.get("host"))),
+            duties=duty_line(logged.get("host")),
             host_links=host_links,
             peer_caption=f'Top {len(leaders)} of {len(logged["peers"])} retained peer records, by bytes exchanged.',
             peer_rows="".join(rows) or '<tr><td colspan="4">No per-peer records in this trace.</td></tr>',

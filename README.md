@@ -251,8 +251,8 @@ node configs get `traffic_log = true`.
   traffic totals.
 - `scripts/report.py` writes `traffic-<node>.html` per logged host: sent above
   and received below the axis, stacked areas by kind in MB/s (averaged over each
-  bucket), with the host's country, class, link rates, validator count and role
-  in the header, a ranked peer-exchange table below, and links between tracked
+  bucket), with the host's country, class, link rates, validator count, role
+  and aggregation duties (subnets, tree layers, final proof) in the header, a ranked peer-exchange table below, and links between tracked
   hosts and back to the summary.
   Run-wide markers show the median signature-send time, first subnet proof and
   first final proof (when available). Curved outlines are the default;

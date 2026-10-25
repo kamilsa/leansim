@@ -98,8 +98,14 @@ class SnapshotTests(unittest.TestCase):
     def test_traffic_hosts_carry_their_manifest_card(self) -> None:
         self.assertEqual(self.metrics["traffic"]["1"]["host"], {
             "country": "germany", "class": "regular", "uplink_mbps": 50, "downlink_mbps": 100,
-            "validators": 1, "role": "validator",
+            "validators": 1, "role": "validator", "duties": {"subnets": [], "layers": {}, "final": False},
         })
+
+    def test_duties_split_subnets_tree_layers_and_the_final_proof(self) -> None:
+        host = {"aggregated_subnets": [40, 12], "recursive_seats": [[2, 3], [1, 11], [1, 10], [3, 0]]}
+        self.assertEqual(analyze.host_duties(host, top_layer=3),
+                         {"subnets": [12, 40], "layers": {"1": [10, 11], "2": [3]}, "final": True})
+        self.assertEqual(analyze.host_duties({}, top_layer=None), {"subnets": [], "layers": {}, "final": False})
 
     def test_runs_without_a_node_list_have_no_population(self) -> None:
         with tempfile.TemporaryDirectory(prefix="leansim-analyze-") as temporary:

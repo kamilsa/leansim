@@ -149,7 +149,27 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
     return rows
 
 
-def host_card(host):
+def host_duties(host, top_layer):
+    """Which proofs a host aggregates: its subnets, its group seats per tree
+    layer, and whether it sits in the final (top-layer) group."""
+    layers = defaultdict(set)
+    final = False
+    for seat in host.get("recursive_seats") or []:
+        if not isinstance(seat, (list, tuple)) or len(seat) != 2:
+            continue
+        layer, index = seat
+        if layer == top_layer:
+            final = True
+        else:
+            layers[layer].add(index)
+    return {
+        "subnets": sorted(host.get("aggregated_subnets") or []),
+        "layers": {str(layer): sorted(indices) for layer, indices in sorted(layers.items())},
+        "final": final,
+    }
+
+
+def host_card(host, top_layer=None):
     """What a traffic preview shows about its host."""
     if not host:
         return None
@@ -160,6 +180,7 @@ def host_card(host):
         "downlink_mbps": host.get("downlink_mbps"),
         "validators": len(host.get("validator_ids") or []),
         "role": host.get("role"),
+        "duties": host_duties(host, top_layer),
     }
 
 
@@ -624,8 +645,12 @@ def build_snapshot(output_dir):
             signature_cdf[kind] = frequency_cdf(signature_counts[kind])
     experiment = manifest.get("experiment") if isinstance(manifest.get("experiment"), dict) else {}
     traffic = traffic_summary(traffic_buckets, traffic_peers, peer_ids)
+    # The final group is the plan's top layer; fall back to where a final proof appeared.
+    plan_groups = read_json(output_dir / "aggregation-plan.json").get("groups")
+    plan_layers = [group.get("layer") for group in plan_groups or [] if isinstance(group, dict) and isinstance(group.get("layer"), int)]
+    top_layer = max(plan_layers, default=final_layer)
     for node_id, logged in traffic.items():
-        logged["host"] = host_card(hosts.get(int(node_id)))
+        logged["host"] = host_card(hosts.get(int(node_id)), top_layer)
 
     return {
         "schema_version": 1,

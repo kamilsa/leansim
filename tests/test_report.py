@@ -81,6 +81,17 @@ class FigureTests(unittest.TestCase):
         self.assertEqual(report.host_facts(card), "Finland · supernode · ↑ 1,000 / ↓ 1,000 Mbps · 3 validators · local aggregator")
         self.assertEqual(report.host_facts(None), "No manifest entry for this host")
 
+    def test_duty_line(self) -> None:
+        self.assertEqual(report.duty_text({"subnets": [], "layers": {}, "final": False}), "Not an aggregator")
+        self.assertEqual(report.duty_text({"subnets": [32], "layers": {}, "final": False}), "Subnet aggregator (subnet 32)")
+        self.assertEqual(
+            report.duty_text({"subnets": list(range(23)), "layers": {"1": list(range(10)), "2": [3, 4]}, "final": True}),
+            "Subnet aggregator (23 subnets) · Layer 1 aggregator (10 groups) · Layer 2 aggregator (groups 3, 4) · Final proof aggregator",
+        )
+        self.assertEqual(report.duty_text({"subnets": [], "layers": {"10": [0], "2": [7]}, "final": False}),
+                         "Layer 2 aggregator (group 7) · Layer 10 aggregator (group 0)")
+        self.assertIsNone(report.duty_text(None), "snapshots from before duties were recorded say nothing")
+
     def test_cdf_has_first_seen_and_one_line_per_class(self) -> None:
         figure = report.cdf_figure(self.metrics)
         self.assertEqual([trace["name"] for trace in figure["data"]],
@@ -221,6 +232,8 @@ class PageTests(unittest.TestCase):
         for marker in ('id="cdf"', 'id="arrival"', 'id="validators"', 'id="countries"', 'class="classes"',
                        'class="arrivals"', 'id="preview-1"', 'href="traffic-1.html"', "Open traffic profile"):
             self.assertIn(marker, self.summary)
+        self.assertTrue('<p class="duties">Not an aggregator</p>' in self.summary.split('id="traffic"', 1)[1],
+                        "every preview card needs a duty line")
         self.assertNotIn("history-body", self.summary, "the summary shows the primary run only")
         self.assertIn("Supernodes are hosts running at least 2 validators.", self.summary)
 
@@ -247,6 +260,7 @@ class PageTests(unittest.TestCase):
 
     def test_traffic_page_layout(self) -> None:
         self.assertIn("Germany · regular node · ↑ 50 / ↓ 100 Mbps · 1 validator · validator", self.traffic)
+        self.assertTrue('<p class="duties">Not an aggregator</p>' in self.traffic, "the traffic page needs a duty line")
         self.assertIn('class="traffic-stage"', self.traffic)
         self.assertIn('<table class="peer-ledger">', self.traffic)
         self.assertIn('aria-label="Logged hosts"', self.traffic)
