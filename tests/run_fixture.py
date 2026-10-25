@@ -41,6 +41,18 @@ EVENTS = [
 ]
 
 
+EXPERIMENT = {
+    "local_threshold": 1.0, "mesh_warmup_ms": 900, "supernode_by_validator_count": 2, "supernode_fraction": 0.05,
+    "validator_count": 4, "subnet_count": 1, "subnet_subscriptions_per_node": 2, "burst_time_ms": 100,
+    "burst_jitter_ms": 10, "signature_payload_bytes": 1200, "signature_aggregation_rate": 1000,
+    "committee_aggregators": True, "local_aggregators_per_subnet": 1, "recursive_aggregation": True,
+    "recursive_aggregation_arity": 2, "recursive_aggregation_time_ms": 276, "recursive_group_size": 16,
+    "recursive_proofs_per_child": 1, "aggregate_proof_bytes": 262144, "gossipsub_mesh_n": 8,
+    "gossipsub_mesh_n_low": 4, "gossipsub_mesh_n_high": 12, "gossipsub_heartbeat_interval_ms": 300,
+    "gossipsub_flood_publish": False, "node_map": "nodes_small.csv",
+}
+
+
 def write_fixture_run(directory: Path) -> Path:
     """Write the fixture run into `directory` and return it."""
     stdout = directory / "shadow.data" / "hosts" / "node-0" / "leansim.1000.stdout"
@@ -48,8 +60,7 @@ def write_fixture_run(directory: Path) -> Path:
     stdout.write_text("\n".join(json.dumps(event) for event in EVENTS) + "\n", encoding="utf-8")
     manifest = {
         "run_id": "fixture",
-        "experiment": {"local_threshold": 1.0, "mesh_warmup_ms": 900, "supernode_by_validator_count": 2,
-                       "supernode_fraction": 0.05},
+        "experiment": EXPERIMENT,
         "nodes": NODES,
     }
     (directory / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

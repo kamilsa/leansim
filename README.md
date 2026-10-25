@@ -294,7 +294,9 @@ reconstructing seeded geo or supernode assignments.
 ## Analysis
 
 `summary.html` is a white, self-contained page (Plotly inlined) for the primary
-run. It shows the hosts by class (supernode/regular) with uplink/downlink
+run. It shows the main settings (signature size and aggregation rate, local
+threshold, committees and aggregators, recursive arity, proof time and proof
+size, gossipsub mesh), the hosts by class (supernode/regular) with uplink/downlink
 rates, validators per host, hosts and validators per country, the signature
 CDF (first seen anywhere and delivered per host class), arrival-time boxes
 (p5–p95 whiskers, p25–p75 box, median) for signatures, subnet proofs, every

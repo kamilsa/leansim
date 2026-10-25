@@ -31,11 +31,49 @@ class FigureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="leansim-report-")
-        cls.metrics = fixture_snapshot(Path(cls.temporary.name))["metrics"]
+        cls.snapshot = fixture_snapshot(Path(cls.temporary.name))
+        cls.metrics = cls.snapshot["metrics"]
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.temporary.cleanup()
+
+    def test_config_groups_name_the_main_settings(self) -> None:
+        self.assertEqual(report.config_groups(self.snapshot["metadata"]["config"], self.metrics), [
+            ("Signatures", [
+                ("Signature size", "1,200 B", ""),
+                ("Aggregation rate", "1,000 signatures/s",
+                 "a 100% proof of a 4-validator committee (4 signatures) takes 4 ms"),
+                ("Local threshold", "100%", "of a committee's signatures per subnet proof"),
+                ("Signing", "100–110 ms after warmup", "warmup 900 ms"),
+            ]),
+            ("Aggregation", [
+                ("Committees", "1 × 4 validators", "one committee per subnet"),
+                ("Subnet aggregators", "~1 per committee", "is_aggregator lottery"),
+                ("Recursive aggregation", "2-to-1", "1 layer above the subnet proofs"),
+                ("Recursive proof time", "276 ms", "per 2-to-1 proof"),
+                ("Group size", "~16 members", "lottery target per group"),
+                ("Proof size", "262,144 B", "256 KiB, every subnet and recursive proof"),
+            ]),
+            ("Gossip", [
+                ("Mesh degree", "8", "low 4, high 12"),
+                ("Heartbeat", "300 ms", ""),
+                ("Subnet subscriptions", "2 per host", ""),
+                ("Flood publish", "off", ""),
+            ]),
+        ])
+
+    def test_config_without_recursion_or_settings(self) -> None:
+        config = {"recursive_aggregation": False, "committee_aggregators": False, "local_aggregators_per_subnet": 16,
+                  "aggregate_proof_bytes": 262144, "subscribe_to_duty_subnets": True, "subnet_subscriptions_per_node": 2}
+        self.assertEqual(report.config_groups(config, {}), [
+            ("Aggregation", [
+                ("Subnet aggregators", "16 per subnet", "promoted among subnet subscribers"),
+                ("Recursive aggregation", "off", "subnet proofs are logged, not sent"),
+            ]),
+            ("Gossip", [("Subnet subscriptions", "2 per host", "plus the subnets its validators sign in")]),
+        ])
+        self.assertEqual(report.config_groups({}, {}), [])
 
     def test_host_facts_line(self) -> None:
         card = {"country": "finland", "class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000,
@@ -185,6 +223,12 @@ class PageTests(unittest.TestCase):
             self.assertIn(marker, self.summary)
         self.assertNotIn("history-body", self.summary, "the summary shows the primary run only")
         self.assertIn("Supernodes are hosts running at least 2 validators.", self.summary)
+
+    def test_summary_shows_the_config(self) -> None:
+        section = self.summary.split('id="config"', 1)[1].split("</section>", 1)[0]
+        for text in ("Configuration", "2-to-1", "276 ms", "1,000 signatures/s", "1,200 B", "262,144 B"):
+            self.assertIn(text, section)
+        self.assertLess(self.summary.index('id="config"'), self.summary.index('id="network"'))
 
     def test_arrival_caption_says_what_each_row_measures(self) -> None:
         caption = self.summary.split('id="arrivals"', 1)[1].split('id="arrival"', 1)[0]

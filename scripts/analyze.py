@@ -212,6 +212,19 @@ def read_json(path):
     return value if isinstance(value, dict) else {}
 
 
+# Experiment settings the summary's configuration section reports, in display order.
+CONFIG_KEYS = (
+    "validator_count", "subnet_count", "subnet_subscriptions_per_node", "subscribe_to_duty_subnets",
+    "local_threshold", "mesh_warmup_ms", "burst_time_ms", "burst_jitter_ms",
+    "signature_payload_bytes", "signature_aggregation_rate",
+    "committee_aggregators", "local_aggregators_per_subnet",
+    "recursive_aggregation", "recursive_aggregation_arity", "recursive_aggregation_time_ms",
+    "recursive_group_size", "recursive_proofs_per_child", "aggregate_proof_bytes",
+    "gossipsub_mesh_n", "gossipsub_mesh_n_low", "gossipsub_mesh_n_high", "gossipsub_heartbeat_interval_ms",
+    "gossipsub_flood_publish", "gossipsub_idontwant",
+)
+
+
 def metadata_for(output_dir):
     """Read optional runner metadata and the manifest experiment configuration."""
     manifest = read_json(output_dir / "run-manifest.json")
@@ -244,6 +257,7 @@ def metadata_for(output_dir):
         "run_id": first("run_id", "name"),
         "local_threshold": threshold,
         "mesh_warmup_ms": number(experiment.get("mesh_warmup_ms")),
+        "config": {key: experiment[key] for key in CONFIG_KEYS if key in experiment},
     }
 
 

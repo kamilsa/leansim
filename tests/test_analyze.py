@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import analyze  # noqa: E402
-from run_fixture import write_fixture_run  # noqa: E402
+from run_fixture import EXPERIMENT, write_fixture_run  # noqa: E402
 
 
 class FrequencyTests(unittest.TestCase):
@@ -43,11 +43,16 @@ class SnapshotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="leansim-analyze-")
-        cls.metrics = analyze.build_snapshot(write_fixture_run(Path(cls.temporary.name) / "run"))["metrics"]
+        cls.snapshot = analyze.build_snapshot(write_fixture_run(Path(cls.temporary.name) / "run"))
+        cls.metrics = cls.snapshot["metrics"]
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.temporary.cleanup()
+
+    def test_metadata_keeps_the_main_config(self) -> None:
+        skipped = {"supernode_by_validator_count", "supernode_fraction", "node_map"}
+        self.assertEqual(self.snapshot["metadata"]["config"], {key: value for key, value in EXPERIMENT.items() if key not in skipped})
 
     def test_times_start_at_the_first_signature(self) -> None:
         self.assertEqual(self.metrics["t0_ms"], 1000)

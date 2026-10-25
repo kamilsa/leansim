@@ -167,6 +167,12 @@ section { margin: 0 0 44px; }
 .kpi b { display: block; font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
 .chart { width: 100%; height: 380px; } .chart.tall { height: 460px; }
 .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; align-items: start; }
+.config-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.config-card { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px 4px; }
+.config th { font-weight: 400; color: var(--ink-2); vertical-align: top; padding-left: 0; }
+.config td { white-space: normal; padding-right: 0; } .config td b { font-weight: 600; white-space: nowrap; }
+.config .note { display: block; color: var(--muted); font-size: 12px; }
+.config tr:last-child th, .config tr:last-child td { border-bottom: 0; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
 th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .arrivals td:nth-child(2), .arrivals th:nth-child(2) { text-align: left; }
@@ -187,7 +193,7 @@ th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .a
 .mix .out { background: #52514e; } .mix .in { background: #c3c2b7; }
 details summary { cursor: pointer; font-weight: 600; } details p { color: var(--ink-2); max-width: 860px; }
 footer.page { border-top: 1px solid var(--grid); padding-top: 14px; color: var(--muted); font-size: 13px; }
-@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis { grid-template-columns: 1fr 1fr; } .two { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis { grid-template-columns: 1fr 1fr; } .two, .config-grid { grid-template-columns: 1fr; } }
 """
 
 COMMON_JS = r"""
@@ -346,6 +352,88 @@ def arrival_table(metrics):
     )
 
 
+def config_groups(config, metrics):
+    """The run's main settings as [(group, [(label, value, note), ...])]; settings
+    missing from the manifest are left out, and so are empty groups."""
+    def has(*keys):
+        return all(config.get(key) is not None for key in keys)
+
+    signatures, aggregation, gossip = [], [], []
+    committee = config["validator_count"] // config["subnet_count"] if has("validator_count", "subnet_count") and config["subnet_count"] else None
+    if has("signature_payload_bytes"):
+        signatures.append(("Signature size", f'{config["signature_payload_bytes"]:,} B', ""))
+    if has("signature_aggregation_rate"):
+        rate = config["signature_aggregation_rate"]
+        note = ""
+        if committee and has("local_threshold"):
+            # The simulator truncates the threshold count, as in analyze.build_snapshot.
+            needed = int(committee * config["local_threshold"])
+            note = (f'a {config["local_threshold"]:.0%} proof of a {committee:,}-validator committee '
+                    f"({needed:,} signatures) takes {needed * 1000 / rate:,.0f} ms")
+        signatures.append(("Aggregation rate", f"{rate:,} signatures/s", note))
+    if has("local_threshold"):
+        signatures.append(("Local threshold", f'{config["local_threshold"]:.0%}', "of a committee's signatures per subnet proof"))
+    if has("burst_time_ms", "burst_jitter_ms"):
+        start = config["burst_time_ms"]
+        signatures.append(("Signing", f'{start:,}–{start + config["burst_jitter_ms"]:,} ms after warmup',
+                           f'warmup {config["mesh_warmup_ms"]:,} ms' if has("mesh_warmup_ms") else ""))
+
+    if committee is not None:
+        aggregation.append(("Committees", f'{config["subnet_count"]:,} × {committee:,} validators', "one committee per subnet"))
+    if has("local_aggregators_per_subnet"):
+        count = config["local_aggregators_per_subnet"]
+        if config.get("committee_aggregators"):
+            aggregation.append(("Subnet aggregators", f"~{count:,} per committee", "is_aggregator lottery"))
+        else:
+            aggregation.append(("Subnet aggregators", f"{count:,} per subnet", "promoted among subnet subscribers"))
+    if config.get("recursive_aggregation"):
+        arity = config.get("recursive_aggregation_arity")
+        layers = len((metrics.get("recursive_aggregation") or {}).get("layers") or {})
+        aggregation.append(("Recursive aggregation", f"{arity}-to-1",
+                            f"{layers} layer{'' if layers == 1 else 's'} above the subnet proofs" if layers else ""))
+        if has("recursive_aggregation_time_ms"):
+            aggregation.append(("Recursive proof time", f'{config["recursive_aggregation_time_ms"]:,} ms', f"per {arity}-to-1 proof"))
+        if has("recursive_group_size"):
+            aggregation.append(("Group size", f'~{config["recursive_group_size"]:,} members', "lottery target per group"))
+        if has("aggregate_proof_bytes"):
+            size = config["aggregate_proof_bytes"]
+            aggregation.append(("Proof size", f"{size:,} B", f"{size / 1024:,.0f} KiB, every subnet and recursive proof"))
+    elif "recursive_aggregation" in config:
+        aggregation.append(("Recursive aggregation", "off", "subnet proofs are logged, not sent"))
+
+    if has("gossipsub_mesh_n"):
+        bounds = f'low {config["gossipsub_mesh_n_low"]}, high {config["gossipsub_mesh_n_high"]}' if has("gossipsub_mesh_n_low", "gossipsub_mesh_n_high") else ""
+        gossip.append(("Mesh degree", str(config["gossipsub_mesh_n"]), bounds))
+    if has("gossipsub_heartbeat_interval_ms"):
+        gossip.append(("Heartbeat", f'{config["gossipsub_heartbeat_interval_ms"]:,} ms', ""))
+    if has("subnet_subscriptions_per_node"):
+        gossip.append(("Subnet subscriptions", f'{config["subnet_subscriptions_per_node"]} per host',
+                       "plus the subnets its validators sign in" if config.get("subscribe_to_duty_subnets") else ""))
+    for key, label in (("gossipsub_flood_publish", "Flood publish"), ("gossipsub_idontwant", "IDONTWANT")):
+        if key in config:
+            gossip.append((label, "on" if config[key] else "off", ""))
+    return [(title, rows) for title, rows in (("Signatures", signatures), ("Aggregation", aggregation), ("Gossip", gossip)) if rows]
+
+
+def config_section(config, metrics):
+    groups = config_groups(config or {}, metrics)
+    if not groups:
+        return ""
+    cards = "".join(
+        f'<div class="config-card"><h3>{title}</h3><table class="config"><tbody>'
+        + "".join(
+            f'<tr><th scope="row">{html.escape(label)}</th><td><b>{html.escape(value)}</b>'
+            + (f'<span class="note">{html.escape(note)}</span>' if note else "") + "</td></tr>"
+            for label, value, note in rows
+        )
+        + "</tbody></table></div>"
+        for title, rows in groups
+    )
+    return ('<section aria-labelledby="config"><h2 id="config">Configuration</h2>'
+            '<p class="caption">Main settings of this run, from run-manifest.json.</p>'
+            f'<div class="config-grid">{cards}</div></section>')
+
+
 def kpis(metrics):
     population = metrics.get("population") or {}
     supernodes = sum(item["hosts"] for item in population.get("classes", []) if item["class"] == "supernode")
@@ -383,6 +471,7 @@ SUMMARY_TEMPLATE = Template("""<!doctype html>
 <title>leanSim summary: $run</title><style>$css</style></head><body><main>
 <header class="page"><p class="eyebrow">leanSim run summary</p><h1>$run</h1><p class="facts">$facts</p></header>
 $kpis
+$config
 $network
 <section aria-labelledby="propagation"><h2 id="propagation">Signature propagation</h2>
 <p class="caption">Share of signatures received by time t. The dotted line counts each validator's signature once, when the first host saw it. The solid lines count every delivery to a host of that class. Hosts receive only the subnets they subscribe to.</p>
@@ -519,6 +608,7 @@ def generate_html(snapshot, output):
         css=PAGE_CSS,
         facts=html.escape(" · ".join(fact for fact in facts if fact)),
         kpis=kpis(metrics),
+        config=config_section(metadata.get("config"), metrics),
         network=network_section(population),
         arrival_height=max(260, 70 * messages + 110),
         arrival_table=arrival_table(metrics),
