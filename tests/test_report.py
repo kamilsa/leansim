@@ -60,6 +60,17 @@ class FigureTests(unittest.TestCase):
         self.assertEqual(regular["upperfence"], [0.4, 1.3, 2.0])
         self.assertEqual(figure["layout"]["yaxis"]["categoryarray"], ["Signatures", "Subnet proofs", "Final proof"])
 
+    def test_validator_bins_are_labelled_and_totalled(self) -> None:
+        figure = report.validators_figure(self.metrics["population"])
+        self.assertEqual(figure["data"][0]["x"], ["0", "1", "2–3"])
+        self.assertEqual([note["text"] for note in figure["layout"]["annotations"]], ["1", "1", "1"])
+
+    def test_countries_put_hosts_and_validators_side_by_side(self) -> None:
+        figure = report.countries_figure(self.metrics["population"])
+        self.assertEqual(figure["data"][0]["y"], ["Germany", "Finland"])
+        self.assertEqual(figure["data"][-1]["x"], [1, 3])
+        self.assertEqual(figure["data"][-1]["xaxis"], "x2")
+
 
 if __name__ == "__main__":
     unittest.main()

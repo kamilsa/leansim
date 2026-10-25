@@ -101,3 +101,46 @@ def arrival_figure(metrics):
         "legend": {"orientation": "h", "x": 0, "y": 1.1},
         "margin": {"l": 120},
     }}
+
+
+def validators_figure(population):
+    """Hosts per validator-count bin, stacked by class, with each bar's total above it."""
+    bins = population["validators_per_host"]
+    labels = [str(item["low"]) if item["low"] == item["high"] else f"{item['low']}–{item['high']}" for item in bins]
+    data = [{
+        "type": "bar", "name": label, "x": labels, "y": [item[kind] for item in bins],
+        "marker": {"color": color}, "customdata": [item["validators"] for item in bins],
+        "hovertemplate": "%{y} hosts with %{x} validators<br>%{customdata:,} validators in this bin<extra>" + label + "</extra>",
+    } for kind, (label, _, color) in CLASS_STYLE.items() if any(item[kind] for item in bins)]
+    totals = [item["supernode"] + item["regular"] + item["unknown"] for item in bins]
+    annotations = [{"x": label, "y": total, "text": f"{total:,}", "showarrow": False, "yanchor": "bottom",
+                    "font": {"size": 12, "color": "#52514e"}} for label, total in zip(labels, totals) if total]
+    return {"data": data, "layout": {
+        "barmode": "stack", "annotations": annotations,
+        "xaxis": {"title": {"text": "validators on the host"}, "type": "category", "tickangle": -45},
+        "yaxis": {"title": {"text": "hosts"}, "rangemode": "tozero"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.12, "traceorder": "normal"},
+    }}
+
+
+def countries_figure(population):
+    """Hosts per country (stacked by class) beside validators per country, largest first."""
+    rows = population["countries"]
+    names = [row["country"].title() for row in rows]
+    data = [{
+        "type": "bar", "orientation": "h", "name": label, "y": names, "x": [row[kind] for row in rows],
+        "marker": {"color": color}, "hovertemplate": "%{x} hosts<extra>" + label + "</extra>",
+    } for kind, (label, _, color) in CLASS_STYLE.items() if any(row[kind] for row in rows)]
+    data.append({
+        "type": "bar", "orientation": "h", "name": "Validators", "y": names, "x": [row["validators"] for row in rows],
+        "xaxis": "x2", "yaxis": "y", "marker": {"color": "#52514e"}, "showlegend": False,
+        "hovertemplate": "%{x:,} validators<extra></extra>",
+    })
+    return {"data": data, "layout": {
+        "barmode": "stack", "height": 26 * len(rows) + 110,
+        "xaxis": {"domain": [0, 0.46], "title": {"text": "hosts"}},
+        "xaxis2": {"domain": [0.54, 1], "anchor": "y", "title": {"text": "validators"}},
+        "yaxis": {"autorange": "reversed"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.06, "traceorder": "normal"},
+        "margin": {"l": 120},
+    }}
