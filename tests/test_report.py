@@ -163,7 +163,6 @@ const assert = require('node:assert/strict');
 const elements = new Map();
 global.document = {getElementById(id) {
   if (!elements.has(id)) elements.set(id, {textContent: PAGE_DATA[id] || '', checked: false,
-    querySelectorAll: () => [],
     addEventListener(event, handler) { this[event] = handler; }});
   return elements.get(id);
 }};
@@ -192,6 +191,17 @@ class ScriptTests(unittest.TestCase):
             path.write_text(source, encoding="utf-8")
             result = subprocess.run(["node", str(path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_subnet_label_click_opens_its_page(self) -> None:
+        self.run_node({"report-data": {"figures": {}, "previews": {}}}, "global.location = {href: 'summary.html'};\n"
+                      + report.SUMMARY_JS, r"""
+const plot = document.getElementById('subnet-proofs');
+plot.click({target: {closest: selector => selector === '.ytick' ? {textContent: 'subnet 12'} : null}});
+assert.equal(location.href, 'subnet-12.html');
+location.href = 'summary.html';
+plot.click({target: {closest: () => null}});
+assert.equal(location.href, 'summary.html', 'clicks off the labels do nothing');
+""")
 
     def test_traffic_timeline(self) -> None:
         self.run_node({"traffic-data": TRAFFIC_FIXTURE}, report.TRAFFIC_JS, r"""
@@ -304,8 +314,10 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(data["figures"]["cdf"]["data"]), 3)
 
     def test_subnet_labels_open_subnet_pages(self) -> None:
-        self.assertIn(".ytick text", self.summary)
-        self.assertIn("window.location.href = 'subnet-' + match[1] + '.html'", self.summary)
+        self.assertIn("#subnet-proofs .ytick text { pointer-events: all; cursor: pointer; }", self.summary,
+                      "Plotly turns off pointer events on its SVG, so the labels need them back")
+        self.assertIn("subnetPlot.addEventListener('click'", self.summary,
+                      "one listener on the chart container survives Plotly redrawing its ticks")
 
     def test_summary_is_white(self) -> None:
         self.assertIn("background: #ffffff", self.summary)

@@ -168,7 +168,8 @@ def subnet_proofs_figure(metrics):
         "height": subnet_proofs_height(rows),
         "xaxis": {"title": {"text": "time after the first signature was sent (s)"}, "rangemode": "tozero"},
         "yaxis": {"autorange": "reversed", "tickvals": subnets, "ticktext": [f"subnet {subnet}" for subnet in subnets],
-                  "tickfont": {"size": 11}, "showgrid": False, "zeroline": False},
+                  # SUMMARY_JS turns these labels into links to subnet-<n>.html.
+                  "tickfont": {"size": 11, "color": "#2a78d6"}, "showgrid": False, "zeroline": False},
         "legend": {"orientation": "h", "x": 0, "y": 1.02, "yanchor": "bottom"},
         "margin": {"l": 90, "t": 40},
     }}
@@ -263,6 +264,8 @@ section { margin: 0 0 44px; }
 .kpi .label, .kpi .note { display: block; color: var(--ink-2); font-size: 13px; } .kpi .note { color: var(--muted); }
 .kpi b { display: block; font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
 .chart { width: 100%; height: 380px; } .chart.tall { height: 460px; }
+#subnet-proofs .ytick text { pointer-events: all; cursor: pointer; }
+#subnet-proofs .ytick text:hover { text-decoration: underline; }
 .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; align-items: start; }
 .config-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
 .config-card { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px 4px; }
@@ -366,15 +369,14 @@ const report = JSON.parse(document.getElementById('report-data').textContent);
 for (const [id, figure] of Object.entries(report.figures)) {
   Plotly.newPlot(id, figure.data, plotLayout(figure.layout), PLOT_CONFIG);
 }
-// Subnet labels open that subnet's page.
+// Subnet labels open subnet-<n>.html. Plotly redraws ticks on resize, so listen on
+// the chart container; PAGE_CSS gives the labels back their pointer events.
 const subnetPlot = document.getElementById('subnet-proofs');
 if (subnetPlot) {
-  subnetPlot.querySelectorAll('.ytick text').forEach(tick => {
-    const match = tick.textContent.match(/^subnet (\d+)$/);
-    if (!match) return;
-    tick.style.cursor = 'pointer';
-    tick.style.fill = 'var(--link)';
-    tick.addEventListener('click', () => { window.location.href = 'subnet-' + match[1] + '.html'; });
+  subnetPlot.addEventListener('click', event => {
+    const tick = event.target.closest && event.target.closest('.ytick');
+    const match = tick && tick.textContent.trim().match(/^subnet (\d+)$/);
+    if (match) location.href = 'subnet-' + match[1] + '.html';
   });
 }
 // Previews share one time axis so hosts can be compared at a glance.
