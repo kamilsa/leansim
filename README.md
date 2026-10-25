@@ -44,7 +44,8 @@ uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --serve
 # Rebuild only the existing report.
 uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --summary-only
 
-# Include histories from other output directories in the served report.
+# Merge snapshots from other output directories into runs-history.json
+# (summary.html shows the primary run only).
 uv run shadow-sim.py experiments/nodemap-small-65k-committees-sub64.toml --serve-only --overlay other-output
 ```
 
@@ -248,9 +249,11 @@ node configs get `traffic_log = true`.
   analyzer resolves both through the `NodePeerId` events.
 - Traffic events carry no `byte_size`, so they never enter the run's signature
   traffic totals.
-- `scripts/analyze.py` writes `traffic-<node>.html` per logged host: sent above
+- `scripts/report.py` writes `traffic-<node>.html` per logged host: sent above
   and received below the axis, stacked areas by kind in MB/s (averaged over each
-  bucket), with a ranked peer-exchange table below and links between tracked hosts.
+  bucket), with the host's country, class, link rates, validator count and role
+  in the header, a ranked peer-exchange table below, and links between tracked
+  hosts and back to the summary.
   Run-wide markers show the median signature-send time, first subnet proof and
   first final proof (when available). Curved outlines are the default;
   enable **Raw buckets** for the exact step view. Curves are display interpolation
@@ -290,10 +293,15 @@ reconstructing seeded geo or supernode assignments.
 
 ## Analysis
 
-The generated report contains signature-arrival CDFs, threshold timing,
-per-subnet local proof latency, the aggregation tree (first proof per subnet and
-group, and the final proof), duplicate traffic, and
-per-node byte/message counters. It has no web framework or npm dependency.
+`summary.html` is a white, self-contained page (Plotly inlined) for the primary
+run. It shows the hosts by class (supernode/regular) with uplink/downlink
+rates, validators per host, hosts and validators per country, the signature
+CDF (first seen anywhere and delivered per host class), arrival-time boxes
+(p5–p95 whiskers, p25–p75 box, median) for signatures, subnet proofs, every
+recursive layer and the final proof per host class with the numbers in a
+table, and a preview card per traffic-logging host. Summary times start at the
+first signature sent. `scripts/report.py` renders both page types; it has no
+web framework or npm dependency.
 
 Run the analyzer directly when needed:
 
