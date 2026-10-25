@@ -149,6 +149,61 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
     return rows
 
 
+def host_card(host):
+    """What a traffic preview shows about its host."""
+    if not host:
+        return None
+    return {
+        "country": host.get("country"),
+        "class": node_class(host),
+        "uplink_mbps": host.get("uplink_mbps"),
+        "downlink_mbps": host.get("downlink_mbps"),
+        "validators": len(host.get("validator_ids") or []),
+        "role": host.get("role"),
+    }
+
+
+def host_population(hosts, experiment):
+    """Host and validator counts by bandwidth class, validators-per-host bins
+    (0, 1, 2-3, 4-7, ...) and countries, from the manifest; None without nodes."""
+    if not hosts:
+        return None
+    classes = defaultdict(lambda: {"hosts": 0, "validators": 0})
+    countries = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
+    bins = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
+    for host in hosts.values():
+        kind = node_class(host)
+        count = len(host.get("validator_ids") or [])
+        totals = classes[(kind, host.get("uplink_mbps"), host.get("downlink_mbps"))]
+        totals["hosts"] += 1
+        totals["validators"] += count
+        country = countries[host.get("country") or "unknown"]
+        country[kind] += 1
+        country["validators"] += count
+        low = 1 << (count.bit_length() - 1) if count else 0
+        bins[low][kind] += 1
+        bins[low]["validators"] += count
+    top = max(bins)
+    lows = [0] + [1 << power for power in range(top.bit_length())]
+    return {
+        "hosts": len(hosts),
+        "validators": sum(len(host.get("validator_ids") or []) for host in hosts.values()),
+        "supernode_by_validator_count": experiment.get("supernode_by_validator_count"),
+        "supernode_fraction": experiment.get("supernode_fraction"),
+        "classes": [
+            {"class": kind, "uplink_mbps": up, "downlink_mbps": down, **totals}
+            for (kind, up, down), totals in sorted(
+                classes.items(), key=lambda item: (NODE_CLASSES.index(item[0][0]), -item[1]["hosts"], str(item[0][1:]))
+            )
+        ],
+        "validators_per_host": [{"low": low, "high": low * 2 - 1 if low else 0, **bins[low]} for low in lows],
+        "countries": sorted(
+            ({"country": name, **totals} for name, totals in countries.items()),
+            key=lambda row: (-(row["supernode"] + row["regular"] + row["unknown"]), row["country"]),
+        ),
+    }
+
+
 def json_data(value):
     """Serialize data safely for an application/json script element."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c").replace(
@@ -560,6 +615,10 @@ def build_snapshot(output_dir):
     for kind in NODE_CLASSES:
         if signature_counts.get(kind):
             signature_cdf[kind] = frequency_cdf(signature_counts[kind])
+    experiment = manifest.get("experiment") if isinstance(manifest.get("experiment"), dict) else {}
+    traffic = traffic_summary(traffic_buckets, traffic_peers, peer_ids)
+    for node_id, logged in traffic.items():
+        logged["host"] = host_card(hosts.get(int(node_id)))
 
     return {
         "schema_version": 1,
@@ -588,10 +647,11 @@ def build_snapshot(output_dir):
             "threshold_fraction": threshold_fraction,
             "node_threshold_ms": node_threshold,
             "recursive_aggregation": recursive_summary(output_dir, recursive_done, final_times, proof_traffic, local_latencies),
-            "traffic": traffic_summary(traffic_buckets, traffic_peers, peer_ids),
+            "traffic": traffic,
             "t0_ms": t0,
             "signature_cdf": signature_cdf,
             "arrivals": arrival_rows(signature_counts, proof_held, final_layer, t0, hosts),
+            "population": host_population(hosts, experiment),
         },
         "cdf": cdf,
         "node_stats": nodes,

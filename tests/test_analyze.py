@@ -69,6 +69,41 @@ class SnapshotTests(unittest.TestCase):
             "regular": [[100, 25.0], [200, 50.0], [300, 75.0], [400, 100.0]],
         })
 
+    def test_population_from_the_manifest(self) -> None:
+        self.assertEqual(self.metrics["population"], {
+            "hosts": 3,
+            "validators": 4,
+            "supernode_by_validator_count": 2,
+            "supernode_fraction": 0.05,
+            "classes": [
+                {"class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000, "hosts": 1, "validators": 3},
+                {"class": "regular", "uplink_mbps": 50, "downlink_mbps": 100, "hosts": 2, "validators": 1},
+            ],
+            "validators_per_host": [
+                {"low": 0, "high": 0, "supernode": 0, "regular": 1, "unknown": 0, "validators": 0},
+                {"low": 1, "high": 1, "supernode": 0, "regular": 1, "unknown": 0, "validators": 1},
+                {"low": 2, "high": 3, "supernode": 1, "regular": 0, "unknown": 0, "validators": 3},
+            ],
+            "countries": [
+                {"country": "germany", "supernode": 0, "regular": 2, "unknown": 0, "validators": 1},
+                {"country": "finland", "supernode": 1, "regular": 0, "unknown": 0, "validators": 3},
+            ],
+        })
+
+    def test_traffic_hosts_carry_their_manifest_card(self) -> None:
+        self.assertEqual(self.metrics["traffic"]["1"]["host"], {
+            "country": "germany", "class": "regular", "uplink_mbps": 50, "downlink_mbps": 100,
+            "validators": 1, "role": "validator",
+        })
+
+    def test_runs_without_a_node_list_have_no_population(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="leansim-analyze-") as temporary:
+            directory = write_fixture_run(Path(temporary) / "run")
+            (directory / "run-manifest.json").write_text('{"experiment": {"local_threshold": 1.0}}', encoding="utf-8")
+            metrics = analyze.build_snapshot(directory)["metrics"]
+        self.assertIsNone(metrics["population"])
+        self.assertEqual({row["class"] for row in metrics["arrivals"]}, {"unknown"})
+
 
 if __name__ == "__main__":
     unittest.main()
