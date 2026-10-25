@@ -289,7 +289,8 @@ class PageTests(unittest.TestCase):
 
     def test_summary_embeds_figures_and_previews(self) -> None:
         data = embedded(self.summary, "report-data")
-        self.assertEqual(set(data["figures"]), {"cdf", "arrival", "subnet-proofs", "validators", "countries"})
+        self.assertEqual(set(data["figures"]), {"cdf", "arrival", "subnet-proofs", "validators", "countries",
+                                                "subnet-counts", "aggregator-countries"})
         self.assertEqual(set(data["previews"]), {"1"})
 
     def test_subnet_page_shows_this_subnet(self) -> None:
@@ -341,6 +342,12 @@ class PageTests(unittest.TestCase):
                       "Plotly turns off pointer events on its SVG, so the labels need them back")
         self.assertIn("subnetPlot.addEventListener('click'", self.summary,
                       "one listener on the chart container survives Plotly redrawing its ticks")
+
+    def test_network_section_describes_aggregators(self) -> None:
+        self.assertIn('id="aggregator-countries"', self.summary)
+        self.assertIn('id="subnet-counts"', self.summary)
+        self.assertTrue("1 host aggregates subnets: 1 supernode, 0 regular nodes, over 1 subnet, in 1 country." in self.summary,
+                        "the network section describes the aggregator population")
 
     def test_summary_is_white(self) -> None:
         self.assertIn("background: #ffffff", self.summary)

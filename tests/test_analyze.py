@@ -137,6 +137,14 @@ class SnapshotTests(unittest.TestCase):
                 "supernode": [[50, 100.0]],
                 "regular": [[100, 25.0], [200, 50.0], [300, 75.0], [400, 100.0]]}})
 
+    def test_aggregator_population_counts_hosts_and_their_subnets(self) -> None:
+        self.assertEqual(self.metrics["aggregators"], {
+            "hosts": 1, "subnets": 1, "validators": 3,
+            "classes": [{"class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000, "hosts": 1, "validators": 3}],
+            "countries": [{"country": "finland", "supernode": 1, "regular": 0, "unknown": 0, "validators": 3}],
+            "subnets_per_host": [{"low": 1, "high": 1, "supernode": 1, "regular": 0, "unknown": 0, "validators": 3}],
+        })
+
     def test_runs_without_a_node_list_have_no_population(self) -> None:
         with tempfile.TemporaryDirectory(prefix="leansim-analyze-") as temporary:
             directory = write_fixture_run(Path(temporary) / "run")

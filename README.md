@@ -297,7 +297,9 @@ reconstructing seeded geo or supernode assignments.
 run. It shows the main settings (signature size and aggregation rate, local
 threshold, committees and aggregators, recursive arity, proof time and proof
 size, gossipsub mesh), the hosts by class (supernode/regular) with uplink/downlink
-rates, validators per host, hosts and validators per country, the signature
+rates, validators per host, hosts and validators per country, the subnet
+aggregators with their class split, link rates, hosts per number of subnets
+aggregated and their countries, the signature
 CDF (first seen anywhere and delivered per host class), arrival-time boxes
 (p5–p95 whiskers, p25–p75 box, median) for signatures, subnet proofs, every
 recursive layer and the final proof per host class with the numbers in a

@@ -181,24 +181,33 @@ def subnet_proofs_height(rows):
     return 18 * len(rows) + 130
 
 
-def validators_figure(population):
-    """Hosts per validator-count bin, stacked by class, with each bar's total above it."""
-    bins = population["validators_per_host"]
+def bin_figure(bins, x_title, hover_unit):
+    """Hosts per bin, stacked by class, with each bar's total above it."""
     labels = [str(item["low"]) if item["low"] == item["high"] else f"{item['low']}–{item['high']}" for item in bins]
     data = [{
         "type": "bar", "name": label, "x": labels, "y": [item[kind] for item in bins],
         "marker": {"color": color}, "customdata": [item["validators"] for item in bins],
-        "hovertemplate": "%{y} hosts with %{x} validators<br>%{customdata:,} validators in this bin<extra>" + label + "</extra>",
+        "hovertemplate": "%{y} hosts with %{x} " + hover_unit + "<br>%{customdata:,} validators in this bin<extra>" + label + "</extra>",
     } for kind, (label, _, color) in CLASS_STYLE.items() if any(item[kind] for item in bins)]
     totals = [item["supernode"] + item["regular"] + item["unknown"] for item in bins]
     annotations = [{"x": label, "y": total, "text": f"{total:,}", "showarrow": False, "yanchor": "bottom",
                     "font": {"size": 12, "color": "#52514e"}} for label, total in zip(labels, totals) if total]
     return {"data": data, "layout": {
         "barmode": "stack", "annotations": annotations,
-        "xaxis": {"title": {"text": "validators on the host"}, "type": "category", "tickangle": -45},
+        "xaxis": {"title": {"text": x_title}, "type": "category", "tickangle": -45},
         "yaxis": {"title": {"text": "hosts"}, "rangemode": "tozero"},
         "legend": {"orientation": "h", "x": 0, "y": 1.12, "traceorder": "normal"},
     }}
+
+
+def validators_figure(population):
+    """Hosts per validator-count bin, stacked by class, with each bar's total above it."""
+    return bin_figure(population["validators_per_host"], "validators on the host", "validators")
+
+
+def subnet_counts_figure(aggregators):
+    """Hosts per bin of how many subnets they aggregate, stacked by class."""
+    return bin_figure(aggregators["subnets_per_host"], "subnets aggregated on the host", "subnets")
 
 
 def countries_figure(population):
@@ -704,7 +713,27 @@ $aggregators
 """)
 
 
-def network_section(population):
+def aggregator_network_section(aggregators):
+    """Where the run's subnet aggregators are and how many subnets each covers."""
+    classes = Counter(host["class"] for host in aggregators["classes"] for _ in range(host["hosts"]))
+    split = [plural(classes["supernode"], "supernode"), plural(classes["regular"], "regular node")]
+    if classes["unknown"]:
+        split.append(f'{classes["unknown"]:,} unclassified')
+    countries = len(aggregators["countries"])
+    return (
+        '<h3>Subnet aggregators</h3>'
+        f'<p class="caption">{plural(aggregators["hosts"], "host")} aggregates subnets: {", ".join(split)}, '
+        f'over {plural(aggregators["subnets"], "subnet")}, in {plural(countries, "country", "countries")}. '
+        'The left chart is hosts per number of subnets aggregated, stacked by host class; the right one is '
+        'aggregators and their validators per country.</p>'
+        + class_table(aggregators)
+        + '<div class="two"><div><h3>Subnets per aggregator</h3><div class="chart" id="subnet-counts"></div></div>'
+        '<div><h3>Aggregators by country</h3>'
+        f'<div class="chart" id="aggregator-countries" style="height:{26 * countries + 110}px"></div></div></div>'
+    )
+
+
+def network_section(population, aggregators=None):
     if not population:
         return '<section><h2>Network</h2><p class="caption">run-manifest.json has no node list, so host classes, validators per host and locations are unavailable.</p></section>'
     return (
@@ -713,7 +742,9 @@ def network_section(population):
         + class_table(population)
         + '<div class="two"><div><h3>Validators per host</h3><div class="chart" id="validators"></div></div>'
         '<div><h3>Hosts and validators by country</h3>'
-        f'<div class="chart" id="countries" style="height:{26 * len(population["countries"]) + 110}px"></div></div></div></section>'
+        f'<div class="chart" id="countries" style="height:{26 * len(population["countries"]) + 110}px"></div></div></div>'
+        + (aggregator_network_section(aggregators) if aggregators else "")
+        + '</section>'
     )
 
 
@@ -833,9 +864,13 @@ def generate_html(snapshot, output):
             'Click a subnet label to open its page.</p>'
             f'<div class="chart" id="subnet-proofs" style="height:{subnet_proofs_height(rows)}px"></div></section>'
         )
+    aggregators = metrics.get("aggregators")
     if population:
         figures["validators"] = validators_figure(population)
         figures["countries"] = countries_figure(population)
+    if aggregators:
+        figures["subnet-counts"] = subnet_counts_figure(aggregators)
+        figures["aggregator-countries"] = countries_figure({"countries": aggregators["countries"]})
     facts = [f"seed {metadata['seed']}" if metadata.get("seed") is not None else None,
              f"local threshold {metadata['local_threshold']:.0%}" if metadata.get("local_threshold") else None,
              f"recursive aggregation, arity {metrics['recursive_aggregation']['arity']}" if (metrics.get("recursive_aggregation") or {}).get("arity") else None]
@@ -851,7 +886,7 @@ def generate_html(snapshot, output):
         facts=html.escape(" · ".join(fact for fact in facts if fact)),
         kpis=kpis(metrics),
         config=config_section(metadata.get("config"), metrics),
-        network=network_section(population),
+        network=network_section(population, aggregators),
         arrival_height=max(260, 70 * messages + 110),
         arrival_table=arrival_table(metrics),
         subnet_proofs=subnet_section,

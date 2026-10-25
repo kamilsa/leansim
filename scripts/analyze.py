@@ -236,28 +236,58 @@ def host_card(host, top_layer=None):
     }
 
 
+def power_bins(hosts, value_of, include_zero=True):
+    """Hosts binned by the highest power of two at or below value_of(host):
+    0, 1, 2-3, 4-7, ... with hosts per class and the validators they run."""
+    bins = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
+    for host in hosts:
+        value = value_of(host)
+        low = 1 << (value.bit_length() - 1) if value else 0
+        bins[low][node_class(host)] += 1
+        bins[low]["validators"] += len(host.get("validator_ids") or [])
+    top = max(bins) if bins else 0
+    lows = ([0] if include_zero else []) + [1 << power for power in range(top.bit_length())]
+    return [{"low": low, "high": low * 2 - 1 if low else 0, **bins[low]} for low in lows]
+
+
+def aggregator_population(hosts):
+    """Hosts that aggregate at least one subnet: class split with link rates,
+    countries and how many subnets each one aggregates; None without duties."""
+    aggregators = [host for host in hosts.values() if host.get("aggregated_subnets")]
+    if not aggregators:
+        return None
+    classes = defaultdict(lambda: {"hosts": 0, "validators": 0})
+    for host in aggregators:
+        totals = classes[(node_class(host), host.get("uplink_mbps"), host.get("downlink_mbps"))]
+        totals["hosts"] += 1
+        totals["validators"] += len(host.get("validator_ids") or [])
+    return {
+        "hosts": len(aggregators),
+        "validators": sum(len(host.get("validator_ids") or []) for host in aggregators),
+        "subnets": len({subnet for host in aggregators for subnet in host["aggregated_subnets"]}),
+        "classes": [
+            {"class": kind, "uplink_mbps": up, "downlink_mbps": down, **totals}
+            for (kind, up, down), totals in sorted(
+                classes.items(), key=lambda item: (NODE_CLASSES.index(item[0][0]), -item[1]["hosts"], str(item[0][1:]))
+            )
+        ],
+        "countries": country_rows(aggregators),
+        "subnets_per_host": power_bins(aggregators, lambda host: len(host["aggregated_subnets"]), include_zero=False),
+    }
+
+
 def host_population(hosts, experiment):
     """Host and validator counts by bandwidth class, validators-per-host bins
     (0, 1, 2-3, 4-7, ...) and countries, from the manifest; None without nodes."""
     if not hosts:
         return None
     classes = defaultdict(lambda: {"hosts": 0, "validators": 0})
-    countries = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
-    bins = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
     for host in hosts.values():
         kind = node_class(host)
         count = len(host.get("validator_ids") or [])
         totals = classes[(kind, host.get("uplink_mbps"), host.get("downlink_mbps"))]
         totals["hosts"] += 1
         totals["validators"] += count
-        country = countries[host.get("country") or "unknown"]
-        country[kind] += 1
-        country["validators"] += count
-        low = 1 << (count.bit_length() - 1) if count else 0
-        bins[low][kind] += 1
-        bins[low]["validators"] += count
-    top = max(bins)
-    lows = [0] + [1 << power for power in range(top.bit_length())]
     return {
         "hosts": len(hosts),
         "validators": sum(len(host.get("validator_ids") or []) for host in hosts.values()),
@@ -269,11 +299,8 @@ def host_population(hosts, experiment):
                 classes.items(), key=lambda item: (NODE_CLASSES.index(item[0][0]), -item[1]["hosts"], str(item[0][1:]))
             )
         ],
-        "validators_per_host": [{"low": low, "high": low * 2 - 1 if low else 0, **bins[low]} for low in lows],
-        "countries": sorted(
-            ({"country": name, **totals} for name, totals in countries.items()),
-            key=lambda row: (-(row["supernode"] + row["regular"] + row["unknown"]), row["country"]),
-        ),
+        "validators_per_host": power_bins(hosts.values(), lambda host: len(host.get("validator_ids") or [])),
+        "countries": country_rows(hosts.values()),
     }
 
 
@@ -758,6 +785,7 @@ def build_snapshot(output_dir):
             "subnet_hosts": subnet_host_summary(hosts),
             "signature_cdf_by_subnet": signature_cdf_by_subnet,
             "population": host_population(hosts, experiment),
+            "aggregators": aggregator_population(hosts),
         },
         "cdf": cdf,
         "node_stats": nodes,
