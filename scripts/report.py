@@ -304,3 +304,226 @@ document.getElementById('raw-buckets').addEventListener('change', () => {
     : 'Curved display: interpolation only; totals, peak and hover values use raw buckets.';
 });
 """
+
+
+def class_table(population):
+    """Bandwidth classes: hosts, link rates and validators."""
+    rows = []
+    for item in population["classes"]:
+        label, _, color = CLASS_STYLE[item["class"]]
+        rows.append(
+            f'<tr><td><span class="swatch" style="background:{color}"></span>{label}</td>'
+            f'<td>{count(item["hosts"])}</td><td>{share(item["hosts"], population["hosts"])}</td>'
+            f'<td>{count(item["uplink_mbps"])} Mbps</td><td>{count(item["downlink_mbps"])} Mbps</td>'
+            f'<td>{count(item["validators"])}</td><td>{share(item["validators"], population["validators"])}</td></tr>'
+        )
+    if population.get("supernode_by_validator_count") is not None:
+        rule = f'Supernodes are hosts running at least {population["supernode_by_validator_count"]:,} validators.'
+    elif population.get("supernode_fraction") is not None:
+        rule = f'Supernodes are {population["supernode_fraction"]:.0%} of hosts, sampled at random.'
+    else:
+        rule = ""
+    return (
+        '<div class="table-scroll"><table class="classes"><thead><tr><th>Class</th><th>Hosts</th><th>Share</th><th>Uplink</th>'
+        '<th>Downlink</th><th>Validators</th><th>Share</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>"
+        + (f'<p class="caption">{html.escape(rule)}</p>' if rule else "")
+    )
+
+
+def arrival_table(metrics):
+    """The numbers behind the arrival boxes."""
+    rows = "".join(
+        f'<tr><td>{html.escape(row["message"])}</td>'
+        f'<td><span class="swatch" style="background:{CLASS_STYLE[row["class"]][2]}"></span>{CLASS_STYLE[row["class"]][0]}</td>'
+        f'<td>{count(row["count"])}</td>' + "".join(f"<td>{seconds(row[key])}</td>" for key in ("p5", "p25", "p50", "p75", "p95"))
+        + "</tr>"
+        for row in metrics.get("arrivals") or []
+    )
+    return (
+        '<table class="arrivals"><thead><tr><th>Message</th><th>Host class</th><th>Samples</th><th>p5</th><th>p25</th>'
+        "<th>Median</th><th>p75</th><th>p95</th></tr></thead><tbody>" + rows + "</tbody></table>"
+    )
+
+
+def kpis(metrics):
+    population = metrics.get("population") or {}
+    supernodes = sum(item["hosts"] for item in population.get("classes", []) if item["class"] == "supernode")
+    signature_p95 = {row["class"]: row["p95"] for row in metrics.get("arrivals") or [] if row["message"] == "Signatures"}
+    final = (metrics.get("recursive_aggregation") or {}).get("final_proof_ms")
+    cells = [
+        ("Hosts", count(population.get("hosts")), f"{supernodes:,} supernodes" if population else ""),
+        ("Validators", count(population.get("validators") or metrics.get("unique_validators")), f'{count(metrics.get("signing_hosts"))} signing hosts'),
+        ("Signature delivery p95", seconds(signature_p95.get("regular", signature_p95.get("unknown"))),
+         f'regular nodes · supernodes {seconds(signature_p95.get("supernode"))}'),
+        ("Final proof", seconds(final - metrics["t0_ms"]) if final is not None else "–", "first host to hold it"),
+    ]
+    return '<div class="kpis">' + "".join(
+        f'<div class="kpi"><span class="label">{label}</span><b>{value}</b><span class="note">{html.escape(note)}</span></div>'
+        for label, value, note in cells
+    ) + "</div>"
+
+
+def preview_cards(traffic):
+    cards = []
+    for node_id in sorted(traffic, key=int):
+        logged = traffic[node_id]
+        node = html.escape(node_id)
+        cards.append(
+            f'<article class="preview"><h3><a href="traffic-{node}.html">Node {node}</a></h3>'
+            f'<p class="meta">{html.escape(host_facts(logged.get("host")))}</p>'
+            f'<div class="mini" id="preview-{node}" role="img" aria-label="Traffic of node {node}: sent above, received below"></div>'
+            f'<p class="totals"><span>↑ {logged["sent"] / 1e6:,.1f} MB sent · ↓ {logged["received"] / 1e6:,.1f} MB received</span>'
+            f'<a href="traffic-{node}.html">Open traffic profile →</a></p></article>'
+        )
+    return '<div class="previews">' + "".join(cards) + "</div>"
+
+SUMMARY_TEMPLATE = Template("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leanSim summary: $run</title><style>$css</style></head><body><main>
+<header class="page"><p class="eyebrow">leanSim run summary</p><h1>$run</h1><p class="facts">$facts</p></header>
+$kpis
+$network
+<section aria-labelledby="propagation"><h2 id="propagation">Signature propagation</h2>
+<p class="caption">Share of signatures received by time t. The dotted line counts each validator's signature once, when the first host saw it. The solid lines count every delivery to a host of that class. Hosts receive only the subnets they subscribe to.</p>
+<div class="chart" id="cdf"></div></section>
+<section aria-labelledby="arrivals"><h2 id="arrivals">Arrival times across hosts</h2>
+<p class="caption">When hosts first held each message. Whiskers span p5 to p95, the box p25 to p75, the line is the median. Signatures count once per receiving host and validator. Proofs count once per host and proof, whether the host built it or fetched it.</p>
+<div class="chart" id="arrival" style="height:${arrival_height}px"></div>
+<div class="table-scroll">$arrival_table</div></section>
+$previews
+<footer class="page">Generated $generated from $output_dir. Times are simulated; t = 0 is the first signature sent ($t0).</footer>
+</main><script id="report-data" type="application/json">$data</script><script>$plotly</script><script>$common</script><script>$script</script></body></html>
+""")
+
+TRAFFIC_TEMPLATE = Template("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leanSim traffic: node $node</title><style>$css</style></head><body><main>
+<header class="page"><p class="eyebrow"><a href="summary.html">← Run summary</a> · <span id="run"></span></p>
+<h1>Node $node traffic</h1><p class="facts">$facts</p></header>
+<nav class="host-strip" aria-label="Logged hosts"><span>Tracked hosts:</span>$host_links</nav>
+<section class="traffic-stage" aria-labelledby="traffic-heading">
+<div class="stage-head"><h2 id="traffic-heading">Sent and received traffic</h2><label class="toggle"><input type="checkbox" id="raw-buckets" aria-describedby="curve-note">Raw buckets</label></div>
+<p class="readouts">↑ Sent <b id="sent"></b> · ↓ Received <b id="received"></b> · Peak bucket rate <b id="peak"></b></p>
+<div class="chart tall" id="timeline" role="img" aria-label="Traffic timeline. Sent traffic above zero, received traffic below. Warmup is unmeasured."></div>
+<p class="caption" id="curve-note">Curved display: interpolation only; totals, peak and hover values use raw buckets.</p></section>
+<section aria-labelledby="peers-heading"><h2 id="peers-heading">Peer exchanges</h2><p class="caption">$peer_caption</p>
+<div class="table-scroll"><table class="peer-ledger"><thead><tr><th>Peer</th><th>Sent ↑</th><th>Received ↓</th><th>Traffic mix</th></tr></thead><tbody>$peer_rows</tbody></table></div></section>
+<section><details><summary>Measurement notes</summary>
+<p>Application-level traffic, not wire bandwidth. Outgoing gossip is estimated as one copy per mesh peer. IHAVE/IWANT, transport overhead and retransmissions are not measured.</p>
+<p>Proof bytes are counted when a message is handled, not spread over the transfer, so peaks can exceed the link rate.</p>
+<p>Warmup traffic (connections, subscriptions) is not captured. Decimal MB: 1 MB = 1,000,000 bytes.</p></details></section>
+</main><script id="traffic-data" type="application/json">$data</script><script>$plotly</script><script>$common</script><script>$script</script></body></html>
+""")
+
+
+def network_section(population):
+    if not population:
+        return '<section><h2>Network</h2><p class="caption">run-manifest.json has no node list, so host classes, validators per host and locations are unavailable.</p></section>'
+    return (
+        '<section aria-labelledby="network"><h2 id="network">Network</h2>'
+        f'<p class="caption">{population["hosts"]:,} hosts run {population["validators"]:,} validators.</p>'
+        + class_table(population)
+        + '<div class="two"><div><h3>Validators per host</h3><div class="chart" id="validators"></div></div>'
+        '<div><h3>Hosts and validators by country</h3>'
+        f'<div class="chart" id="countries" style="height:{26 * len(population["countries"]) + 110}px"></div></div></div></section>'
+    )
+
+
+def milestones_for(snapshot):
+    """Run-wide markers for traffic timelines, in ms from run start."""
+    metrics = snapshot.get("metrics", {})
+    recursive = metrics.get("recursive_aggregation") or {}
+    local_firsts = [stats["min"] for stats in metrics.get("local_proof_latency_ms_by_subnet", {}).values() if stats]
+    candidates = (
+        ("Signature burst", metrics.get("stage_medians_ms", {}).get("signatures_sent")),
+        ("First subnet proof", min(local_firsts, default=None)),
+        ("Final proof", recursive.get("final_proof_ms")),
+    )
+    return [{"label": label, "time_ms": value} for label, value in candidates
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0]
+
+
+def generate_traffic_html(snapshot, directory, plotly_js):
+    """One white dashboard per host that kept traffic logs."""
+    traffic = snapshot.get("metrics", {}).get("traffic") or {}
+    run = Path(snapshot.get("output_dir", "")).name
+    milestones = milestones_for(snapshot)
+    for node_id, logged in traffic.items():
+        host_links = " ".join(
+            f'<a href="traffic-{html.escape(host)}.html"' + (' aria-current="page"' if host == node_id else "")
+            + f">Node {html.escape(host)}</a>"
+            for host in sorted(traffic, key=int)
+        )
+        leaders = logged["peers"][:PEER_ROWS]
+        largest = max((peer["inbound"] + peer["outbound"] for peer in leaders), default=1) or 1
+        rows = []
+        for peer in leaders:
+            label = html.escape(peer["peer"])
+            if str(peer.get("node_id")) in traffic:
+                label = f'<a href="traffic-{peer["node_id"]}.html">{label}</a>'
+            rows.append(
+                f'<tr><td title="{html.escape(peer["peer"], quote=True)}">{label}</td>'
+                f'<td>{peer["outbound"] / 1e6:,.2f} MB</td><td>{peer["inbound"] / 1e6:,.2f} MB</td>'
+                f'<td><span class="mix" aria-hidden="true"><i class="out" style="width:{peer["outbound"] / largest * 100:.3f}%"></i>'
+                f'<i class="in" style="width:{peer["inbound"] / largest * 100:.3f}%"></i></span></td></tr>'
+            )
+        document = TRAFFIC_TEMPLATE.substitute(
+            node=html.escape(node_id),
+            css=PAGE_CSS,
+            facts=html.escape(host_facts(logged.get("host"))),
+            host_links=host_links,
+            peer_caption=f'Top {len(leaders)} of {len(logged["peers"])} retained peer records, by bytes exchanged.',
+            peer_rows="".join(rows) or '<tr><td colspan="4">No per-peer records in this trace.</td></tr>',
+            data=json_data({"node": node_id, "run": run, "traffic": logged, "milestones": milestones,
+                            "warmup_ms": snapshot.get("metadata", {}).get("mesh_warmup_ms")}),
+            plotly=plotly_js,
+            common=COMMON_JS,
+            script=TRAFFIC_JS,
+        )
+        (directory / f"traffic-{node_id}.html").write_text(document, encoding="utf-8")
+
+
+def generate_html(snapshot, output):
+    """Write summary.html for one snapshot, plus traffic-<node>.html beside it."""
+    try:
+        from plotly.offline import get_plotlyjs
+    except ImportError as error:
+        raise RuntimeError("Plotly is required to generate summary.html; run with the analyze dependency group") from error
+    plotly_js = get_plotlyjs().replace("</script", "<\\/script")
+    metrics = snapshot["metrics"]
+    metadata = snapshot.get("metadata", {})
+    population = metrics.get("population")
+    traffic = metrics.get("traffic") or {}
+    run = metadata.get("run_id") or Path(snapshot["output_dir"]).name
+    figures = {"cdf": cdf_figure(metrics), "arrival": arrival_figure(metrics)}
+    if population:
+        figures["validators"] = validators_figure(population)
+        figures["countries"] = countries_figure(population)
+    facts = [f"seed {metadata['seed']}" if metadata.get("seed") is not None else None,
+             f"local threshold {metadata['local_threshold']:.0%}" if metadata.get("local_threshold") else None,
+             f"recursive aggregation, arity {metrics['recursive_aggregation']['arity']}" if (metrics.get("recursive_aggregation") or {}).get("arity") else None]
+    previews = ""
+    if traffic:
+        previews = ('<section aria-labelledby="traffic"><h2 id="traffic">Traffic profiles</h2>'
+                    '<p class="caption">Hosts that kept traffic logs. Sent above zero, received below, in MB/s from run start. Open a profile for the full timeline and its peers.</p>'
+                    + preview_cards(traffic) + "</section>")
+    messages = len({row["message"] for row in metrics.get("arrivals") or []})
+    document = SUMMARY_TEMPLATE.substitute(
+        run=html.escape(str(run)),
+        css=PAGE_CSS,
+        facts=html.escape(" · ".join(fact for fact in facts if fact)),
+        kpis=kpis(metrics),
+        network=network_section(population),
+        arrival_height=max(260, 70 * messages + 110),
+        arrival_table=arrival_table(metrics),
+        previews=previews,
+        generated=html.escape(snapshot.get("generated_at", "")[:19].replace("T", " ") + " UTC"),
+        output_dir=html.escape(snapshot["output_dir"]),
+        t0=html.escape(seconds(metrics.get("t0_ms")) + " after run start"),
+        data=json_data({"figures": figures, "previews": traffic}),
+        plotly=plotly_js,
+        common=COMMON_JS,
+        script=SUMMARY_JS,
+    )
+    output.write_text(document, encoding="utf-8")
+    generate_traffic_html(snapshot, output.parent, plotly_js)

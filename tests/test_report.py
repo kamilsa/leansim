@@ -163,5 +163,56 @@ assert.equal(plots.get('preview-7').config.staticPlot, true);
 """)
 
 
+@unittest.skipUnless(HAS_PLOTLY, "needs the analyze dependency group (plotly)")
+class PageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory(prefix="leansim-report-")
+        root = Path(cls.temporary.name)
+        output = root / "report" / "summary.html"
+        output.parent.mkdir()
+        report.generate_html(fixture_snapshot(root), output)
+        cls.summary = output.read_text(encoding="utf-8")
+        cls.traffic = (output.parent / "traffic-1.html").read_text(encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def test_summary_has_every_section(self) -> None:
+        for marker in ('id="cdf"', 'id="arrival"', 'id="validators"', 'id="countries"', 'class="classes"',
+                       'class="arrivals"', 'id="preview-1"', 'href="traffic-1.html"', "Open traffic profile"):
+            self.assertIn(marker, self.summary)
+        self.assertNotIn("history-body", self.summary, "the summary shows the primary run only")
+        self.assertIn("Supernodes are hosts running at least 2 validators.", self.summary)
+
+    def test_summary_embeds_figures_and_previews(self) -> None:
+        data = embedded(self.summary, "report-data")
+        self.assertEqual(set(data["figures"]), {"cdf", "arrival", "validators", "countries"})
+        self.assertEqual(set(data["previews"]), {"1"})
+
+    def test_summary_is_white(self) -> None:
+        self.assertIn("background: #ffffff", self.summary)
+        self.assertNotIn("color-scheme: dark", self.summary + self.traffic)
+
+    def test_traffic_page_layout(self) -> None:
+        self.assertIn("Germany · regular node · ↑ 50 / ↓ 100 Mbps · 1 validator · validator", self.traffic)
+        self.assertIn('class="traffic-stage"', self.traffic)
+        self.assertIn('<table class="peer-ledger">', self.traffic)
+        self.assertIn('aria-label="Logged hosts"', self.traffic)
+        self.assertIn("Measurement notes", self.traffic)
+        self.assertIn('href="summary.html"', self.traffic)
+        self.assertNotIn('id="peers"', self.traffic, "a second chart must not compete with the timeline")
+
+    def test_traffic_page_data(self) -> None:
+        data = embedded(self.traffic, "traffic-data")
+        self.assertEqual(data["warmup_ms"], 900)
+        self.assertEqual(data["milestones"], [
+            {"label": "Signature burst", "time_ms": 1002.5},
+            {"label": "First subnet proof", "time_ms": 2000},
+            {"label": "Final proof", "time_ms": 3000},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
