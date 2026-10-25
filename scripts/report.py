@@ -82,7 +82,11 @@ def duty_line(card):
 
 def cdf_figure(metrics):
     """Signature propagation: first sighting anywhere, and delivery to each host class."""
-    lines = metrics.get("signature_cdf") or {}
+    return cdf_figure_for(metrics.get("signature_cdf") or {})
+
+
+def cdf_figure_for(lines):
+    """The CDF plot used by the run summary and every subnet page."""
     series = [("first_seen", "First seen by any host", "#0b0b0b", "dot")]
     series += [(kind, "Delivered to " + label.lower(), color, "solid") for kind, (label, _, color) in CLASS_STYLE.items()]
     data = []
@@ -217,7 +221,29 @@ def countries_figure(population):
     }}
 
 
-PAGE_CSS = """
+def subscribers_figure(info):
+    """Hosts subscribed to one subnet, by country and class, with their validators."""
+    return countries_figure({"countries": info["countries"]})
+
+
+def subnet_info(metrics, subnet_id):
+    """Subscriber info for one subnet; keys may be strings after a JSON round-trip."""
+    hosts = metrics.get("subnet_hosts") or {}
+    return hosts.get(subnet_id) or hosts.get(str(subnet_id)) or {"classes": {}, "countries": []}
+
+
+def subnet_page_figures(metrics, subnet_id):
+    """CDF of this subnet's signature deliveries, plus its subscriber breakdown."""
+    info = subnet_info(metrics, subnet_id)
+    by_subnet = metrics.get("signature_cdf_by_subnet") or {}
+    lines = by_subnet.get(subnet_id) or by_subnet.get(str(subnet_id)) or {}
+    return {
+        "cdf": cdf_figure_for(lines),
+        "subscribers": subscribers_figure(info),
+    }
+
+
+PAGE_CSS = r"""
 :root { color-scheme: light; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --link: #2a78d6; --font: system-ui, -apple-system, "Segoe UI", sans-serif; }
 * { box-sizing: border-box; }
 body { margin: 0; background: #ffffff; color: var(--ink); font: 15px/1.5 var(--font); }
@@ -328,10 +354,28 @@ function mirroredAxis(peak) {
 }
 """
 
+SUBNET_JS = r"""
+const data = JSON.parse(document.getElementById('subnet-data').textContent);
+for (const [id, figure] of Object.entries(data.figures)) {
+  Plotly.newPlot(id, figure.data, plotLayout(figure.layout), PLOT_CONFIG);
+}
+"""
+
 SUMMARY_JS = r"""
 const report = JSON.parse(document.getElementById('report-data').textContent);
 for (const [id, figure] of Object.entries(report.figures)) {
   Plotly.newPlot(id, figure.data, plotLayout(figure.layout), PLOT_CONFIG);
+}
+// Subnet labels open that subnet's page.
+const subnetPlot = document.getElementById('subnet-proofs');
+if (subnetPlot) {
+  subnetPlot.querySelectorAll('.ytick text').forEach(tick => {
+    const match = tick.textContent.match(/^subnet (\d+)$/);
+    if (!match) return;
+    tick.style.cursor = 'pointer';
+    tick.style.fill = 'var(--link)';
+    tick.addEventListener('click', () => { window.location.href = 'subnet-' + match[1] + '.html'; });
+  });
 }
 // Previews share one time axis so hosts can be compared at a glance.
 const previews = Object.entries(report.previews).map(([node, traffic]) => [node, trafficSeries(traffic)]);
@@ -585,6 +629,21 @@ TRAFFIC_TEMPLATE = Template("""<!doctype html>
 """)
 
 
+SUBNET_TEMPLATE = Template("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leanSim subnet $subnet</title><style>$css</style></head><body><main>
+<header class="page"><p class="eyebrow"><a href="summary.html">← Run summary</a> · <span>$run</span></p>
+<h1>Subnet $subnet</h1><p class="facts">$facts</p></header>
+<section aria-labelledby="propagation-heading"><h2 id="propagation-heading">Signature propagation in subnet $subnet</h2>
+<p class="caption">Delivery of this subnet's signatures to the hosts that received them. <b>First seen</b> is the first arrival of each signature on any host; the other lines are the first arrival on a host of each class. t = 0 is the first signature sent in the run.</p>
+<div class="chart tall" id="subnet-cdf" role="img" aria-label="CDF of signature delivery in this subnet"></div></section>
+<section aria-labelledby="subscribers-heading"><h2 id="subscribers-heading">Subscribed hosts</h2>
+<p class="caption">Hosts subscribed to this subnet by country (stacked by host class), with the validators they run. The left bars are hosts, the right bars validators.</p>
+<div class="chart" id="subnet-subscribers"></div></section>
+</main><script id="subnet-data" type="application/json">$data</script><script>$plotly</script><script>$common</script><script>$script</script></body></html>
+""")
+
+
 def network_section(population):
     if not population:
         return '<section><h2>Network</h2><p class="caption">run-manifest.json has no node list, so host classes, validators per host and locations are unavailable.</p></section>'
@@ -653,6 +712,36 @@ def generate_traffic_html(snapshot, directory, plotly_js):
         (directory / f"traffic-{node_id}.html").write_text(document, encoding="utf-8")
 
 
+def generate_subnet_html(snapshot, directory, plotly_js):
+    """One white page per subnet: its signature CDF and its subscribers."""
+    metrics = snapshot.get("metrics", {})
+    rows = metrics.get("subnet_proofs") or []
+    if not rows:
+        return
+    run = Path(snapshot.get("output_dir", "")).name
+    for row in rows:
+        subnet_id = row["subnet"]
+        info = subnet_info(metrics, subnet_id)
+        hosts = sum(info["classes"].values())
+        validators = sum(country["validators"] for country in info["countries"])
+        facts = [
+            f"{count(hosts)} subscribed host" + ("s" if hosts != 1 else ""),
+            f"{count(validators)} validators on them",
+            f"{count(row['count'])} subnet aggregator" + ("s" if row["count"] != 1 else ""),
+        ]
+        document = SUBNET_TEMPLATE.substitute(
+            subnet=subnet_id,
+            css=PAGE_CSS,
+            facts=html.escape(" · ".join(facts)),
+            run=html.escape(run),
+            data=json_data({"subnet": subnet_id, "info": info, "figures": subnet_page_figures(metrics, subnet_id)}),
+            plotly=plotly_js,
+            common=COMMON_JS,
+            script=SUBNET_JS,
+        )
+        (directory / f"subnet-{subnet_id}.html").write_text(document, encoding="utf-8")
+
+
 def generate_html(snapshot, output):
     """Write summary.html for one snapshot, plus traffic-<node>.html beside it."""
     try:
@@ -675,7 +764,8 @@ def generate_html(snapshot, output):
             '<section aria-labelledby="subnet-proofs-heading"><h2 id="subnet-proofs-heading">Subnet proof times</h2>'
             f'<p class="caption">When each aggregator of a subnet finished its subnet proof: {sum(row["count"] for row in rows):,} proofs '
             f'over {len(rows)} subnets. Whiskers span the first to the last aggregator, the box p25 to p75, and the line is the median. '
-            'Each dot is one aggregator, coloured by host class; hover a dot for its node.</p>'
+            'Each dot is one aggregator, coloured by host class; hover a dot for its node. '
+            'Click a subnet label to open its page.</p>'
             f'<div class="chart" id="subnet-proofs" style="height:{subnet_proofs_height(rows)}px"></div></section>'
         )
     if population:
@@ -711,3 +801,4 @@ def generate_html(snapshot, output):
     )
     output.write_text(document, encoding="utf-8")
     generate_traffic_html(snapshot, output.parent, plotly_js)
+    generate_subnet_html(snapshot, output.parent, plotly_js)

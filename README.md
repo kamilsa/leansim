@@ -306,6 +306,11 @@ subnet proof (one dot per aggregator), and a preview card per traffic-logging ho
 first signature sent. `scripts/report.py` renders both page types; it has no
 web framework or npm dependency.
 
+Clicking a subnet label in that chart opens `subnet-<n>.html`, one white page
+per subnet with the same style: the CDF of that subnet's signature deliveries
+(first seen anywhere, then per host class), and its subscribed hosts broken
+down by country and host class with the validators they run.
+
 Run the analyzer directly when needed:
 
 ```bash

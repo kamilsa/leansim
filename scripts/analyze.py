@@ -149,6 +149,31 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
     return rows
 
 
+def subnet_host_summary(hosts):
+    """Per subnet, the classes and countries of the hosts subscribed to it."""
+    subnets = sorted({subnet for host in hosts.values() for subnet in host.get("subscribed_subnets") or []})
+    summary = {}
+    for subnet_id in subnets:
+        classes = defaultdict(int)
+        countries = defaultdict(lambda: {"supernode": 0, "regular": 0, "unknown": 0, "validators": 0})
+        for host in hosts.values():
+            if subnet_id not in (host.get("subscribed_subnets") or []):
+                continue
+            kind = node_class(host)
+            classes[kind] += 1
+            country = countries[host.get("country") or "unknown"]
+            country[kind] += 1
+            country["validators"] += len(host.get("validator_ids") or [])
+        summary[subnet_id] = {
+            "classes": {kind: classes[kind] for kind in NODE_CLASSES},
+            "countries": sorted(
+                ({"country": name, **totals} for name, totals in countries.items()),
+                key=lambda row: (-(row["supernode"] + row["regular"] + row["unknown"]), row["country"]),
+            ),
+        }
+    return summary
+
+
 def subnet_proof_rows(local_proofs, t0, hosts):
     """Per subnet, when each of its aggregators finished a subnet proof (ms
     after t0): min/p25/median/p75/max, and every proof as [ms, node, class]."""
@@ -658,6 +683,25 @@ def build_snapshot(output_dir):
     for kind in NODE_CLASSES:
         if signature_counts.get(kind):
             signature_cdf[kind] = frequency_cdf(signature_counts[kind])
+    # Per subnet: first sighting of each of its validators anywhere, and every
+    # delivery to a subscribed host of each class.
+    subnet_counts = defaultdict(lambda: defaultdict(Counter))
+    subnet_first = defaultdict(dict)
+    for (node_id, subnet_id), seen in received_by_node_subnet.items():
+        counter = subnet_counts[subnet_id][node_class(hosts.get(node_id))]
+        firsts = subnet_first[subnet_id]
+        for key, time_ms in seen.items():
+            counter[time_ms - t0] += 1
+            previous = firsts.get(key)
+            if previous is None or time_ms < previous:
+                firsts[key] = time_ms
+    signature_cdf_by_subnet = {}
+    for subnet_id, firsts in subnet_first.items():
+        lines = {"first_seen": frequency_cdf(Counter(time_ms - t0 for time_ms in firsts.values()))}
+        for kind in NODE_CLASSES:
+            if subnet_counts[subnet_id].get(kind):
+                lines[kind] = frequency_cdf(subnet_counts[subnet_id][kind])
+        signature_cdf_by_subnet[subnet_id] = lines
     experiment = manifest.get("experiment") if isinstance(manifest.get("experiment"), dict) else {}
     traffic = traffic_summary(traffic_buckets, traffic_peers, peer_ids)
     # The final group is the plan's top layer; fall back to where a final proof appeared.
@@ -699,6 +743,8 @@ def build_snapshot(output_dir):
             "signature_cdf": signature_cdf,
             "arrivals": arrival_rows(signature_counts, proof_held, final_layer, t0, hosts),
             "subnet_proofs": subnet_proof_rows(local_proofs, t0, hosts),
+            "subnet_hosts": subnet_host_summary(hosts),
+            "signature_cdf_by_subnet": signature_cdf_by_subnet,
             "population": host_population(hosts, experiment),
         },
         "cdf": cdf,

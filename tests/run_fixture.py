@@ -11,9 +11,9 @@ from pathlib import Path
 
 NODES = [
     {"node_id": 0, "role": "local_aggregator", "validator_ids": [0, 1, 2], "country": "finland",
-     "supernode": True, "uplink_mbps": 1000, "downlink_mbps": 1000},
+     "supernode": True, "uplink_mbps": 1000, "downlink_mbps": 1000, "subscribed_subnets": [0]},
     {"node_id": 1, "role": "validator", "validator_ids": [3], "country": "germany",
-     "supernode": False, "uplink_mbps": 50, "downlink_mbps": 100},
+     "supernode": False, "uplink_mbps": 50, "downlink_mbps": 100, "subscribed_subnets": [0]},
     {"node_id": 2, "role": "relay", "validator_ids": [], "country": "germany",
      "supernode": False, "uplink_mbps": 50, "downlink_mbps": 100},
 ]

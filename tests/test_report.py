@@ -163,6 +163,7 @@ const assert = require('node:assert/strict');
 const elements = new Map();
 global.document = {getElementById(id) {
   if (!elements.has(id)) elements.set(id, {textContent: PAGE_DATA[id] || '', checked: false,
+    querySelectorAll: () => [],
     addEventListener(event, handler) { this[event] = handler; }});
   return elements.get(id);
 }};
@@ -280,6 +281,31 @@ class PageTests(unittest.TestCase):
         data = embedded(self.summary, "report-data")
         self.assertEqual(set(data["figures"]), {"cdf", "arrival", "subnet-proofs", "validators", "countries"})
         self.assertEqual(set(data["previews"]), {"1"})
+
+    def test_subnet_page_shows_this_subnet(self) -> None:
+        page = (Path(self.temporary.name) / "report" / "subnet-0.html").read_text(encoding="utf-8")
+        self.assertIn('href="summary.html"', page)
+        self.assertIn("<h1>Subnet 0</h1>", page)
+        data = embedded(page, "subnet-data")
+        self.assertEqual(data["subnet"], 0)
+        self.assertEqual(data["info"]["classes"], {"supernode": 1, "regular": 1, "unknown": 0})
+        self.assertEqual(data["info"]["countries"][0]["country"], "finland")
+        self.assertIn("subnet-subscribers", page)
+
+    def test_subnet_page_survives_a_json_round_trip(self) -> None:
+        snapshot = json.loads(json.dumps(fixture_snapshot(Path(self.temporary.name) / "json-round-trip")))
+        with tempfile.TemporaryDirectory(prefix="leansim-report-") as temporary:
+            output = Path(temporary) / "report" / "summary.html"
+            output.parent.mkdir()
+            report.generate_html(snapshot, output)
+            page = (output.parent / "subnet-0.html").read_text(encoding="utf-8")
+        data = embedded(page, "subnet-data")
+        self.assertEqual(data["info"]["classes"], {"supernode": 1, "regular": 1, "unknown": 0})
+        self.assertEqual(len(data["figures"]["cdf"]["data"]), 3)
+
+    def test_subnet_labels_open_subnet_pages(self) -> None:
+        self.assertIn(".ytick text", self.summary)
+        self.assertIn("window.location.href = 'subnet-' + match[1] + '.html'", self.summary)
 
     def test_summary_is_white(self) -> None:
         self.assertIn("background: #ffffff", self.summary)

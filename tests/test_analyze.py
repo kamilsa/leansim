@@ -123,6 +123,16 @@ class SnapshotTests(unittest.TestCase):
                          {"subnets": [12, 40], "layers": {"1": [10, 11], "2": [3]}, "final": True})
         self.assertEqual(analyze.host_duties({}, top_layer=None), {"subnets": [], "layers": {}, "final": False})
 
+    def test_subnet_pages_show_this_subnet_only(self) -> None:
+        self.assertEqual(self.metrics["subnet_hosts"], {
+            0: {"classes": {"supernode": 1, "regular": 1, "unknown": 0},
+                "countries": [{"country": "finland", "supernode": 1, "regular": 0, "unknown": 0, "validators": 3},
+                              {"country": "germany", "supernode": 0, "regular": 1, "unknown": 0, "validators": 1}]}})
+        self.assertEqual(self.metrics["signature_cdf_by_subnet"], {
+            0: {"first_seen": [[50, 25.0], [100, 50.0], [200, 75.0], [300, 100.0]],
+                "supernode": [[50, 100.0]],
+                "regular": [[100, 25.0], [200, 50.0], [300, 75.0], [400, 100.0]]}})
+
     def test_runs_without_a_node_list_have_no_population(self) -> None:
         with tempfile.TemporaryDirectory(prefix="leansim-analyze-") as temporary:
             directory = write_fixture_run(Path(temporary) / "run")
