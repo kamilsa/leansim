@@ -60,6 +60,49 @@ def latency_stats(values):
     return {"min": values[0], "median": median(values), "max": values[-1], "count": len(values)}
 
 
+# Points kept per CDF line: smooth at any screen width, small in runs-history.json.
+MAX_CDF_POINTS = 400
+# Whisker, box and median percentiles of the arrival-time chart.
+BOX_PERCENTILES = (5, 25, 50, 75, 95)
+# Host classes in display order; "unknown" covers manifests without a supernode flag.
+NODE_CLASSES = ("supernode", "regular", "unknown")
+
+
+def frequency_percentiles(counts, percents=BOX_PERCENTILES):
+    """Nearest-rank percentiles of a {value: occurrences} histogram, plus its sample count."""
+    total = sum(counts.values())
+    if not total:
+        return None
+    values = sorted(counts)
+    result = {"count": total}
+    for percent in percents:
+        rank = max(1, math.ceil(total * percent / 100))
+        seen = 0
+        for value in values:
+            seen += counts[value]
+            if seen >= rank:
+                result["p" + str(percent)] = value
+                break
+    return result
+
+
+def frequency_cdf(counts, limit=MAX_CDF_POINTS):
+    """[[value, percent of samples at or below it], ...], thinned to at most
+    `limit` evenly spaced points; the first and last points are always kept."""
+    total = sum(counts.values())
+    if not total:
+        return []
+    points = []
+    seen = 0
+    for value in sorted(counts):
+        seen += counts[value]
+        points.append([value, round(seen * 100 / total, 4)])
+    if len(points) > limit:
+        step = (len(points) - 1) / (limit - 1)
+        points = [points[round(index * step)] for index in range(limit)]
+    return points
+
+
 def json_data(value):
     """Serialize data safely for an application/json script element."""
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c").replace(
