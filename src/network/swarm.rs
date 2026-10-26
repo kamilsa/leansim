@@ -404,9 +404,11 @@ pub async fn dial_seeds(
         }
     }
 
-    if seeds.is_empty() && explicit_peers.explicit_addrs.is_empty() {
-        tracing::info!("no seeds to dial");
-        return Ok(());
+    // A host with nothing to dial still waits out the warmup: its peers dial it
+    // (the launcher has the subnet subscriber dial the smaller host), and signing
+    // before they connect and graft drops its signatures with InsufficientPeers.
+    if dial_addrs.is_empty() {
+        tracing::info!("no seeds to dial; waiting for inbound peers");
     }
 
     // Poll for connection events and mesh formation.
