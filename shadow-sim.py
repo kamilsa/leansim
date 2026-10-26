@@ -27,8 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 LEANSIM_BIN_DOCKER = "/opt/leansim/leansim"
 LEANSIM_BIN_NATIVE = REPO_ROOT / "target" / "release" / "leansim"
 SEED_PEER_COUNT = 50
-# Peers a host needs on a subnet it only publishes to (fanout); subscribed
-# subnets need gossipsub_mesh_n instead.
+# Default peers a host needs on a subnet it only publishes to (fanout), overridable
+# with publish_subnet_peer_count; subscribed subnets need gossipsub_mesh_n instead.
 PUBLISH_SUBNET_PEER_COUNT = 2
 RUNNER_SECTIONS = {"run", "docker", "output"}
 # Mirrors network::swarm::warmup_ms: a host dialing more than WARMUP_DIAL_THRESHOLD
@@ -192,6 +192,10 @@ def validate_experiment(config: dict) -> None:
         if node_map is None:
             die("random_peer_count requires node_map")
         as_int(config["random_peer_count"], "random_peer_count", minimum=0)
+    if config.get("publish_subnet_peer_count") is not None:
+        if node_map is None:
+            die("publish_subnet_peer_count requires node_map")
+        as_int(config["publish_subnet_peer_count"], "publish_subnet_peer_count", minimum=1)
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -779,8 +783,9 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
 
 def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
     """Top up random seeds until every host has at least gossipsub_mesh_n peers on
-    each subnet it subscribes to (a full mesh) and PUBLISH_SUBNET_PEER_COUNT on each
-    subnet it only publishes in (fanout), mirroring a client's subnet peer
+    each subnet it subscribes to (a full mesh) and publish_subnet_peer_count
+    (default PUBLISH_SUBNET_PEER_COUNT) on each subnet it only publishes in
+    (fanout), mirroring a client's subnet peer
     discovery. Without this, a host with no peer on a subnet gets InsufficientPeers
     and its signatures for that subnet are silently dropped.
 
@@ -789,6 +794,7 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
     peers, pushing them past the longer warmup in swarm::dial_seeds.
     """
     mesh_target = experiment["gossipsub_mesh_n"]
+    publish_target = experiment.get("publish_subnet_peer_count", PUBLISH_SUBNET_PEER_COUNT)
     node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
     subscribed = [set(node["subscribed_subnets"]) for node in nodes]
     subscribers: defaultdict[int, list[int]] = defaultdict(list)
@@ -806,7 +812,7 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
     for node in nodes:
         host = node["node_id"]
         for subnet in sorted(subscribed[host] | set(node["signing_subnets"])):
-            target = mesh_target if subnet in subscribed[host] else PUBLISH_SUBNET_PEER_COUNT
+            target = mesh_target if subnet in subscribed[host] else publish_target
             missing = target - sum(1 for peer in peers[host] if subnet in subscribed[peer])
             if missing <= 0:
                 continue
@@ -819,7 +825,7 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
     if added:
         log(
             f"added {added} subnet peer connections for >= {mesh_target} peers per subscribed subnet and "
-            f">= {PUBLISH_SUBNET_PEER_COUNT} per publish-only subnet "
+            f">= {publish_target} per publish-only subnet "
             f"(max {max(len(node['seed_addrs']) for node in nodes)} dials per host)"
         )
 

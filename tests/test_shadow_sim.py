@@ -175,6 +175,23 @@ class NodeMapPlacementTests(unittest.TestCase):
                 target = 3 if subnet in node["subscribed_subnets"] else shadow_sim.PUBLISH_SUBNET_PEER_COUNT
                 self.assertGreaterEqual(len(on_subnet), min(target, available), (node["node_id"], subnet))
 
+    def test_publish_subnet_peer_count_raises_fanout_peers(self) -> None:
+        original = shadow_sim.SEED_PEER_COUNT
+        shadow_sim.SEED_PEER_COUNT = 1
+        self.addCleanup(setattr, shadow_sim, "SEED_PEER_COUNT", original)
+        nodes = shadow_sim.assign_nodes(self.experiment(publish_subnet_peer_count=3))
+        node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+        peers = {node["node_id"]: set() for node in nodes}
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                peers[node["node_id"]].add(node_of[address])
+                peers[node_of[address]].add(node["node_id"])
+        for node in nodes:
+            for subnet in set(node["signing_subnets"]) - set(node["subscribed_subnets"]):
+                on_subnet = [peer for peer in peers[node["node_id"]] if subnet in nodes[peer]["subscribed_subnets"]]
+                available = sum(1 for other in nodes if other is not node and subnet in other["subscribed_subnets"])
+                self.assertGreaterEqual(len(on_subnet), min(3, available), (node["node_id"], subnet))
+
 
     def test_subscriber_aggregators_aggregate_exactly_their_subnet(self) -> None:
         for node in shadow_sim.assign_nodes(self.experiment()):
