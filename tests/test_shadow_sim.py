@@ -236,6 +236,22 @@ class NodeMapPlacementTests(unittest.TestCase):
                 available = sum(1 for other in nodes if other is not node and subnet in other["subscribed_subnets"])
                 self.assertGreaterEqual(len(on_subnet), min(3, available), (node["node_id"], subnet))
 
+    def test_min_peer_count_tops_up_every_host(self) -> None:
+        original = shadow_sim.SEED_PEER_COUNT
+        shadow_sim.SEED_PEER_COUNT = 0
+        self.addCleanup(setattr, shadow_sim, "SEED_PEER_COUNT", original)
+        nodes = shadow_sim.assign_nodes(self.experiment(min_peer_count=5))
+        node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+        peers = {node["node_id"]: set() for node in nodes}
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                peers[node["node_id"]].add(node_of[address])
+                peers[node_of[address]].add(node["node_id"])
+        for node_id, host_peers in peers.items():
+            self.assertNotIn(node_id, host_peers)
+            self.assertGreaterEqual(len(host_peers), min(5, len(nodes) - 1), node_id)
+
+
     def test_subscriber_aggregators_aggregate_exactly_their_subnet(self) -> None:
         for node in shadow_sim.assign_nodes(self.experiment()):
             expected = [node["subnet_id"]] if node["role"] == "local_aggregator" else []

@@ -196,11 +196,15 @@ def validate_experiment(config: dict) -> None:
         if node_map is None:
             die("publish_subnet_peer_count requires node_map")
         as_int(config["publish_subnet_peer_count"], "publish_subnet_peer_count", minimum=1)
+    if config.get("min_peer_count") is not None:
+        if node_map is None:
+            die("min_peer_count requires node_map")
+        as_int(config["min_peer_count"], "min_peer_count", minimum=1)
     if config.get("peer_count") is not None:
         if node_map is None:
             die("peer_count requires node_map")
         as_int(config["peer_count"], "peer_count", minimum=1)
-        for key in ("random_peer_count", "publish_subnet_peer_count"):
+        for key in ("random_peer_count", "publish_subnet_peer_count", "min_peer_count"):
             if config.get(key) is not None:
                 die(f"peer_count replaces {key}; set only one of them")
         if setting(config, "gossipsub_explicit_aggregator_count", 0):
@@ -801,6 +805,8 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
         node["explicit_peer_addrs"] = explicit_addrs
         node["seed_addrs"] = explicit_addrs + candidates[:max(0, random_peer_count - len(explicit_addrs))]
     add_subnet_peers(nodes, experiment)
+    if experiment.get("min_peer_count") is not None:
+        add_random_peers(nodes, experiment["min_peer_count"], random.Random(experiment["geo_seed"] + 13))
     return nodes
 
 
@@ -912,6 +918,40 @@ def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:
             f">= {publish_target} per publish-only subnet "
             f"(max {max(len(node['seed_addrs']) for node in nodes)} dials per host)"
         )
+
+
+def add_random_peers(nodes: list[dict], target: int, rng: random.Random) -> None:
+    """Top up random connections until every host has at least `target` peers,
+    on top of the subnet peers. Hosts below the target are paired with each other
+    (each listed once per missing peer, shuffled, matched in pairs), so they end
+    at or near `target` while hosts already above it get no extra connections.
+    The dialing end is picked at random.
+    """
+    node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+    peers: list[set[int]] = [set() for _ in nodes]
+    for node in nodes:
+        for address in node["seed_addrs"]:
+            peers[node["node_id"]].add(node_of[address])
+            peers[node_of[address]].add(node["node_id"])
+    added = 0
+    for _ in range(5):
+        stubs = [node["node_id"] for node in nodes for _ in range(max(0, target - len(peers[node["node_id"]])))]
+        if len(stubs) < 2:
+            break
+        rng.shuffle(stubs)
+        for a, b in zip(stubs[::2], stubs[1::2]):
+            if a == b or b in peers[a] or len(peers[a]) >= target or len(peers[b]) >= target:
+                continue
+            dialer, listener = (a, b) if rng.random() < 0.5 else (b, a)
+            nodes[dialer]["seed_addrs"].append(nodes[listener]["listen_addr"])
+            peers[a].add(b)
+            peers[b].add(a)
+            added += 1
+    counts = sorted(len(host_peers) for host_peers in peers)
+    log(
+        f"added {added} random connections for >= {target} peers per host "
+        f"(peers per host: min {counts[0]}, median {counts[len(counts) // 2]}, max {counts[-1]})"
+    )
 
 
 def build_aggregation_plan(nodes: list[dict], experiment: dict) -> dict:
