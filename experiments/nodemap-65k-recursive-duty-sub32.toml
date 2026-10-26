@@ -1,0 +1,85 @@
+# A scaled-down 131k network with duty subnet subscriptions: 65,536 validators in
+# 32 committees of 2,048 (the 131k committee size), so each subnet keeps its 131k
+# properties (2,048 signatures, ~740 signing hosts, ~1,030 subscribers, 11-26
+# lottery aggregators, ~54 validators per subnet on the largest operators) while
+# the network has half the subnets. Hosts come from nodes.csv without all_hosts:
+# validator hosts plus a proportional sample of relays, which keeps the
+# subscribers per subnet close to 131k's (all_hosts would double them).
+# Supernodes join ~32 subnets instead of ~60, so they carry about half their
+# 131k load. 8/8 subnet-aware peering, committee aggregators and 2-to-1
+# recursive aggregation (16/8/4/2/1 groups over 5 layers instead of 6).
+run_id = "nodemap-65k-recursive-duty-sub32"
+run_timeout_secs = 120
+
+validator_count = 65536
+node_map = "nodes.csv"
+subnet_subscriptions_per_node = 2
+# Mainnet-faithful subscriptions: validator hosts join the subnets their
+# validators publish in (their duties) on top of the 2 random gossip subnets;
+# relays keep the 2 random ones.
+subscribe_to_duty_subnets = true
+# Peers come only from subnet discovery ("8/8"): gossipsub_mesh_n per subscribed
+# subnet and publish_subnet_peer_count per subnet a host only publishes in.
+random_peer_count = 0
+publish_subnet_peer_count = 8
+subnet_count = 32
+local_aggregators_per_subnet = 16
+committee_aggregators = true
+
+recursive_aggregation = true
+recursive_aggregation_arity = 2
+# leanVM's 2-to-1 recursion: 0.276 s on an M4 Max.
+recursive_aggregation_time_ms = 276
+recursive_group_size = 16
+recursive_proofs_per_child = 1
+aggregate_proof_bytes = 262144
+
+# Traffic logs (seed 42 node ids): supernodes 4037 (1,776 validators, the
+# largest; 7 subnets + recursive layers 1-3), 1973 (893, 7 subnets + layers
+# 1/2/3/5), 3201 (466, subnet aggregator only), 477 (361, recursive layers
+# 1/2/4), 3422 (207, no duty), 1038 (101, no duty); regular 1346 (13), 4 (1),
+# relay 4270; regular aggregators 69 (1 subnet), 157/774/339 (recursive layer
+# 1/3/5, the final proof), 3748 (layers 1 and 3).
+traffic_log_nodes = [4, 69, 157, 339, 477, 774, 1038, 1346, 1973, 3201, 3422, 3748, 4037, 4270]
+traffic_log_bucket_ms = 100
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+# Every host warms up 3 s before signing: about 2 round trips on the slowest
+# links (up to 259 ms one-way) to learn subscriptions, then a heartbeat to graft
+# meshes. The launcher's dial-count rule would pick 1,500 ms here, which cuts it
+# close on intercontinental links.
+mesh_warmup_ms = 3000
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "native"  # local cargo build + shadow on PATH
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[output]
+dir = "output-nodemap-65k-recursive-duty-sub32"
