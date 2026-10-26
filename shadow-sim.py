@@ -196,6 +196,21 @@ def validate_experiment(config: dict) -> None:
         if node_map is None:
             die("publish_subnet_peer_count requires node_map")
         as_int(config["publish_subnet_peer_count"], "publish_subnet_peer_count", minimum=1)
+    if config.get("peer_count") is not None:
+        if node_map is None:
+            die("peer_count requires node_map")
+        as_int(config["peer_count"], "peer_count", minimum=1)
+        for key in ("random_peer_count", "publish_subnet_peer_count"):
+            if config.get(key) is not None:
+                die(f"peer_count replaces {key}; set only one of them")
+        if setting(config, "gossipsub_explicit_aggregator_count", 0):
+            die("peer_count does not support gossipsub_explicit_aggregator_count")
+    if config.get("supernode_peer_count") is not None:
+        if config.get("peer_count") is None:
+            die("supernode_peer_count requires peer_count")
+        if config.get("supernode_by_validator_count") is None:
+            die("supernode_peer_count requires supernode_by_validator_count")
+        as_int(config["supernode_peer_count"], "supernode_peer_count", minimum=1)
     as_number(setting(config, "geo_jitter", 0.0), "geo_jitter", minimum=0)
     as_number(setting(config, "supernode_fraction", 0.05), "supernode_fraction", minimum=0, maximum=1)
     network = config.get("network_defaults", {})
@@ -764,6 +779,14 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
                     # Explicit peers must be configured on both ends to avoid mesh GRAFT/PRUNE churn.
                     aggregator["explicit_peer_addrs"].add(node["listen_addr"])
 
+    if experiment.get("peer_count") is not None:
+        degrees = [experiment["peer_count"]] * len(nodes)
+        if experiment.get("supernode_peer_count") is not None:
+            for node_id in supernode_ids(nodes, experiment):
+                degrees[node_id] = experiment["supernode_peer_count"]
+        assign_regular_peers(nodes, degrees, random.Random(experiment["geo_seed"] + 11))
+        return nodes
+
     # random_peer_count = 0 leaves only the subnet peers added below.
     random_peer_count = experiment.get("random_peer_count", SEED_PEER_COUNT)
     all_addresses = [node["listen_addr"] for node in nodes]
@@ -779,6 +802,67 @@ def assign_nodes_from_node_map(experiment: dict) -> list[dict]:
         node["seed_addrs"] = explicit_addrs + candidates[:max(0, random_peer_count - len(explicit_addrs))]
     add_subnet_peers(nodes, experiment)
     return nodes
+
+
+def assign_regular_peers(nodes: list[dict], degrees: list[int], rng: random.Random) -> None:
+    """Connect every host to exactly degrees[host] random peers, ignoring subnets.
+
+    A configuration model: each host gets one stub per peer, the shuffled stubs
+    are paired, and pairs that would be a self-loop or a repeat connection are
+    retried in later rounds. Any stubs still open after that are closed with an
+    edge switch: a random connection x-y is replaced by u-x and v-y, which keeps
+    x and y at their degree. Each connection is dialed by one end chosen at
+    random, so hosts dial about half their peers and accept the rest.
+    """
+    count = len(nodes)
+    if max(degrees) >= count:
+        die(f"peer count {max(degrees)} must be below the number of hosts ({count})")
+    if sum(degrees) % 2:
+        die(f"peer counts must add up to an even number (got {sum(degrees)})")
+    peers: list[set[int]] = [set() for _ in nodes]
+    edges: list[tuple[int, int]] = []
+
+    def missing() -> list[int]:
+        return [host for host in range(count) for _ in range(degrees[host] - len(peers[host]))]
+
+    for _ in range(5):
+        stubs = missing()
+        if not stubs:
+            break
+        rng.shuffle(stubs)
+        for a, b in zip(stubs[::2], stubs[1::2]):
+            if a != b and b not in peers[a] and len(peers[a]) < degrees[a] and len(peers[b]) < degrees[b]:
+                peers[a].add(b)
+                peers[b].add(a)
+                edges.append((a, b))
+    stubs = missing()
+    while stubs:
+        u, v = stubs[0], stubs[1]
+        for _ in range(100 * len(edges)):
+            index = rng.randrange(len(edges))
+            x, y = edges[index] if rng.random() < 0.5 else edges[index][::-1]
+            if x in (u, v) or y in (u, v) or x in peers[u] or y in peers[v]:
+                continue
+            peers[x].remove(y); peers[y].remove(x)
+            peers[u].add(x); peers[x].add(u); peers[v].add(y); peers[y].add(v)
+            edges[index] = (u, x)
+            edges.append((v, y))
+            break
+        else:
+            die("could not build a random peer graph with the requested peer counts")
+        stubs = missing()
+    for node in nodes:
+        node["explicit_peer_addrs"] = []
+        node["seed_addrs"] = []
+    for a, b in edges:
+        dialer, target = (a, b) if rng.random() < 0.5 else (b, a)
+        nodes[dialer]["seed_addrs"].append(nodes[target]["listen_addr"])
+    counts = Counter(degrees)
+    log(
+        "connected every host to exactly its random peers ("
+        + ", ".join(f"{hosts} hosts with {degree}" for degree, hosts in sorted(counts.items()))
+        + f"; {len(edges)} connections)"
+    )
 
 
 def add_subnet_peers(nodes: list[dict], experiment: dict) -> None:

@@ -175,6 +175,50 @@ class NodeMapPlacementTests(unittest.TestCase):
                 target = 3 if subnet in node["subscribed_subnets"] else shadow_sim.PUBLISH_SUBNET_PEER_COUNT
                 self.assertGreaterEqual(len(on_subnet), min(target, available), (node["node_id"], subnet))
 
+    def test_peer_count_gives_every_host_exactly_that_many_peers(self) -> None:
+        nodes = shadow_sim.assign_nodes(self.experiment(peer_count=4))
+        node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+        peers = {node["node_id"]: set() for node in nodes}
+        dialed = set()
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                edge = frozenset((node["node_id"], node_of[address]))
+                self.assertNotIn(edge, dialed)  # one dial per connection, no self-dials
+                self.assertEqual(len(edge), 2)
+                dialed.add(edge)
+                peers[node["node_id"]].add(node_of[address])
+                peers[node_of[address]].add(node["node_id"])
+        for node in nodes:
+            self.assertEqual(len(peers[node["node_id"]]), 4, node["node_id"])
+
+    def test_supernode_peer_count_gives_supernodes_more_peers(self) -> None:
+        experiment = self.experiment(peer_count=2, supernode_peer_count=6, supernode_by_validator_count=4)
+        nodes = shadow_sim.assign_nodes(experiment)
+        supernodes = shadow_sim.supernode_ids(nodes, experiment)
+        self.assertEqual({nodes[node_id]["peer_key"] for node_id in supernodes}, {"A"})
+        node_of = {node["listen_addr"]: node["node_id"] for node in nodes}
+        peers = {node["node_id"]: set() for node in nodes}
+        dialed = set()
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                edge = frozenset((node["node_id"], node_of[address]))
+                self.assertNotIn(edge, dialed)
+                self.assertEqual(len(edge), 2)
+                dialed.add(edge)
+                peers[node["node_id"]].add(node_of[address])
+                peers[node_of[address]].add(node["node_id"])
+        for node in nodes:
+            expected = 6 if node["node_id"] in supernodes else 2
+            self.assertEqual(len(peers[node["node_id"]]), expected, node["node_id"])
+
+    def test_supernode_peer_count_requires_peer_count(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.experiment(supernode_peer_count=6, supernode_by_validator_count=4))
+
+    def test_peer_count_excludes_subnet_peer_options(self) -> None:
+        with self.assertRaises(SystemExit):
+            shadow_sim.validate_experiment(self.experiment(peer_count=4, random_peer_count=0))
+
     def test_publish_subnet_peer_count_raises_fanout_peers(self) -> None:
         original = shadow_sim.SEED_PEER_COUNT
         shadow_sim.SEED_PEER_COUNT = 1
@@ -191,7 +235,6 @@ class NodeMapPlacementTests(unittest.TestCase):
                 on_subnet = [peer for peer in peers[node["node_id"]] if subnet in nodes[peer]["subscribed_subnets"]]
                 available = sum(1 for other in nodes if other is not node and subnet in other["subscribed_subnets"])
                 self.assertGreaterEqual(len(on_subnet), min(3, available), (node["node_id"], subnet))
-
 
     def test_subscriber_aggregators_aggregate_exactly_their_subnet(self) -> None:
         for node in shadow_sim.assign_nodes(self.experiment()):
