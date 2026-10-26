@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leanSim results</title>
+<style>
+:root { color-scheme: light; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --link: #2a78d6; --font: system-ui, -apple-system, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #ffffff; color: var(--ink); font: 15px/1.5 var(--font); }
+main { max-width: 1200px; margin: 0 auto; padding: 40px 40px 56px; }
+a { color: var(--link); text-decoration: none; } a:hover { text-decoration: underline; }
+header.page { border-bottom: 1px solid var(--grid); padding-bottom: 20px; margin-bottom: 28px; }
+.eyebrow { color: var(--muted); font-size: 13px; margin: 0 0 4px; overflow-wrap: anywhere; }
+h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 6px; overflow-wrap: anywhere; }
+h2 { font-size: 21px; font-weight: 650; margin: 0 0 4px; }
+.facts { color: var(--ink-2); margin: 0; }
+section { margin: 0 0 44px; }
+.caption { color: var(--ink-2); font-size: 14px; margin: 0 0 12px; max-width: 860px; }
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 44px; }
+.kpi { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px; }
+.kpi .label, .kpi .note { display: block; color: var(--ink-2); font-size: 13px; } .kpi .note { color: var(--muted); }
+.kpi b { display: block; font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
+th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child { text-align: left; }
+td.run a { font-weight: 600; }
+td .muted { color: var(--muted); font-size: 13px; margin-left: 8px; }
+.table-scroll { overflow-x: auto; }
+footer.page { border-top: 1px solid var(--grid); padding-top: 14px; color: var(--muted); font-size: 13px; }
+@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<main>
+<header class="page">
+  <p class="eyebrow">leanSim</p>
+  <h1>Simulation results</h1>
+  <p class="facts">1 published run · 32 subnet pages · 14 traffic pages</p>
+</header>
+<section>
+  <h2>Runs</h2>
+  <p class="caption">One row per run directory. <b>Pages</b> counts subnet-*.html and traffic-*.html
+  files in the directory; every run links to its full summary.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th>Run</th><th>Seed</th><th>Validators</th><th>Hosts</th><th>Subnets</th>
+      <th>Aggr./subnet</th><th>Threshold</th><th>Mode</th><th>Pages</th><th></th>
+    </tr></thead>
+    <tbody>
+    <tr><td class="run"><a href="output-nodemap-65k-recursive-duty-sub32/summary.html">nodemap-65k-recursive-duty-sub32</a></td><td>42</td><td>65,536</td><td>5,331</td><td>32</td><td>16</td><td>0.9</td><td>committee, recursive (arity 2)</td><td>32 + 14 traffic</td><td><a href="output-nodemap-65k-recursive-duty-sub32/run-manifest.json">manifest</a></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+<footer class="page">Generated 2026-10-26 from run-manifest.json files — regenerate with <code>python3 scripts/gen_results_index.py</code>.</footer>
+</main>
+</body>
+</html>
