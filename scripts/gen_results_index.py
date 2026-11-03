@@ -56,6 +56,8 @@ CONFIG_KEYS = (
     "signature_payload_bytes",
     "recursive_aggregation",
     "recursive_aggregation_arity",
+    "proof_propagation",
+    "broadcast_degree",
     "committee_aggregators",
     "subscribe_to_duty_subnets",
 )
@@ -99,6 +101,9 @@ def mode_label(experiment: dict) -> str:
     if experiment.get("recursive_aggregation"):
         arity = experiment.get("recursive_aggregation_arity")
         parts.append(f"recursive (arity {arity})" if arity else "recursive")
+    elif experiment.get("proof_propagation") == "broadcast":
+        degree = experiment.get("broadcast_degree")
+        parts.append(f"broadcast (degree {degree})" if degree else "broadcast")
     return ", ".join(parts) if parts else "subnet aggregators"
 
 
