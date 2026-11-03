@@ -110,6 +110,8 @@ def mode_label(experiment: dict) -> str:
         pieces = experiment.get("global_proof_chunks")
         cap = experiment.get("global_proof_forward_limit")
         parts.append(f"gossip ({pieces} pieces, cap {cap})" if pieces else "gossip")
+    if experiment.get("skip_signature_broadcast"):
+        parts.append("proof-only")
     return ", ".join(parts) if parts else "subnet aggregators"
 
 
