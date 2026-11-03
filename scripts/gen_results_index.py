@@ -58,6 +58,8 @@ CONFIG_KEYS = (
     "recursive_aggregation_arity",
     "proof_propagation",
     "broadcast_degree",
+    "global_proof_chunks",
+    "global_proof_forward_limit",
     "committee_aggregators",
     "subscribe_to_duty_subnets",
 )
@@ -104,6 +106,10 @@ def mode_label(experiment: dict) -> str:
     elif experiment.get("proof_propagation") == "broadcast":
         degree = experiment.get("broadcast_degree")
         parts.append(f"broadcast (degree {degree})" if degree else "broadcast")
+    elif experiment.get("proof_propagation") == "gossip":
+        pieces = experiment.get("global_proof_chunks")
+        cap = experiment.get("global_proof_forward_limit")
+        parts.append(f"gossip ({pieces} pieces, cap {cap})" if pieces else "gossip")
     return ", ".join(parts) if parts else "subnet aggregators"
 
 
