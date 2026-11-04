@@ -238,7 +238,9 @@ node configs get `traffic_log = true`.
 - Each logged host records `TrafficBucket` events every `traffic_log_bucket_ms`
   (default 100 ms): bytes sent and received in that bucket broken down by
   `signature`, `duplicate_signature`, `proof_announce`, `proof_request`,
-  `proof_payload`, and `proof_control` (acks, missing answers).
+  `proof_payload`, `proof_control` (acks, missing answers), and with signature
+  sync `sync_control` (bitmaps, pull requests, acks) and `sync_payload` (pulled
+  signatures, coded packets).
 - At exit it writes one `TrafficPeer` event per peer with the run's totals.
 - Incoming signatures are attributed to the peer that forwarded them. Gossipsub
   does not expose which peers a forward went to, so outgoing gossip is attributed
@@ -269,6 +271,70 @@ node configs get `traffic_log = true`.
 |---|---|---|
 | `traffic_log_nodes` | `[]` | Hosts that keep traffic logs |
 | `traffic_log_bucket_ms` | `100` | Bucket width of the traffic chart |
+
+#### Signature sync
+
+Signatures always travel by gossipsub's eager push. `signature_sync` adds a
+per-hop protocol between each subnet's gossipsub mesh neighbours (libp2p
+request-response, `/leansim/sigsync/1`). Nobody needs to know which hosts
+aggregate: every subscriber collects and relays the subnet's signatures, and
+messages go to one mesh neighbour each, never forwarded as they are.
+
+- `none`: gossipsub only.
+- `bitmap_pull`: neighbours send each other a bitmap of the signatures they hold
+  (one bit per validator of the subnet, 128 B for 1,024 validators) whenever it
+  changes, and every `sync_refresh_ms` while incomplete. A host pulls a
+  signature it lacks from the neighbours that advertised it once the first
+  advertisement is `sync_grace_ms` old, at most `sync_pull_batch` per neighbour
+  per tick, spreading the pulls over the advertisers.
+- `coded_repair`: the same bitmaps; a host pushes each neighbour random
+  GF(2^8) combinations of the signatures that neighbour lacks, counting a
+  signature as lacking only if the neighbour's bitmap came `sync_grace_ms` after
+  this host got it. Each neighbour sends ceil(`sync_coded_redundancy` x gaps /
+  its mesh size) packets per bitmap heard, so the mesh shares a peer's repair
+  without coordinating, and every combination is useful to the receiver whoever
+  else sent one. Receivers run incremental Gaussian elimination; a signature
+  learned by gossip or decoding is subtracted from pending equations. Each
+  packet carries a 2-byte index and a coefficient per signature plus one
+  signature-sized payload. `sync_coded_degree = 0` combines about log2(gaps) + 2
+  signatures (at most 16): with uncoordinated senders, degrees 2-3 leave 8-20 %
+  of gaps undecodable however many packets arrive. `sync_coded_degree = 1` sends
+  uncoded random repairs, the no-coding control.
+
+The simulator carries no real signature bytes: each signature stands in as a
+one-byte symbol, combined alongside the coefficients, so every decode is
+checked (`coded_mismatches` must stay 0). Shadow does not model CPU time, so
+encoding and decoding are free in simulated time.
+
+`gossipsub_idontwant_threshold_bytes` turns on the gossipsub v1.2 IDONTWANT
+backported to the vendored gossipsub: on first receipt of a message larger than
+the threshold, a host tells the topic's other mesh peers not to send it, and a
+forward still in a peer's send queue is dropped when that peer's IDONTWANT
+arrives.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `gossipsub_idontwant_threshold_bytes` | `0` | IDONTWANT for larger messages; 0 = off |
+| `signature_sync` | `"none"` | `none`, `bitmap_pull` or `coded_repair` |
+| `sync_interval_ms` | `100` | Tick: send changed bitmaps, plan pulls or repairs |
+| `sync_grace_ms` | `300` | Gossip's head start before pulling or repairing |
+| `sync_refresh_ms` | `1000` | Repeat an incomplete host's bitmap; re-arm repair budgets |
+| `sync_pull_batch` | `16` | Signatures pulled from one neighbour per tick |
+| `sync_pull_timeout_ms` | `1000` | Retry an unanswered pull elsewhere after this |
+| `sync_coded_degree` | `0` | Signatures per coded packet; 0 = about log2(gaps) + 2 |
+| `sync_coded_redundancy` | `1.1` | Coded packets the mesh sends per gap |
+| `sync_coded_per_tick` | `8` | Coded packets to one neighbour per tick |
+
+Every `SigReceived` names how the signature came (`via`: `gossip`, `pull`,
+`coded`), and a signature already held through any path counts as a duplicate.
+Each host writes a `TransportStats` event at exit with gossipsub control ids
+(IHAVE, IWANT, IDONTWANT, suppressed and dropped forwards) and the sync
+protocol's messages and bytes. The analyzer turns these into
+`signature_transport`: deliveries by path and a wire-byte ledger (gossiped and
+pulled signatures, coded packets, bitmaps, pull requests, gossipsub control
+ids). Byte counts are application-level approximations; QUIC and libp2p framing
+are not included. The `nodemap-*-allhosts-sync-{gossip,pull,coded}-sub64`
+experiments compare the three on the same network.
 
 ## Output
 
