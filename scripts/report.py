@@ -342,6 +342,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-nu
 th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .arrivals td:nth-child(2), .arrivals th:nth-child(2) { text-align: left; }
 .aggregators td:nth-child(-n+3), .aggregators th:nth-child(-n+3) { text-align: left; }
+.transport td.note { text-align: left; color: var(--muted); font-size: 12px; white-space: normal; }
 .table-scroll { overflow-x: auto; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
 .previews { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
@@ -596,6 +597,19 @@ def config_groups(config, metrics):
     for key, label in (("gossipsub_flood_publish", "Flood publish"), ("gossipsub_idontwant", "IDONTWANT")):
         if key in config:
             gossip.append((label, "on" if config[key] else "off", ""))
+    if "gossipsub_idontwant_threshold_bytes" in config:
+        threshold = config["gossipsub_idontwant_threshold_bytes"]
+        gossip.append(("IDONTWANT", f"over {threshold:,} B" if threshold else "off", "gossipsub v1.2, backported"))
+    if "signature_sync" in config:
+        mode = config["signature_sync"]
+        names = {"none": "gossip only", "bitmap_pull": "bitmap pull", "coded_repair": "coded repair"}
+        note = ""
+        if mode != "none" and has("sync_interval_ms", "sync_grace_ms"):
+            note = f'bitmaps every {config["sync_interval_ms"]:,} ms, {config["sync_grace_ms"]:,} ms grace'
+            if mode == "coded_repair" and has("sync_coded_degree", "sync_coded_redundancy"):
+                degree = config["sync_coded_degree"] or "log2(gaps)+2"
+                note += f', degree {degree}, redundancy {config["sync_coded_redundancy"]}'
+        gossip.append(("Signature sync", names.get(mode, str(mode)), note))
     return [(title, rows) for title, rows in (("Signatures", signatures), ("Aggregation", aggregation), ("Gossip", gossip)) if rows]
 
 
@@ -616,6 +630,60 @@ def config_section(config, metrics):
     return ('<section aria-labelledby="config"><h2 id="config">Configuration</h2>'
             '<p class="caption">Main settings of this run, from run-manifest.json.</p>'
             f'<div class="config-grid">{cards}</div></section>')
+
+
+TRANSPORT_LABELS = (
+    ("gossip_signatures", "Gossiped signatures", "every copy received, duplicates included"),
+    ("pulled_signatures", "Pulled signatures", "answers to bitmap pulls"),
+    ("coded_packets", "Coded repair packets", "one signature-sized payload each"),
+    ("bitmaps", "Bitmaps", "held-signature bitmaps to mesh neighbours"),
+    ("pull_requests", "Pull requests", ""),
+    ("gossip_control", "Gossipsub control ids", "IHAVE, IWANT, IDONTWANT"),
+    ("sync_acks", "Sync acks", ""),
+)
+
+
+def transport_section(metrics):
+    """Deliveries by path and the wire-byte ledger of signature transport."""
+    transport = metrics.get("signature_transport")
+    if not transport:
+        return ""
+    wire = transport["wire_bytes"]
+    total = wire.get("total") or 0
+    hosts = transport.get("hosts") or 1
+    rows = "".join(
+        f'<tr><td>{label}</td><td>{wire.get(key, 0) / 1e6:,.1f} MB</td><td>{share(wire.get(key, 0), total)}</td>'
+        f'<td>{wire.get(key, 0) / hosts / 1e3:,.0f} kB</td><td class="note">{html.escape(note)}</td></tr>'
+        for key, label, note in TRANSPORT_LABELS
+        if wire.get(key)
+    )
+    rows += (f'<tr><th scope="row">Total</th><td><b>{total / 1e6:,.1f} MB</b></td><td></td>'
+             f'<td><b>{total / hosts / 1e3:,.0f} kB</b></td><td></td></tr>')
+    deliveries = transport["deliveries"]
+    delivery_rows = "".join(
+        f'<tr><td>{name}</td><td>{count(deliveries[via]["unique"])}</td><td>{count(deliveries[via]["duplicate"])}</td></tr>'
+        for via, name in (("gossip", "Gossip"), ("pull", "Pull"), ("coded", "Coded repair"))
+        if deliveries[via]["unique"] or deliveries[via]["duplicate"]
+    )
+    c = transport["counters"]
+    facts = [f'{count(c["idontwant_ids_sent"])} IDONTWANT sent, {count(c["forwards_suppressed"] + c.get("queued_forwards_dropped", 0))} forwards avoided']
+    if c["have_sent"]:
+        facts.append(f'{count(c["have_sent"])} bitmaps')
+    if c["want_sent"]:
+        facts.append(f'{count(c["want_ids_sent"])} signatures pulled in {count(c["want_sent"])} requests, {count(c["pulled_duplicates"])} already held on arrival')
+    if c["coded_sent"]:
+        facts.append(f'{count(c["coded_sent"])} coded packets, {count(c["coded_innovative"])} innovative, {count(c["coded_decoded"])} signatures decoded'
+                     + (f', {count(c["coded_mismatches"])} decode mismatches' if c["coded_mismatches"] else ""))
+    return (
+        '<section aria-labelledby="transport"><h2 id="transport">Signature transport</h2>'
+        '<p class="caption">Bytes spent moving subnet signatures, summed over hosts (application-level sizes; QUIC and libp2p framing excluded). '
+        'Per host divides by the hosts that logged transport stats.</p>'
+        '<div class="table-scroll"><table class="transport"><thead><tr><th>Traffic</th><th>Bytes</th><th>Share</th><th>Per host</th><th></th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>'
+        '<div class="table-scroll"><table class="deliveries"><thead><tr><th>Delivered by</th><th>First copies</th><th>Duplicates</th></tr></thead>'
+        f'<tbody>{delivery_rows}</tbody></table></div>'
+        f'<p class="caption">{html.escape("; ".join(facts))}.</p></section>'
+    )
 
 
 def kpis(metrics):
@@ -670,6 +738,7 @@ $network
 </ul>
 <div class="chart" id="arrival" style="height:${arrival_height}px"></div>
 <div class="table-scroll">$arrival_table</div></section>
+$transport
 $subnet_proofs
 $previews
 <footer class="page">Generated $generated from $output_dir. Times are simulated; t = 0 is the first signature sent ($t0).</footer>
@@ -890,6 +959,7 @@ def generate_html(snapshot, output):
         arrival_height=max(260, 70 * messages + 110),
         arrival_table=arrival_table(metrics),
         subnet_proofs=subnet_section,
+        transport=transport_section(metrics),
         previews=previews,
         generated=html.escape(snapshot.get("generated_at", "")[:19].replace("T", " ") + " UTC"),
         output_dir=html.escape(snapshot["output_dir"]),
