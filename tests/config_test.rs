@@ -1,4 +1,6 @@
-use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole};
+use leansim::config::experiment::{
+    ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole, SignatureSync,
+};
 use leansim::network::swarm::warmup_ms;
 
 fn base_config() -> ExperimentConfig {
@@ -26,6 +28,16 @@ fn base_config() -> ExperimentConfig {
         mesh_warmup_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
+        gossipsub_idontwant_threshold_bytes: 0,
+        signature_sync: SignatureSync::None,
+        sync_interval_ms: 100,
+        sync_grace_ms: 300,
+        sync_pull_batch: 16,
+        sync_pull_timeout_ms: 1000,
+        sync_coded_degree: 0,
+        sync_coded_redundancy: 1.1,
+        sync_coded_per_tick: 8,
+        sync_refresh_ms: 1000,
         network_defaults: NetworkDefaults::default(),
         use_geo_latency: false,
         geo_seed: 0,
@@ -384,4 +396,63 @@ fn traffic_bucket_width_must_be_positive() {
     assert!(exp.validate().is_err());
     exp.traffic_log_bucket_ms = 100;
     assert!(exp.validate().is_ok());
+}
+
+#[test]
+fn signature_sync_defaults_to_gossip_only() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_sync, SignatureSync::None);
+    assert_eq!(exp.gossipsub_idontwant_threshold_bytes, 0);
+    assert_eq!(exp.sync_coded_degree, 0);
+    assert_eq!(exp.sync_coded_redundancy, 1.1);
+}
+
+#[test]
+fn signature_sync_modes_deserialize_and_validate() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+signature_sync = "coded_repair"
+gossipsub_idontwant_threshold_bytes = 1000
+sync_coded_degree = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_sync, SignatureSync::CodedRepair);
+    assert_eq!(exp.gossipsub_idontwant_threshold_bytes, 1000);
+    exp.validate().unwrap();
+
+    let pull: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+signature_sync = "bitmap_pull"
+"#,
+    )
+    .unwrap();
+    assert_eq!(pull.signature_sync, SignatureSync::BitmapPull);
+}
+
+#[test]
+fn signature_sync_rejects_bad_settings() {
+    let mut exp = base_config();
+    exp.signature_sync = SignatureSync::CodedRepair;
+    exp.sync_coded_redundancy = 0.0;
+    assert!(exp.validate().is_err());
+    exp.sync_coded_redundancy = 1.1;
+    exp.sync_interval_ms = 0;
+    assert!(exp.validate().is_err());
+    // Mode none ignores the sync settings.
+    exp.signature_sync = SignatureSync::None;
+    exp.validate().unwrap();
 }

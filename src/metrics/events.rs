@@ -2,6 +2,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
+/// How a signature reached a host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigVia {
+    #[default]
+    Gossip,
+    /// Pulled from a mesh neighbour after its bitmap advertised it.
+    Pull,
+    /// Decoded from coded repair packets.
+    Coded,
+}
+
 /// Structured event emitted as one JSON line to stdout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
@@ -29,7 +41,12 @@ pub enum JsonlEvent {
         subnet_id: u32,
         duplicate: bool,
         ts_ms: u64,
+        /// Bytes of the message that carried it; 0 for a decoded signature, whose
+        /// packets are counted in [`JsonlEvent::TransportStats`].
         byte_size: u64,
+        /// Absent in logs from before signature sync, which were all gossip.
+        #[serde(default)]
+        via: SigVia,
     },
     /// A local aggregator finished a subnet proof (announced to its layer-1 group
     /// with recursive aggregation).
@@ -97,6 +114,39 @@ pub enum JsonlEvent {
         bytes_received: u64,
         msgs_sent: u64,
         msgs_received: u64,
+    },
+    /// A host's signature-transport traffic over the run, besides signatures
+    /// gossiped (counted by `SigReceived`): gossipsub control ids and the sync
+    /// protocol. Byte counts are approximate wire sizes, all as sent by this host.
+    /// No `byte_size` field, so it never counts towards the run's signature traffic.
+    TransportStats {
+        node_id: u32,
+        ihave_ids_sent: u64,
+        ihave_bytes_sent: u64,
+        iwant_ids_sent: u64,
+        iwant_bytes_sent: u64,
+        idontwant_ids_sent: u64,
+        idontwant_bytes_sent: u64,
+        idontwant_ids_received: u64,
+        forwards_suppressed: u64,
+        have_sent: u64,
+        have_bytes_sent: u64,
+        want_sent: u64,
+        want_ids_sent: u64,
+        want_bytes_sent: u64,
+        pull_sigs_served: u64,
+        pull_bytes_served: u64,
+        pulled_received: u64,
+        pulled_duplicates: u64,
+        coded_sent: u64,
+        coded_bytes_sent: u64,
+        coded_received: u64,
+        coded_innovative: u64,
+        coded_decoded: u64,
+        coded_mismatches: u64,
+        acks_sent: u64,
+        sync_failures: u64,
+        pending_rows: u64,
     },
     /// One bucket of a traffic-logging host, by message kind. No `byte_size`
     /// field, so these never count towards the run's signature traffic.

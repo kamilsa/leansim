@@ -28,6 +28,10 @@ pub enum Kind {
     ProofPayload,
     /// Acks and "missing" answers to a pull.
     ProofControl,
+    /// Signature sync bitmaps, pull requests and acks.
+    SyncControl,
+    /// Signatures pulled and coded repair packets.
+    SyncPayload,
 }
 
 impl Kind {
@@ -39,6 +43,8 @@ impl Kind {
             Kind::ProofRequest => "proof_request",
             Kind::ProofPayload => "proof_payload",
             Kind::ProofControl => "proof_control",
+            Kind::SyncControl => "sync_control",
+            Kind::SyncPayload => "sync_payload",
         }
     }
 }
