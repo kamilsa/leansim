@@ -492,6 +492,18 @@ impl Decoder for GossipsubCodec {
                 })
                 .collect();
 
+            let idontwant_msgs: Vec<ControlAction> = rpc_control
+                .idontwant
+                .into_iter()
+                .map(|idontwant| ControlAction::IDontWant {
+                    message_ids: idontwant
+                        .message_ids
+                        .into_iter()
+                        .map(MessageId::from)
+                        .collect::<Vec<_>>(),
+                })
+                .collect();
+
             let graft_msgs: Vec<ControlAction> = rpc_control
                 .graft
                 .into_iter()
@@ -528,6 +540,7 @@ impl Decoder for GossipsubCodec {
             }
 
             control_msgs.extend(ihave_msgs);
+            control_msgs.extend(idontwant_msgs);
             control_msgs.extend(iwant_msgs);
             control_msgs.extend(graft_msgs);
             control_msgs.extend(prune_msgs);

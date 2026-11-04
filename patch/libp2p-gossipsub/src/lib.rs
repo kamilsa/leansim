@@ -110,7 +110,7 @@ mod topic;
 mod transform;
 mod types;
 
-pub use self::behaviour::{Behaviour, Event, MessageAuthenticity};
+pub use self::behaviour::{Behaviour, ControlStats, Event, MessageAuthenticity};
 pub use self::config::{Config, ConfigBuilder, ValidationMode, Version};
 pub use self::error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError};
 pub use self::metrics::Config as MetricsConfig;

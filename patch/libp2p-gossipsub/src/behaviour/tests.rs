@@ -936,6 +936,7 @@ fn test_get_random_peers() {
                 PeerConnections {
                     kind: PeerKind::Gossipsubv1_1,
                     connections: vec![ConnectionId::new_unchecked(0)],
+                    dont_send: HashMap::new(),
                 },
             )
         })
@@ -5114,4 +5115,67 @@ fn test_graft_without_subscribe() {
 
     // We unsubscribe from the topic.
     let _ = gs.unsubscribe(&Topic::new(topic));
+}
+
+/// IDONTWANT (leansim backport): a large first-seen message triggers IDONTWANT to the
+/// other mesh peers, and a peer that sent IDONTWANT for a message is not forwarded it.
+#[test]
+fn test_idontwant_sent_and_honoured() {
+    let config = ConfigBuilder::default()
+        .idontwant_message_size_threshold(16)
+        .build()
+        .unwrap();
+    let topic = String::from("topic1");
+    let (mut gs, peers, topic_hashes) = inject_nodes1()
+        .peer_no(5)
+        .topics(vec![topic])
+        .to_subscribe(true)
+        .gs_config(config)
+        .create_network();
+    let mesh: Vec<PeerId> = gs.mesh[&topic_hashes[0]].iter().copied().collect();
+    assert!(mesh.len() >= 3, "test needs a mesh");
+    let (source, quiet, rest) = (mesh[0], mesh[1], &mesh[2..]);
+
+    let raw_message = RawMessage {
+        source: Some(PeerId::random()),
+        data: vec![7; 64].into(),
+        sequence_number: Some(1),
+        topic: topic_hashes[0].clone(),
+        signature: None,
+        key: None,
+        validated: false,
+    };
+    let message = gs
+        .data_transform
+        .inbound_transform(raw_message.clone())
+        .unwrap();
+    let msg_id = gs.config.message_id(&message);
+    gs.handle_idontwant(&quiet, vec![msg_id.clone()]);
+    gs.events.clear();
+
+    gs.handle_received_message(raw_message, &source);
+
+    let mut idontwant_to = HashSet::new();
+    let mut forwarded_to = HashSet::new();
+    for event in gs.events.drain(..) {
+        if let ToSwarm::NotifyHandler { peer_id, event, .. } = event {
+            match event {
+                HandlerIn::Message(RpcOut::Control(ControlAction::IDontWant { message_ids })) => {
+                    assert_eq!(message_ids, vec![msg_id.clone()]);
+                    idontwant_to.insert(peer_id);
+                }
+                HandlerIn::Message(RpcOut::Forward(_)) => {
+                    forwarded_to.insert(peer_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    let others: HashSet<PeerId> = mesh[1..].iter().copied().collect();
+    assert_eq!(idontwant_to, others, "IDONTWANT goes to every mesh peer but the source");
+    let expected: HashSet<PeerId> = rest.iter().copied().collect();
+    assert_eq!(forwarded_to, expected, "no forward to the source or the IDONTWANT sender");
+    assert_eq!(gs.control_stats().forwards_suppressed, 1);
+    assert_eq!(gs.control_stats().idontwant_ids_received, 1);
+    let _ = peers;
 }

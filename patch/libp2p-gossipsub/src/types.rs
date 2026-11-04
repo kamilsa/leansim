@@ -20,11 +20,13 @@
 
 //! A collection of types using the Gossipsub system.
 use crate::TopicHash;
+use web_time::Instant;
 use bytes::Bytes;
 use libp2p_identity::PeerId;
 use libp2p_swarm::ConnectionId;
 use prometheus_client::encoding::EncodeLabelValue;
 use quick_protobuf::MessageWrite;
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Debug;
 
@@ -78,6 +80,8 @@ pub(crate) struct PeerConnections {
     pub(crate) kind: PeerKind,
     /// Its current connections.
     pub(crate) connections: Vec<ConnectionId>,
+    /// Messages the peer told us (IDONTWANT) not to send, with when it said so.
+    pub(crate) dont_send: HashMap<MessageId, Instant>,
 }
 
 /// Describes the types of peers that can exist in the gossipsub context.
@@ -220,6 +224,12 @@ pub enum ControlAction {
         /// A list of known message ids (peer_id + sequence _number) as a string.
         message_ids: Vec<MessageId>,
     },
+    /// The node already has these messages and asks not to be sent them - IDontWant
+    /// control message (gossipsub v1.2, backported for leansim).
+    IDontWant {
+        /// Ids of the messages the sender no longer wants.
+        message_ids: Vec<MessageId>,
+    },
     /// The node has been added to the mesh - Graft control message.
     Graft {
         /// The mesh topic the peer should be added to.
@@ -296,6 +306,7 @@ impl From<RpcOut> for proto::RPC {
                 publish: Vec::new(),
                 subscriptions: Vec::new(),
                 control: Some(proto::ControlMessage {
+                    idontwant: vec![],
                     ihave: vec![proto::ControlIHave {
                         topic_id: Some(topic_hash.into_string()),
                         message_ids: message_ids.into_iter().map(|msg_id| msg_id.0).collect(),
@@ -309,6 +320,7 @@ impl From<RpcOut> for proto::RPC {
                 publish: Vec::new(),
                 subscriptions: Vec::new(),
                 control: Some(proto::ControlMessage {
+                    idontwant: vec![],
                     ihave: vec![],
                     iwant: vec![proto::ControlIWant {
                         message_ids: message_ids.into_iter().map(|msg_id| msg_id.0).collect(),
@@ -317,10 +329,21 @@ impl From<RpcOut> for proto::RPC {
                     prune: vec![],
                 }),
             },
+            RpcOut::Control(ControlAction::IDontWant { message_ids }) => proto::RPC {
+                publish: Vec::new(),
+                subscriptions: Vec::new(),
+                control: Some(proto::ControlMessage {
+                    idontwant: vec![proto::ControlIDontWant {
+                        message_ids: message_ids.into_iter().map(|msg_id| msg_id.0).collect(),
+                    }],
+                    ..Default::default()
+                }),
+            },
             RpcOut::Control(ControlAction::Graft { topic_hash }) => proto::RPC {
                 publish: Vec::new(),
                 subscriptions: vec![],
                 control: Some(proto::ControlMessage {
+                    idontwant: vec![],
                     ihave: vec![],
                     iwant: vec![],
                     graft: vec![proto::ControlGraft {
@@ -338,6 +361,7 @@ impl From<RpcOut> for proto::RPC {
                     publish: Vec::new(),
                     subscriptions: vec![],
                     control: Some(proto::ControlMessage {
+                        idontwant: vec![],
                         ihave: vec![],
                         iwant: vec![],
                         graft: vec![],
@@ -410,6 +434,7 @@ impl From<Rpc> for proto::RPC {
 
         // control messages
         let mut control = proto::ControlMessage {
+            idontwant: Vec::new(),
             ihave: Vec::new(),
             iwant: Vec::new(),
             graft: Vec::new(),
@@ -436,6 +461,11 @@ impl From<Rpc> for proto::RPC {
                         message_ids: message_ids.into_iter().map(|msg_id| msg_id.0).collect(),
                     };
                     control.iwant.push(rpc_iwant);
+                }
+                ControlAction::IDontWant { message_ids } => {
+                    control.idontwant.push(proto::ControlIDontWant {
+                        message_ids: message_ids.into_iter().map(|msg_id| msg_id.0).collect(),
+                    });
                 }
                 ControlAction::Graft { topic_hash } => {
                     let rpc_graft = proto::ControlGraft {

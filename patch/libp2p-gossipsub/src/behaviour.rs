@@ -72,6 +72,24 @@ use std::{cmp::Ordering::Equal, fmt::Debug};
 #[cfg(test)]
 mod tests;
 
+/// How long an IDONTWANT keeps a message from being forwarded to its sender.
+const IDONTWANT_RETENTION: Duration = Duration::from_secs(3);
+
+/// Control traffic this node sent and received (leansim instrumentation). Byte counts
+/// are the message ids' lengths; framing adds a couple of bytes per id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlStats {
+    pub ihave_ids_sent: u64,
+    pub ihave_bytes_sent: u64,
+    pub iwant_ids_sent: u64,
+    pub iwant_bytes_sent: u64,
+    pub idontwant_ids_sent: u64,
+    pub idontwant_bytes_sent: u64,
+    pub idontwant_ids_received: u64,
+    /// Forwards skipped because the peer had sent IDONTWANT for the message.
+    pub forwards_suppressed: u64,
+}
+
 /// Determines if published messages should be signed or not.
 ///
 /// Without signing, a number of privacy preserving modes can be selected.
@@ -326,6 +344,9 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// Counts the number of `IWANT` that we sent the each peer since the last heartbeat.
     count_sent_iwant: HashMap<PeerId, usize>,
 
+    /// Control traffic counters (leansim instrumentation).
+    control_stats: ControlStats,
+
     /// Keeps track of IWANT messages that we are awaiting to send.
     /// This is used to prevent sending duplicate IWANT messages for the same message.
     pending_iwant_msgs: HashSet<MessageId>,
@@ -477,6 +498,7 @@ where
             peer_score: None,
             count_received_ihave: HashMap::new(),
             count_sent_iwant: HashMap::new(),
+            control_stats: ControlStats::default(),
             pending_iwant_msgs: HashSet::new(),
             connected_peers: HashMap::new(),
             published_message_ids: DuplicateCache::new(config.published_message_ids_cache_time()),
@@ -764,6 +786,11 @@ where
     /// in the cache anymore.
     ///
     /// This should only be called once per message.
+    /// Control traffic counters since the behaviour was built.
+    pub fn control_stats(&self) -> ControlStats {
+        self.control_stats
+    }
+
     pub fn report_message_validation_result(
         &mut self,
         msg_id: &MessageId,
@@ -1289,6 +1316,9 @@ where
                 iwant_ids_vec
             );
 
+            self.control_stats.iwant_ids_sent += iwant_ids_vec.len() as u64;
+            self.control_stats.iwant_bytes_sent +=
+                iwant_ids_vec.iter().map(|id| id.0.len() as u64).sum::<u64>();
             Self::control_pool_add(
                 &mut self.control_pool,
                 *peer_id,
@@ -1298,6 +1328,48 @@ where
             );
         }
         tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
+    }
+
+    /// Sends IDONTWANT for `msg_id` to the topic's mesh peers, except the one it came
+    /// from and its publisher, which already hold it.
+    fn send_idontwant(
+        &mut self,
+        message: &RawMessage,
+        msg_id: &MessageId,
+        propagation_source: &PeerId,
+    ) {
+        let Some(mesh_peers) = self.mesh.get(&message.topic) else {
+            return;
+        };
+        let recipients: Vec<PeerId> = mesh_peers
+            .iter()
+            .filter(|peer| {
+                *peer != propagation_source && Some(*peer) != message.source.as_ref()
+            })
+            .copied()
+            .collect();
+        for peer in recipients {
+            self.control_stats.idontwant_ids_sent += 1;
+            self.control_stats.idontwant_bytes_sent += msg_id.0.len() as u64;
+            self.send_message(
+                peer,
+                RpcOut::Control(ControlAction::IDontWant {
+                    message_ids: vec![msg_id.clone()],
+                }),
+            );
+        }
+    }
+
+    /// Handles an IDONTWANT control message: never forward those messages to `peer_id`.
+    fn handle_idontwant(&mut self, peer_id: &PeerId, message_ids: Vec<MessageId>) {
+        self.control_stats.idontwant_ids_received += message_ids.len() as u64;
+        let Some(peer) = self.connected_peers.get_mut(peer_id) else {
+            return;
+        };
+        let now = Instant::now();
+        for id in message_ids {
+            peer.dont_send.insert(id, now);
+        }
     }
 
     /// Handles an IWANT control message. Checks our cache of messages. If the message exists it is
@@ -1771,6 +1843,12 @@ where
         // Add the message to our memcache
         self.mcache.put(&msg_id, raw_message.clone());
 
+        // Gossipsub v1.2: ask the topic's other mesh peers not to send this message too.
+        let threshold = self.config.idontwant_message_size_threshold();
+        if threshold > 0 && raw_message.raw_protobuf_len() > threshold {
+            self.send_idontwant(&raw_message, &msg_id, propagation_source);
+        }
+
         // Dispatch the message to the user if we are subscribed to any of the topics
         if self.mesh.contains_key(&message.topic) {
             tracing::debug!("Sending received message to user");
@@ -2036,6 +2114,13 @@ where
 
         // clean up expired backoffs
         self.backoffs.heartbeat();
+
+        // Forget IDONTWANTs after a few seconds; by then the message is no longer forwarded.
+        let now = Instant::now();
+        for peer in self.connected_peers.values_mut() {
+            peer.dont_send
+                .retain(|_, at| now.duration_since(*at) < IDONTWANT_RETENTION);
+        }
 
         // clean up ihave counters
         self.count_sent_iwant.clear();
@@ -2484,6 +2569,9 @@ where
                 }
 
                 // send an IHAVE message
+                self.control_stats.ihave_ids_sent += peer_message_ids.len() as u64;
+                self.control_stats.ihave_bytes_sent +=
+                    peer_message_ids.iter().map(|id| id.0.len() as u64).sum::<u64>();
                 Self::control_pool_add(
                     &mut self.control_pool,
                     peer,
@@ -2628,6 +2716,15 @@ where
                 }
             }
         }
+
+        // Skip peers that announced IDONTWANT for this message.
+        let before = recipient_peers.len();
+        recipient_peers.retain(|peer| {
+            self.connected_peers
+                .get(peer)
+                .map_or(true, |conn| !conn.dont_send.contains_key(msg_id))
+        });
+        self.control_stats.forwards_suppressed += (before - recipient_peers.len()) as u64;
 
         // forward the message to peers
         if !recipient_peers.is_empty() {
@@ -2816,6 +2913,7 @@ where
             .or_insert(PeerConnections {
                 kind: PeerKind::Floodsub,
                 connections: vec![],
+                dont_send: HashMap::new(),
             })
             .connections
             .push(connection_id);
@@ -3150,6 +3248,9 @@ where
                         }
                         ControlAction::IWant { message_ids } => {
                             self.handle_iwant(&propagation_source, message_ids)
+                        }
+                        ControlAction::IDontWant { message_ids } => {
+                            self.handle_idontwant(&propagation_source, message_ids)
                         }
                         ControlAction::Graft { topic_hash } => graft_msgs.push(topic_hash),
                         ControlAction::Prune {

@@ -93,6 +93,7 @@ pub struct Config {
     max_messages_per_rpc: Option<usize>,
     max_ihave_length: usize,
     max_ihave_messages: usize,
+    idontwant_message_size_threshold: usize,
     iwant_followup_time: Duration,
     published_message_ids_cache_time: Duration,
 }
@@ -334,6 +335,13 @@ impl Config {
         self.max_ihave_messages
     }
 
+    /// Gossipsub v1.2 IDONTWANT (leansim backport): on first receipt of a message whose
+    /// protobuf encoding is larger than this many bytes, tell the topic's other mesh peers
+    /// not to forward it. 0 disables IDONTWANT. The default is 0.
+    pub fn idontwant_message_size_threshold(&self) -> usize {
+        self.idontwant_message_size_threshold
+    }
+
     /// Time to wait for a message requested through IWANT following an IHAVE advertisement.
     /// If the message is not received within this window, a broken promise is declared and
     /// the router may apply behavioural penalties. The default is 3 seconds.
@@ -415,6 +423,7 @@ impl Default for ConfigBuilder {
                 max_messages_per_rpc: None,
                 max_ihave_length: 5000,
                 max_ihave_messages: 10,
+                idontwant_message_size_threshold: 0,
                 iwant_followup_time: Duration::from_secs(3),
                 published_message_ids_cache_time: Duration::from_secs(10),
             },
@@ -742,6 +751,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// Size above which a received message triggers IDONTWANT to the topic's mesh
+    /// peers; 0 disables IDONTWANT.
+    pub fn idontwant_message_size_threshold(&mut self, threshold: usize) -> &mut Self {
+        self.config.idontwant_message_size_threshold = threshold;
+        self
+    }
+
     /// By default, gossipsub will reject messages that are sent to us that has the same message
     /// source as we have specified locally. Enabling this, allows these messages and prevents
     /// penalizing the peer that sent us the message. Default is false.
@@ -847,6 +863,10 @@ impl std::fmt::Debug for Config {
         let _ = builder.field("max_messages_per_rpc", &self.max_messages_per_rpc);
         let _ = builder.field("max_ihave_length", &self.max_ihave_length);
         let _ = builder.field("max_ihave_messages", &self.max_ihave_messages);
+        let _ = builder.field(
+            "idontwant_message_size_threshold",
+            &self.idontwant_message_size_threshold,
+        );
         let _ = builder.field("iwant_followup_time", &self.iwant_followup_time);
         let _ = builder.field(
             "published_message_ids_cache_time",

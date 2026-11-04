@@ -28,6 +28,7 @@ message ControlMessage {
 	repeated ControlIWant iwant = 2;
 	repeated ControlGraft graft = 3;
 	repeated ControlPrune prune = 4;
+	repeated ControlIDontWant idontwant = 5;
 }
 
 message ControlIHave {
@@ -37,6 +38,10 @@ message ControlIHave {
 
 message ControlIWant {
 	repeated bytes message_ids= 1;
+}
+
+message ControlIDontWant {
+	repeated bytes message_ids = 1;
 }
 
 message ControlGraft {
