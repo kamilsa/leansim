@@ -1534,7 +1534,11 @@ fn do_forward_messages_to_explicit_peers() {
             .filter(|e| match e {
                 ToSwarm::NotifyHandler {
                     peer_id,
-                    event: HandlerIn::Message(RpcOut::Forward(m)),
+                    event:
+                        HandlerIn::Forward {
+                            rpc: RpcOut::Forward(m),
+                            ..
+                        },
                     ..
                 } => {
                     peer_id == &peers[0] && m.data == message.data
@@ -5151,6 +5155,12 @@ fn test_idontwant_sent_and_honoured() {
         .unwrap();
     let msg_id = gs.config.message_id(&message);
     gs.handle_idontwant(&quiet, vec![msg_id.clone()]);
+    // The IDONTWANT also reaches the peer's handler, to drop a queued forward.
+    assert!(gs.events.iter().any(|event| matches!(
+        event,
+        ToSwarm::NotifyHandler { peer_id, event: HandlerIn::DontSend(id), .. }
+            if *peer_id == quiet && *id == msg_id
+    )));
     gs.events.clear();
 
     gs.handle_received_message(raw_message, &source);
@@ -5164,7 +5174,11 @@ fn test_idontwant_sent_and_honoured() {
                     assert_eq!(message_ids, vec![msg_id.clone()]);
                     idontwant_to.insert(peer_id);
                 }
-                HandlerIn::Message(RpcOut::Forward(_)) => {
+                HandlerIn::Forward {
+                    id,
+                    rpc: RpcOut::Forward(_),
+                } => {
+                    assert_eq!(id, msg_id);
                     forwarded_to.insert(peer_id);
                 }
                 _ => {}

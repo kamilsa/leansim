@@ -129,6 +129,8 @@ pub enum JsonlEvent {
         idontwant_bytes_sent: u64,
         idontwant_ids_received: u64,
         forwards_suppressed: u64,
+        #[serde(default)]
+        queued_forwards_dropped: u64,
         have_sent: u64,
         have_bytes_sent: u64,
         want_sent: u64,

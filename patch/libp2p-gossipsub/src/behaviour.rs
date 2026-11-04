@@ -88,6 +88,8 @@ pub struct ControlStats {
     pub idontwant_ids_received: u64,
     /// Forwards skipped because the peer had sent IDONTWANT for the message.
     pub forwards_suppressed: u64,
+    /// Forwards already queued for a peer and dropped when its IDONTWANT came.
+    pub queued_forwards_dropped: u64,
 }
 
 /// Determines if published messages should be signed or not.
@@ -788,7 +790,11 @@ where
     /// This should only be called once per message.
     /// Control traffic counters since the behaviour was built.
     pub fn control_stats(&self) -> ControlStats {
-        self.control_stats
+        ControlStats {
+            queued_forwards_dropped: crate::handler::QUEUED_FORWARDS_DROPPED
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ..self.control_stats
+        }
     }
 
     pub fn report_message_validation_result(
@@ -1368,7 +1374,13 @@ where
         };
         let now = Instant::now();
         for id in message_ids {
-            peer.dont_send.insert(id, now);
+            peer.dont_send.insert(id.clone(), now);
+            // Also drop it from the peer's send queue if a forward is waiting there.
+            self.events.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer_id,
+                event: HandlerIn::DontSend(id),
+                handler: NotifyHandler::Any,
+            });
         }
     }
 
@@ -2732,7 +2744,7 @@ where
 
             for peer in recipient_peers.iter() {
                 tracing::debug!(%peer, message=%msg_id, "Sending message to peer");
-                self.send_message(*peer, event.clone());
+                self.send_forward(*peer, msg_id.clone(), event.clone());
             }
             tracing::debug!("Completed forwarding message");
             Ok(true)
@@ -2856,6 +2868,21 @@ where
 
     /// Send a [`RpcOut`] message to a peer. This will wrap the message in an arc if it
     /// is not already an arc.
+    /// Like [`Self::send_message`] for a forward, which the handler keeps droppable
+    /// until it is written, in case the peer sends IDONTWANT.
+    fn send_forward(&mut self, peer_id: PeerId, id: MessageId, rpc: RpcOut) {
+        if let Some(m) = self.metrics.as_mut() {
+            if let RpcOut::Forward(ref message) = rpc {
+                m.msg_sent(&message.topic, message.raw_protobuf_len());
+            }
+        }
+        self.events.push_back(ToSwarm::NotifyHandler {
+            peer_id,
+            event: HandlerIn::Forward { id, rpc },
+            handler: NotifyHandler::Any,
+        });
+    }
+
     fn send_message(&mut self, peer_id: PeerId, rpc: RpcOut) {
         if let Some(m) = self.metrics.as_mut() {
             if let RpcOut::Publish(ref message) | RpcOut::Forward(ref message) = rpc {

@@ -293,6 +293,7 @@ impl SyncIo {
             idontwant_bytes_sent: control.idontwant_bytes_sent,
             idontwant_ids_received: control.idontwant_ids_received,
             forwards_suppressed: control.forwards_suppressed,
+            queued_forwards_dropped: control.queued_forwards_dropped,
             have_sent: s.have_sent,
             have_bytes_sent: s.have_bytes_sent,
             want_sent: s.want_sent,

@@ -152,8 +152,11 @@ impl Bits {
 struct PeerView {
     /// The neighbour's last bitmap; `None` until one arrives.
     have: Option<Bits>,
-    /// This host's held-set version last advertised to the neighbour.
+    /// When that bitmap arrived.
+    have_at: Option<Instant>,
+    /// This host's held-set version last advertised to the neighbour, and when.
     advertised_version: u64,
+    advertised_at: Option<Instant>,
     /// Coded packets sent since the budget was last armed.
     coded_sent: usize,
     budget_armed_at: Option<Instant>,
@@ -163,7 +166,9 @@ impl PeerView {
     fn new() -> Self {
         Self {
             have: None,
+            have_at: None,
             advertised_version: 0,
+            advertised_at: None,
             coded_sent: 0,
             budget_armed_at: None,
         }
@@ -343,6 +348,7 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
             view.budget_armed_at = Some(now);
         }
         view.have = Some(have);
+        view.have_at = Some(now);
     }
 
     /// A coded packet arrived.
@@ -421,13 +427,22 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
             let sync = self.subnets.get_mut(&subnet).expect("listed above");
             let size = sync.held_at.len();
 
-            // Bitmaps, to every mesh peer that has not heard the current one.
+            // Bitmaps, to every mesh peer that has not heard the current one. An
+            // incomplete host also repeats an unchanged bitmap every `refresh`, so
+            // neighbours that got signatures after its last one learn it lacks them.
+            let held: usize = sync.held.0.iter().map(|w| w.count_ones() as usize).sum();
+            let incomplete = held < size;
             if sync.version > 0 {
                 let bitmap = sync.held.to_bytes(size);
                 for &peer in &peers {
                     let view = sync.peers.entry(peer).or_insert_with(PeerView::new);
-                    if view.advertised_version != sync.version {
+                    let due = incomplete
+                        && view.advertised_at.is_some_and(|at| {
+                            now.saturating_duration_since(at) >= settings.refresh
+                        });
+                    if view.advertised_version != sync.version || due {
                         view.advertised_version = sync.version;
+                        view.advertised_at = Some(now);
                         actions.push(Action::Have {
                             peer,
                             subnet,
@@ -528,8 +543,9 @@ pub fn coded_degree(configured: usize, gaps: usize) -> usize {
 /// Cap of the automatic degree; past it, elimination fill-in costs more than it gains.
 pub const MAX_AUTO_DEGREE: usize = 16;
 
-/// Push each neighbour random sparse combinations of the signatures it lacks
-/// (by its last bitmap) that this host has held at least `grace`: up to
+/// Push each neighbour random sparse combinations of the signatures it lacks:
+/// those missing from its last bitmap although that bitmap came at least
+/// `grace` after this host got them (so gossip had its chance): up to
 /// ceil(redundancy * gaps / mesh size) packets per bitmap heard, `coded_per_tick` a tick.
 fn plan_repairs<P: Copy + Eq + Hash + Ord>(
     sync: &mut SubnetSync<P>,
@@ -541,26 +557,20 @@ fn plan_repairs<P: Copy + Eq + Hash + Ord>(
     actions: &mut Vec<Action<P>>,
 ) {
     let size = sync.held_at.len();
-    let ripe: Vec<Column> = (0..size)
-        .filter(|&i| {
-            sync.held_at[i].is_some_and(|at| now.saturating_duration_since(at) >= settings.grace)
-        })
-        .map(|i| i as Column)
-        .collect();
-    if ripe.is_empty() {
-        return;
-    }
     for &peer in peers {
         let Some(view) = sync.peers.get_mut(&peer) else {
             continue;
         };
-        let Some(have) = view.have.as_ref() else {
+        let (Some(have), Some(have_at)) = (view.have.as_ref(), view.have_at) else {
             continue;
         };
-        let lacking: Vec<Column> = ripe
-            .iter()
-            .copied()
-            .filter(|&col| !have.get(col as usize))
+        let lacking: Vec<Column> = (0..size)
+            .filter(|&i| {
+                !have.get(i)
+                    && sync.held_at[i]
+                        .is_some_and(|at| have_at.saturating_duration_since(at) >= settings.grace)
+            })
+            .map(|i| i as Column)
             .collect();
         if lacking.is_empty() {
             continue;
@@ -743,7 +753,7 @@ mod tests {
         let mut decoded = Vec::new();
         let mut innovative = 0;
         for (k, sender) in senders.iter_mut().enumerate() {
-            sender.on_have(42, 0, &receiver_bitmap, t0);
+            sender.on_have(42, 0, &receiver_bitmap, later);
             let mut s = settings(SignatureSync::CodedRepair);
             s.coded_redundancy = 0.5;
             s.coded_degree = 0;
@@ -775,7 +785,7 @@ mod tests {
         for v in 0..16 {
             sync.deliver(0, v, 0, t0);
         }
-        sync.on_have(7, 0, &bitmap(&[0, 1, 2, 3]), t0);
+        sync.on_have(7, 0, &bitmap(&[0, 1, 2, 3]), later);
         let coded = |actions: Vec<Action<u8>>| {
             actions
                 .into_iter()
@@ -790,6 +800,67 @@ mod tests {
         // Two mesh peers split the work: ceil(11 / 2) each, the silent one gets none.
         sync.on_have(7, 0, &bitmap(&[0, 1, 2, 3, 4, 5]), later);
         assert_eq!(coded(sync.tick(later, |_| vec![7, 8])), 5);
+    }
+
+    #[test]
+    fn repair_skips_signatures_the_peer_had_no_time_to_get() {
+        let t0 = Instant::now();
+        let mut sync: SigSync<u8> = SigSync::new(settings(SignatureSync::CodedRepair), [0], 1);
+        for v in 0..8 {
+            sync.deliver(0, v, 0, t0);
+        }
+        let fresh = t0 + Duration::from_millis(150);
+        for v in 8..16 {
+            sync.deliver(0, v, 0, fresh);
+        }
+        // The peer's bitmap (holding nothing) arrives 200 ms after the first
+        // eight: only those count as missing; gossip may still bring the rest.
+        let seen = t0 + Duration::from_millis(200);
+        sync.on_have(7, 0, &bitmap(&[]), seen);
+        let coded: Vec<_> = sync
+            .tick(seen, |_| vec![7])
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Coded { packet, .. } => Some(packet),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(coded.len(), 8);
+        assert!(coded.iter().flat_map(|p| &p.validators).all(|&v| v < 8));
+    }
+
+    #[test]
+    fn incomplete_hosts_repeat_their_bitmap_every_refresh() {
+        let t0 = Instant::now();
+        let mut sync: SigSync<u8> = SigSync::new(settings(SignatureSync::BitmapPull), [0], 0);
+        sync.deliver(0, 1, 0, t0);
+        let haves = |actions: Vec<Action<u8>>| {
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::Have { .. }))
+                .count()
+        };
+        assert_eq!(haves(sync.tick(t0, |_| vec![1])), 1);
+        assert_eq!(
+            haves(sync.tick(t0 + Duration::from_millis(500), |_| vec![1])),
+            0
+        );
+        assert_eq!(
+            haves(sync.tick(t0 + Duration::from_millis(1000), |_| vec![1])),
+            1
+        );
+        // A complete host goes quiet.
+        for v in 0..16 {
+            sync.deliver(0, v, 0, t0);
+        }
+        assert_eq!(
+            haves(sync.tick(t0 + Duration::from_millis(1100), |_| vec![1])),
+            1
+        );
+        assert_eq!(
+            haves(sync.tick(t0 + Duration::from_millis(5000), |_| vec![1])),
+            0
+        );
     }
 
     #[test]

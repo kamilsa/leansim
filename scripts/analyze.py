@@ -34,7 +34,7 @@ EVENT_NAMES = {
 # TransportStats counters summed over hosts (see metrics::events::TransportStats).
 TRANSPORT_FIELDS = (
     "ihave_ids_sent", "ihave_bytes_sent", "iwant_ids_sent", "iwant_bytes_sent",
-    "idontwant_ids_sent", "idontwant_bytes_sent", "idontwant_ids_received", "forwards_suppressed",
+    "idontwant_ids_sent", "idontwant_bytes_sent", "idontwant_ids_received", "forwards_suppressed", "queued_forwards_dropped",
     "have_sent", "have_bytes_sent", "want_sent", "want_ids_sent", "want_bytes_sent",
     "pull_sigs_served", "pull_bytes_served", "pulled_received", "pulled_duplicates",
     "coded_sent", "coded_bytes_sent", "coded_received", "coded_innovative", "coded_decoded",

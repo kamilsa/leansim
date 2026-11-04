@@ -19,7 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use crate::protocol::{encode_frame, Frame, GossipsubCodec, ProtocolConfig};
-use crate::types::{PeerKind, RawMessage, Rpc, RpcOut};
+use crate::types::{MessageId, PeerKind, RawMessage, Rpc, RpcOut};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
 use bytes::Buf;
@@ -39,6 +39,11 @@ use std::{
     task::{Context, Poll},
 };
 use web_time::Instant;
+
+/// Queued forwards dropped because the peer sent IDONTWANT (leansim instrumentation;
+/// one node runs per process, so a process-wide counter is per node).
+pub(crate) static QUEUED_FORWARDS_DROPPED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// The event emitted by the Handler. This informs the behaviour of various events created
 /// by the handler.
@@ -64,6 +69,11 @@ pub enum HandlerEvent {
 pub enum HandlerIn {
     /// A gossipsub message to send.
     Message(RpcOut),
+    /// A message forwarded on behalf of others; dropped from the queue if the peer
+    /// sends IDONTWANT for it before it goes out.
+    Forward { id: MessageId, rpc: RpcOut },
+    /// The peer sent IDONTWANT for this message: drop it if still queued.
+    DontSend(MessageId),
     /// The peer has joined the mesh.
     JoinedMesh,
     /// The peer has left the mesh.
@@ -95,8 +105,8 @@ pub struct EnabledHandler {
     /// The single long-lived inbound substream.
     inbound_substream: Option<InboundSubstreamState>,
 
-    /// Queue of values that we want to send to the remote.
-    send_queue: SmallVec<[Frame; 16]>,
+    /// Queue of values that we want to send to the remote, forwards with their ids.
+    send_queue: SmallVec<[(Option<MessageId>, Frame); 16]>,
 
     /// Flag indicating that an outbound substream is being established to prevent duplicate
     /// requests.
@@ -251,7 +261,7 @@ impl EnabledHandler {
             ) {
                 // outbound idle state
                 Some(OutboundSubstreamState::WaitingOutput(substream)) => {
-                    if let Some(message) = self.send_queue.pop() {
+                    if let Some((_, message)) = self.send_queue.pop() {
                         self.send_queue.shrink_to_fit();
                         self.outbound_substream =
                             Some(OutboundSubstreamState::PendingSend(substream, message));
@@ -399,7 +409,18 @@ impl ConnectionHandler for Handler {
     fn on_behaviour_event(&mut self, message: HandlerIn) {
         match self {
             Handler::Enabled(handler) => match message {
-                HandlerIn::Message(m) => handler.send_queue.push(encode_frame(m)),
+                HandlerIn::Message(m) => handler.send_queue.push((None, encode_frame(m))),
+                HandlerIn::Forward { id, rpc } => {
+                    handler.send_queue.push((Some(id), encode_frame(rpc)))
+                }
+                HandlerIn::DontSend(id) => {
+                    let before = handler.send_queue.len();
+                    handler
+                        .send_queue
+                        .retain(|(queued, _)| queued.as_ref() != Some(&id));
+                    let dropped = (before - handler.send_queue.len()) as u64;
+                    QUEUED_FORWARDS_DROPPED.fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
+                }
                 HandlerIn::JoinedMesh => {
                     handler.in_mesh = true;
                 }
