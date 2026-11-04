@@ -481,6 +481,31 @@ class RemovedConfigKeysTests(unittest.TestCase):
         self.assertNotIn("global_aggregator", {node["role"] for node in nodes})
 
 
+class SignatureSyncConfigTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        return shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, **overrides})
+
+    def test_defaults_to_gossip_only_without_idontwant(self) -> None:
+        config = self.config()
+        shadow_sim.validate_experiment(config)
+        self.assertEqual(config["signature_sync"], "none")
+        self.assertEqual(config["gossipsub_idontwant_threshold_bytes"], 0)
+
+    def test_every_mode_validates(self) -> None:
+        for mode in ("none", "bitmap_pull", "coded_repair"):
+            shadow_sim.validate_experiment(self.config(signature_sync=mode, gossipsub_idontwant_threshold_bytes=1000))
+
+    def test_bad_settings_are_rejected(self) -> None:
+        for overrides in (
+            {"signature_sync": "rlnc"},
+            {"sync_interval_ms": 0},
+            {"sync_coded_redundancy": 0},
+            {"gossipsub_idontwant_threshold_bytes": -1},
+        ):
+            with self.assertRaises(SystemExit, msg=str(overrides)), contextlib.redirect_stderr(io.StringIO()):
+                shadow_sim.validate_experiment(self.config(**overrides))
+
+
 class CommitteeAggregatorTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()

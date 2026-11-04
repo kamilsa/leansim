@@ -40,6 +40,8 @@ LONG_WARMUP_MS = 3000
 MAX_RECURSION_ARITY = 16
 # The proof protocol's CBOR codec reads at most 10 MiB per response; keep headroom.
 MAX_PROOF_BYTES = 8 * 1024 * 1024
+# Per-hop signature sync modes (config::experiment::SignatureSync).
+SIGNATURE_SYNC_MODES = ("none", "bitmap_pull", "coded_repair")
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
 _GLOBAL_AGGREGATION_REMOVED = "dedicated global aggregators were replaced by recursive_aggregation (attesters in recursive groups)"
 REMOVED_KEYS = {
@@ -133,6 +135,24 @@ def validate_experiment(config: dict) -> None:
         die("gossipsub_flood_publish must be a boolean")
     if "gossipsub_heartbeat_initial_delay_ms" in config:
         as_int(config["gossipsub_heartbeat_initial_delay_ms"], "gossipsub_heartbeat_initial_delay_ms", minimum=0)
+    as_int(setting(config, "gossipsub_idontwant_threshold_bytes", 0), "gossipsub_idontwant_threshold_bytes", minimum=0)
+    sync_mode = setting(config, "signature_sync", "none")
+    if sync_mode not in SIGNATURE_SYNC_MODES:
+        die(f"signature_sync must be one of {', '.join(SIGNATURE_SYNC_MODES)}")
+    for key, default, minimum in (
+        ("sync_interval_ms", 100, 1),
+        ("sync_grace_ms", 300, 0),
+        ("sync_pull_batch", 16, 1),
+        ("sync_pull_timeout_ms", 1000, 1),
+        ("sync_coded_degree", 0, 0),
+        ("sync_coded_per_tick", 8, 0),
+        ("sync_refresh_ms", 1000, 0),
+    ):
+        as_int(setting(config, key, default), key, minimum=minimum)
+    if as_number(setting(config, "sync_coded_redundancy", 1.1), "sync_coded_redundancy", minimum=0) <= 0:
+        die("sync_coded_redundancy must be greater than zero")
+    if sync_mode != "none" and validators // subnets > 65536:
+        die("signature_sync supports at most 65,536 validators per subnet")
     node_map = config.get("node_map")
     if node_map is not None:
         if not isinstance(node_map, str) or not node_map.strip():
@@ -275,6 +295,8 @@ def experiment_defaults(experiment: dict) -> dict:
         "gossipsub_heartbeat_interval_ms": 1000,
         "gossipsub_explicit_aggregator_count": 0,
         "gossipsub_flood_publish": False,
+        "gossipsub_idontwant_threshold_bytes": 0,
+        "signature_sync": "none",
         "use_geo_latency": False,
         "geo_seed": 42,
         "geo_jitter": 0.0,

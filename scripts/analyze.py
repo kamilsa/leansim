@@ -28,7 +28,19 @@ EVENT_NAMES = {
     "TrafficBucket",
     "TrafficPeer",
     "NodeStats",
+    "TransportStats",
 }
+
+# TransportStats counters summed over hosts (see metrics::events::TransportStats).
+TRANSPORT_FIELDS = (
+    "ihave_ids_sent", "ihave_bytes_sent", "iwant_ids_sent", "iwant_bytes_sent",
+    "idontwant_ids_sent", "idontwant_bytes_sent", "idontwant_ids_received", "forwards_suppressed",
+    "have_sent", "have_bytes_sent", "want_sent", "want_ids_sent", "want_bytes_sent",
+    "pull_sigs_served", "pull_bytes_served", "pulled_received", "pulled_duplicates",
+    "coded_sent", "coded_bytes_sent", "coded_received", "coded_innovative", "coded_decoded",
+    "coded_mismatches", "acks_sent", "sync_failures", "pending_rows",
+)
+SIG_VIAS = ("gossip", "pull", "coded")
 
 
 def number(value):
@@ -321,7 +333,9 @@ CONFIG_KEYS = (
     "recursive_aggregation", "recursive_aggregation_arity", "recursive_aggregation_time_ms",
     "recursive_group_size", "recursive_proofs_per_child", "aggregate_proof_bytes",
     "gossipsub_mesh_n", "gossipsub_mesh_n_low", "gossipsub_mesh_n_high", "gossipsub_heartbeat_interval_ms",
-    "gossipsub_flood_publish", "gossipsub_idontwant",
+    "gossipsub_flood_publish", "gossipsub_idontwant", "gossipsub_idontwant_threshold_bytes",
+    "signature_sync", "sync_interval_ms", "sync_grace_ms", "sync_pull_batch",
+    "sync_coded_degree", "sync_coded_redundancy", "sync_coded_per_tick",
 )
 
 
@@ -473,6 +487,10 @@ def build_snapshot(output_dir):
     total_sig_received = 0
     duplicate_sigs = 0
     unique_receive_events = 0
+    # Per delivery path: unique and duplicate receptions, and the bytes they carried.
+    via_counts = {via: {"unique": 0, "duplicate": 0, "bytes": 0} for via in SIG_VIAS}
+    transport = {field: 0 for field in TRANSPORT_FIELDS}
+    transport_hosts = 0
     parsed_events = 0
     invalid_lines = 0
 
@@ -540,6 +558,10 @@ def build_snapshot(output_dir):
             elif name == "SigReceived":
                 total_sig_received += 1
                 duplicate = event.get("duplicate") is True
+                via = event.get("via") if event.get("via") in SIG_VIAS else "gossip"
+                via_counts[via]["duplicate" if duplicate else "unique"] += 1
+                if byte_size is not None and byte_size >= 0:
+                    via_counts[via]["bytes"] += byte_size
                 if duplicate:
                     duplicate_sigs += 1
                     continue
@@ -614,6 +636,12 @@ def build_snapshot(output_dir):
                     "inbound_msgs": integer(event.get("inbound_msgs")) or 0,
                     "outbound_msgs": integer(event.get("outbound_msgs")) or 0,
                 }
+            elif name == "TransportStats":
+                transport_hosts += 1
+                for field in TRANSPORT_FIELDS:
+                    value = integer(event.get(field))
+                    if value is not None and value >= 0:
+                        transport[field] += value
             elif name == "NodeStats":
                 node_id = integer(event.get("node_id"))
                 if node_id is None:
@@ -764,6 +792,7 @@ def build_snapshot(output_dir):
             "unique_signature_events": unique_receive_events,
             "duplicate_signature_events": duplicate_sigs,
             "duplicate_to_unique_ratio": ratio,
+            "signature_transport": transport_summary(via_counts, transport, transport_hosts, len(signing_hosts)),
             "unique_validators": unique_validators,
             "signing_hosts": len(signing_hosts),
             "signature_arrival_ms": {"p50": arrival_at(50), "p90": arrival_at(90), "p95": arrival_at(95), "p99": arrival_at(99)},
@@ -789,6 +818,32 @@ def build_snapshot(output_dir):
         },
         "cdf": cdf,
         "node_stats": nodes,
+    }
+
+
+def transport_summary(via_counts, transport, hosts, signing_hosts):
+    """Bytes on the wire for signature transport, by category, from the receivers'
+    gossip and pull logs and the senders' TransportStats; None without those."""
+    if not hosts:
+        return None
+    wire = {
+        "gossip_signatures": via_counts["gossip"]["bytes"],
+        "pulled_signatures": via_counts["pull"]["bytes"],
+        "coded_packets": transport["coded_bytes_sent"],
+        "bitmaps": transport["have_bytes_sent"],
+        "pull_requests": transport["want_bytes_sent"],
+        "gossip_control": transport["ihave_bytes_sent"] + transport["iwant_bytes_sent"] + transport["idontwant_bytes_sent"],
+        # One byte per ack; small next to everything else.
+        "sync_acks": transport["acks_sent"],
+    }
+    wire["total"] = sum(wire.values())
+    return {
+        "hosts": hosts,
+        "deliveries": via_counts,
+        "wire_bytes": wire,
+        "wire_bytes_per_host": {key: value / hosts for key, value in wire.items()},
+        "counters": transport,
+        "signing_hosts": signing_hosts,
     }
 
 
@@ -885,6 +940,28 @@ def self_test():
             (directory / "run-meta.json").write_text(json.dumps({"runner": "test", "seed": seed, "run_index": run_index}), encoding="utf-8")
             (directory / "run-manifest.json").write_text(json.dumps({"experiment": {"local_threshold": 1.0}}), encoding="utf-8")
             return directory
+
+        transport_dir = root / "transport"
+        stdout = transport_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        stdout.write_text("\n".join((
+            '{"event":"SigSent","node_id":0,"validator_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":120,"byte_size":10}',
+            '{"event":"SigReceived","node_id":2,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":130,"byte_size":12,"via":"pull"}',
+            '{"event":"SigReceived","node_id":3,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":140,"byte_size":0,"via":"coded"}',
+            '{"event":"SigReceived","node_id":3,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":true,"ts_ms":150,"byte_size":10}',
+            '{"event":"TransportStats","node_id":1,"have_bytes_sent":5,"coded_bytes_sent":40,"idontwant_bytes_sent":3,"acks_sent":2}',
+            '{"event":"TransportStats","node_id":2,"want_bytes_sent":4,"ihave_bytes_sent":1}',
+        )), encoding="utf-8")
+        signature_transport = build_snapshot(transport_dir)["metrics"]["signature_transport"]
+        assert signature_transport["deliveries"]["gossip"] == {"unique": 1, "duplicate": 1, "bytes": 20}
+        assert signature_transport["deliveries"]["pull"]["bytes"] == 12
+        assert signature_transport["deliveries"]["coded"]["unique"] == 1
+        wire = signature_transport["wire_bytes"]
+        assert (wire["gossip_signatures"], wire["pulled_signatures"], wire["coded_packets"]) == (20, 12, 40)
+        assert (wire["bitmaps"], wire["pull_requests"], wire["gossip_control"], wire["sync_acks"]) == (5, 4, 4, 2)
+        assert wire["total"] == 87
+        assert signature_transport["hosts"] == 2
 
         primary_dir = fixture("primary", 7, 0)
         overlay_dir = fixture("overlay", 8, 1)
