@@ -566,8 +566,9 @@ propagation are not in these runs.</li>
 and the partial-messages transport are the EIP's.</li>
 <li><b>Propagation here appears to be bandwidth-bound.</b> With faster links the timings would likely differ; we have
 not tested how the duplicate savings change.</li>
-<li><b>Requests to non-mesh gossip peers</b> still add about 0.2 duplicates per first copy; switching them off is
-untested, and at the mesh-3 setting they were what completed delivery.</li>
+<li><b>Requested signatures</b> still arrive as duplicates about 0.2 times per first copy. These runs do not
+separate how much of that comes from requests to non-mesh gossip peers, or show whether those could be switched off
+safely under loss; at the mesh-3 setting they were what completed delivery.</li>
 </ul>
 
 <h2 id="appendix">Appendix: settings and data</h2>
