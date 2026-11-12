@@ -13,18 +13,24 @@ use sha2::{Digest, Sha256};
 
 use crate::config::experiment::ExperimentConfig;
 use crate::messages::proof::{ProofRequest, ProofResponse};
+use crate::messages::sync::{SyncRequest, SyncResponse};
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
 
-/// Gossipsub carries signatures; request-response carries proof announcements and pulls.
+/// Gossipsub carries signatures; request-response carries proof announcements and
+/// pulls, and per-hop signature sync between mesh neighbours.
 #[derive(NetworkBehaviour)]
 pub struct SimBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub proofs: request_response::cbor::Behaviour<ProofRequest, ProofResponse>,
+    pub sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
 }
 
 /// Protocol id of the proof announce-and-pull exchange.
 pub const PROOF_PROTOCOL: &str = "/leansim/proof/1";
+
+/// Protocol id of the signature sync between mesh neighbours.
+pub const SYNC_PROTOCOL: &str = "/leansim/sigsync/1";
 
 /// A host's libp2p identity, derived from its node id so any host can name
 /// another's PeerId from the launcher's plan without a discovery round.
@@ -170,11 +176,23 @@ pub fn build_swarm(
         )],
         request_response::Config::default().with_request_timeout(Duration::from_secs(10)),
     );
+    let sync = request_response::cbor::Behaviour::new(
+        [(
+            StreamProtocol::new(SYNC_PROTOCOL),
+            request_response::ProtocolSupport::Full,
+        )],
+        request_response::Config::default()
+            .with_request_timeout(Duration::from_millis(config.sync_pull_timeout_ms.max(1))),
+    );
 
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         .with_quic()
-        .with_behaviour(|_key| SimBehaviour { gossipsub, proofs })?
+        .with_behaviour(|_key| SimBehaviour {
+            gossipsub,
+            proofs,
+            sync,
+        })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
 
@@ -189,7 +207,11 @@ fn build_gossipsub(
     key: &identity::Keypair,
     config: &ExperimentConfig,
 ) -> Result<gossipsub::Behaviour> {
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
+    let mut builder = gossipsub::ConfigBuilder::default();
+    if !config.gossipsub_gossip {
+        builder.gossip_lazy(0).gossip_factor(0.0);
+    }
+    let gossipsub_config = builder
         .mesh_n_low(config.gossipsub_mesh_n_low)
         .mesh_n(config.gossipsub_mesh_n)
         .mesh_n_high(config.gossipsub_mesh_n_high)
@@ -199,6 +221,7 @@ fn build_gossipsub(
         ))
         .heartbeat_initial_delay(Duration::from_millis(config.heartbeat_initial_delay_ms()))
         .flood_publish(config.gossipsub_flood_publish)
+        .idontwant_message_size_threshold(config.gossipsub_idontwant_threshold_bytes)
         .max_transmit_size(2 * 1024 * 1024) // 2 MiB for large proof messages
         .validate_messages()
         .build()
@@ -209,6 +232,22 @@ fn build_gossipsub(
         gossipsub_config,
     )
     .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
+}
+
+/// Marks `subnets`' topics as partial-message topics (EIP-8334 bundles). Call it
+/// before subscribing, so subscriptions request partial messages.
+pub fn enable_partial_topics(
+    swarm: &mut Swarm<SimBehaviour>,
+    subnets: impl IntoIterator<Item = u32>,
+    run_id: &str,
+) {
+    for subnet in subnets {
+        let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .set_partial_topic(topic.hash());
+    }
 }
 
 /// Subscribes to the host's subnet topics: every subnet in `subscribed_subnets`
@@ -269,6 +308,32 @@ pub enum NetEvent {
     /// One of this host's requests failed (dial failure, timeout, closed connection).
     ProofFailed {
         request_id: request_response::OutboundRequestId,
+    },
+    /// A mesh neighbour's sync message; answer it through `channel`.
+    SyncRequest {
+        peer: PeerId,
+        request: SyncRequest,
+        channel: request_response::ResponseChannel<SyncResponse>,
+    },
+    /// The answer to one of this host's sync messages.
+    SyncResponse {
+        peer: PeerId,
+        request_id: request_response::OutboundRequestId,
+        response: SyncResponse,
+    },
+    /// One of this host's sync messages failed.
+    SyncFailed {
+        request_id: request_response::OutboundRequestId,
+    },
+    /// A partial message: an EIP-8334 bundle, parts metadata, or both.
+    Partial {
+        peer: PeerId,
+        message: gossipsub::PartialMessage,
+    },
+    /// The gossipsub heartbeat chose these gossip peers for a partial topic.
+    PartialGossip {
+        topic: gossipsub::TopicHash,
+        peers: Vec<PeerId>,
     },
 }
 
@@ -340,6 +405,18 @@ pub async fn next_event(
                     }));
                 }
             }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(gossipsub::Event::Partial {
+                propagation_source,
+                message,
+            })) => {
+                return Some(NetEvent::Partial {
+                    peer: propagation_source,
+                    message,
+                });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(
+                gossipsub::Event::PartialGossip { topic, peers },
+            )) => return Some(NetEvent::PartialGossip { topic, peers }),
             SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
                 request_response::Event::Message { message, .. },
             )) => {
@@ -363,6 +440,36 @@ pub async fn next_event(
             )) => {
                 tracing::warn!("proof request {request_id} failed: {error:?}");
                 return Some(NetEvent::ProofFailed { request_id });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Sync(request_response::Event::Message {
+                peer,
+                message,
+            })) => {
+                return Some(match message {
+                    request_response::Message::Request {
+                        request, channel, ..
+                    } => NetEvent::SyncRequest {
+                        peer,
+                        request,
+                        channel,
+                    },
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    } => NetEvent::SyncResponse {
+                        peer,
+                        request_id,
+                        response,
+                    },
+                });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Sync(
+                request_response::Event::OutboundFailure {
+                    request_id, error, ..
+                },
+            )) => {
+                tracing::debug!("sync request {request_id} failed: {error:?}");
+                return Some(NetEvent::SyncFailed { request_id });
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("listening on {address}");

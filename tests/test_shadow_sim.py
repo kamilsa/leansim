@@ -481,6 +481,86 @@ class RemovedConfigKeysTests(unittest.TestCase):
         self.assertNotIn("global_aggregator", {node["role"] for node in nodes})
 
 
+class SignatureSyncConfigTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        return shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, **overrides})
+
+    def test_defaults_to_gossip_only_without_idontwant(self) -> None:
+        config = self.config()
+        shadow_sim.validate_experiment(config)
+        self.assertEqual(config["signature_sync"], "none")
+        self.assertEqual(config["gossipsub_idontwant_threshold_bytes"], 0)
+        self.assertIs(config["gossipsub_gossip"], True)
+
+    def test_every_mode_validates(self) -> None:
+        for mode in ("none", "bitmap_pull", "coded_repair"):
+            shadow_sim.validate_experiment(self.config(signature_sync=mode, gossipsub_idontwant_threshold_bytes=1000))
+
+    def test_bad_settings_are_rejected(self) -> None:
+        for overrides in (
+            {"signature_sync": "rlnc"},
+            {"sync_interval_ms": 0},
+            {"sync_coded_redundancy": 0},
+            {"gossipsub_idontwant_threshold_bytes": -1},
+            {"gossipsub_gossip": 0},
+        ):
+            with self.assertRaises(SystemExit, msg=str(overrides)), contextlib.redirect_stderr(io.StringIO()):
+                shadow_sim.validate_experiment(self.config(**overrides))
+
+
+class ShadowCommandTests(unittest.TestCase):
+    def test_pinning_is_shadows_default_unless_turned_off(self) -> None:
+        self.assertEqual(
+            shadow_sim.shadow_command(8, True),
+            ["shadow", "-d", "shadow.data", "--progress", "true", "--parallelism", "8", "shadow.yaml"],
+        )
+        self.assertEqual(
+            shadow_sim.shadow_command(6, False),
+            ["shadow", "-d", "shadow.data", "--progress", "true", "--parallelism", "6",
+             "--use-cpu-pinning", "false", "shadow.yaml"],
+        )
+
+
+class SignaturePropagationConfigTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        return shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 4, "subnet_count": 1, **overrides})
+
+    def test_defaults_to_gossipsub_with_eip_bundle_settings(self) -> None:
+        config = self.config()
+        shadow_sim.validate_experiment(config)
+        self.assertEqual(config["signature_propagation"], "gossipsub")
+        self.assertEqual(config["bundle_tick_ms"], 20)
+        self.assertEqual(config["bundle_max_signatures"], 50)
+        self.assertEqual(config["bundle_request_timeout_ms"], 1000)
+        self.assertEqual(config["bundle_request_delay_ms"], 0)
+        self.assertEqual(config["bundle_stagger_ms"], 0)
+        self.assertIs(config["bundle_announce"], False)
+
+    def test_announcements_validate_with_a_stagger(self) -> None:
+        shadow_sim.validate_experiment(
+            self.config(signature_propagation="bundled", bundle_stagger_ms=200, bundle_announce=True)
+        )
+
+    def test_bundled_validates_with_any_tick(self) -> None:
+        for tick in (0, 20, 100):
+            shadow_sim.validate_experiment(self.config(signature_propagation="bundled", bundle_tick_ms=tick))
+
+    def test_bad_settings_are_rejected(self) -> None:
+        for overrides in (
+            {"signature_propagation": "waggle"},
+            {"bundle_tick_ms": -1},
+            {"bundle_max_signatures": 0},
+            {"bundle_request_timeout_ms": 0},
+            {"bundle_request_delay_ms": -1},
+            {"bundle_stagger_ms": -1},
+            {"bundle_announce": "yes"},
+            {"bundle_announce": True},
+            {"signature_propagation": "bundled", "signature_sync": "bitmap_pull"},
+        ):
+            with self.assertRaises(SystemExit, msg=str(overrides)), contextlib.redirect_stderr(io.StringIO()):
+                shadow_sim.validate_experiment(self.config(**overrides))
+
+
 class CommitteeAggregatorTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()

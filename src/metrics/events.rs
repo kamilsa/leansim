@@ -2,12 +2,51 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
+/// How a signature reached a host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SigVia {
+    #[default]
+    Gossip,
+    /// Pulled from a mesh neighbour after its bitmap advertised it.
+    Pull,
+    /// Decoded from coded repair packets.
+    Coded,
+    /// Pushed in an EIP-8334 bundle.
+    Bundle,
+    /// Sent in an EIP-8334 bundle in answer to this host's request.
+    Requested,
+    /// Pushed in an EIP-8334 bundle of signatures the sender held before this host
+    /// became its push target.
+    Backlog,
+}
+
+/// When a host's mesh degree was sampled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshSample {
+    /// Right after the host signed (or would have, for a host without validators).
+    Signing,
+    /// At the end of the run.
+    Exit,
+}
+
 /// Structured event emitted as one JSON line to stdout.
+// Events are built and serialized one at a time, so the large TransportStats is fine.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum JsonlEvent {
     /// Emitted by each node at startup to map PeerId → node index.
     NodePeerId { node_id: u32, peer_id: String },
+    /// The host's gossipsub mesh peers on one subnet it subscribes to.
+    MeshDegree {
+        node_id: u32,
+        subnet_id: u32,
+        peers: u32,
+        at: MeshSample,
+        ts_ms: u64,
+    },
     SigSent {
         node_id: u32,
         /// Logical validator that signed; absent in logs from before multi-validator hosts.
@@ -29,7 +68,12 @@ pub enum JsonlEvent {
         subnet_id: u32,
         duplicate: bool,
         ts_ms: u64,
+        /// Bytes of the message that carried it; 0 for a decoded signature, whose
+        /// packets are counted in [`JsonlEvent::TransportStats`].
         byte_size: u64,
+        /// Absent in logs from before signature sync, which were all gossip.
+        #[serde(default)]
+        via: SigVia,
     },
     /// A local aggregator finished a subnet proof (announced to its layer-1 group
     /// with recursive aggregation).
@@ -97,6 +141,101 @@ pub enum JsonlEvent {
         bytes_received: u64,
         msgs_sent: u64,
         msgs_received: u64,
+    },
+    /// A host's signature-transport traffic over the run, besides signatures
+    /// gossiped (counted by `SigReceived`): gossipsub control ids and the sync
+    /// protocol. Byte counts are approximate wire sizes, all as sent by this host.
+    /// No `byte_size` field, so it never counts towards the run's signature traffic.
+    TransportStats {
+        node_id: u32,
+        ihave_ids_sent: u64,
+        ihave_bytes_sent: u64,
+        iwant_ids_sent: u64,
+        iwant_bytes_sent: u64,
+        idontwant_ids_sent: u64,
+        idontwant_bytes_sent: u64,
+        idontwant_ids_received: u64,
+        forwards_suppressed: u64,
+        #[serde(default)]
+        queued_forwards_dropped: u64,
+        /// Gossip messages that answered this host's IWANTs, and how many of them
+        /// were already held on arrival.
+        #[serde(default)]
+        iwant_responses: u64,
+        #[serde(default)]
+        iwant_response_duplicates: u64,
+        /// Signature copies this host sent on subnets it does not subscribe to
+        /// (fanout): they enter the subnet's mesh from outside it.
+        #[serde(default)]
+        fanout_sigs_sent: u64,
+        have_sent: u64,
+        have_bytes_sent: u64,
+        want_sent: u64,
+        want_ids_sent: u64,
+        want_bytes_sent: u64,
+        pull_sigs_served: u64,
+        pull_bytes_served: u64,
+        pulled_received: u64,
+        pulled_duplicates: u64,
+        coded_sent: u64,
+        coded_bytes_sent: u64,
+        coded_received: u64,
+        coded_innovative: u64,
+        coded_decoded: u64,
+        coded_mismatches: u64,
+        acks_sent: u64,
+        sync_failures: u64,
+        pending_rows: u64,
+        /// EIP-8334 bundles sent, pushed or served, the signatures they carried, and
+        /// their frame bytes; framing is what the frames add to the signatures and
+        /// their 8-byte validator indices.
+        #[serde(default)]
+        bundles_sent: u64,
+        #[serde(default)]
+        bundle_sigs_sent: u64,
+        #[serde(default)]
+        bundle_bytes_sent: u64,
+        #[serde(default)]
+        bundle_framing_bytes_sent: u64,
+        /// Signatures sent in answer to requests (included in `bundle_sigs_sent`).
+        #[serde(default)]
+        requested_sigs_served: u64,
+        /// Signatures pushed as backlog to new push targets (included in `bundle_sigs_sent`).
+        #[serde(default)]
+        backlog_sigs_sent: u64,
+        /// Parts metadata frames sent (advertisements and requests).
+        #[serde(default)]
+        metadata_sent: u64,
+        #[serde(default)]
+        metadata_bytes_sent: u64,
+        #[serde(default)]
+        available_ids_sent: u64,
+        #[serde(default)]
+        request_ids_sent: u64,
+        /// Signatures a peer delivered while this host was waiting to push them to it.
+        #[serde(default)]
+        pushes_avoided: u64,
+        /// Signatures announced to mesh peers instead of, or ahead of, a push
+        /// (their bytes are in `metadata_bytes_sent`).
+        #[serde(default)]
+        announce_ids_sent: u64,
+        /// Requested signatures not served because they were already on their way.
+        #[serde(default)]
+        requests_already_sent: u64,
+        /// Signatures pushed by the end of a link that waits out the stagger, because
+        /// the other end's copy did not come in time (included in `bundle_sigs_sent`).
+        #[serde(default)]
+        lazy_sigs_sent: u64,
+        /// Advertised signatures not requested because a request was in flight.
+        #[serde(default)]
+        requests_suppressed: u64,
+        /// Advertised signatures not requested because they arrived during the
+        /// request delay.
+        #[serde(default)]
+        requests_avoided: u64,
+        /// Bundles and metadata dropped as malformed.
+        #[serde(default)]
+        invalid_partials: u64,
     },
     /// One bucket of a traffic-logging host, by message kind. No `byte_size`
     /// field, so these never count towards the run's signature traffic.

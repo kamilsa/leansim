@@ -110,7 +110,7 @@ mod topic;
 mod transform;
 mod types;
 
-pub use self::behaviour::{Behaviour, Event, MessageAuthenticity};
+pub use self::behaviour::{Behaviour, ControlStats, Event, MessageAuthenticity};
 pub use self::config::{Config, ConfigBuilder, ValidationMode, Version};
 pub use self::error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError};
 pub use self::metrics::Config as MetricsConfig;
@@ -125,7 +125,7 @@ pub use self::subscription_filter::{
 };
 pub use self::topic::{Hasher, Topic, TopicHash};
 pub use self::transform::{DataTransform, IdentityTransform};
-pub use self::types::{Message, MessageAcceptance, MessageId, RawMessage};
+pub use self::types::{Message, MessageAcceptance, MessageId, PartialMessage, RawMessage};
 
 #[deprecated(note = "Will be removed from the public API.")]
 pub type Rpc = self::types::Rpc;

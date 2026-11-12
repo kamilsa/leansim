@@ -12,10 +12,15 @@ use crate::network::topics;
 use crate::node::state::NodeState;
 use libp2p::Swarm;
 
-/// Validator init: sleep burst_time + random jitter, then publish one synthetic signature
+/// Validator init: sleep burst_time + random jitter, then sign one synthetic signature
 /// per validator on this host. Co-located validators share the host's clock, so they sign
-/// back to back after a single delay.
-pub async fn validator_init(state: &Arc<NodeState>, swarm: &mut Swarm<SimBehaviour>) -> Result<()> {
+/// back to back after a single delay. With `gossip`, each signature is published as a
+/// gossipsub message; otherwise the caller propagates them (EIP-8334 bundles).
+pub async fn validator_init(
+    state: &Arc<NodeState>,
+    swarm: &mut Swarm<SimBehaviour>,
+    gossip: bool,
+) -> Result<()> {
     let config = &state.config;
 
     let jitter = {
@@ -39,8 +44,10 @@ pub async fn validator_init(state: &Arc<NodeState>, swarm: &mut Swarm<SimBehavio
         }
         .with_payload_size(config.signature_payload_bytes);
 
-        let topic = IdentTopic::new(topics::subnet_topic(&config.run_id, subnet_id));
-        swarm::publish(swarm, &topic, &msg)?;
+        if gossip {
+            let topic = IdentTopic::new(topics::subnet_topic(&config.run_id, subnet_id));
+            swarm::publish(swarm, &topic, &msg)?;
+        }
 
         let byte_size = config.signature_payload_bytes as u64;
         state.bytes_sent_sig.fetch_add(byte_size, Ordering::Relaxed);

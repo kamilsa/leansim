@@ -23,8 +23,8 @@ use crate::handler::HandlerEvent;
 use crate::rpc_proto::proto;
 use crate::topic::TopicHash;
 use crate::types::{
-    ControlAction, MessageId, PeerInfo, PeerKind, RawMessage, Rpc, RpcOut, Subscription,
-    SubscriptionAction,
+    ControlAction, MessageId, PartialMessage, PeerInfo, PeerKind, RawMessage, Rpc, RpcOut,
+    Subscription, SubscriptionAction,
 };
 use crate::ValidationError;
 use asynchronous_codec::{Decoder, Encoder, Framed};
@@ -492,6 +492,18 @@ impl Decoder for GossipsubCodec {
                 })
                 .collect();
 
+            let idontwant_msgs: Vec<ControlAction> = rpc_control
+                .idontwant
+                .into_iter()
+                .map(|idontwant| ControlAction::IDontWant {
+                    message_ids: idontwant
+                        .message_ids
+                        .into_iter()
+                        .map(MessageId::from)
+                        .collect::<Vec<_>>(),
+                })
+                .collect();
+
             let graft_msgs: Vec<ControlAction> = rpc_control
                 .graft
                 .into_iter()
@@ -528,27 +540,49 @@ impl Decoder for GossipsubCodec {
             }
 
             control_msgs.extend(ihave_msgs);
+            control_msgs.extend(idontwant_msgs);
             control_msgs.extend(iwant_msgs);
             control_msgs.extend(graft_msgs);
             control_msgs.extend(prune_msgs);
         }
 
+        let mut partial_topics = Vec::new();
+        let subscriptions = rpc
+            .subscriptions
+            .into_iter()
+            .map(|sub| {
+                let topic_hash = TopicHash::from_raw(sub.topic_id.unwrap_or_default());
+                let action = if Some(true) == sub.subscribe {
+                    SubscriptionAction::Subscribe
+                } else {
+                    SubscriptionAction::Unsubscribe
+                };
+                // A peer that requests partial messages must support sending them.
+                if action == SubscriptionAction::Subscribe && sub.requests_partial == Some(true) {
+                    partial_topics.push(topic_hash.clone());
+                }
+                Subscription { action, topic_hash }
+            })
+            .collect();
+
+        // A partial message without a topic or group cannot be routed; drop it.
+        let partial = rpc.partial.and_then(|ext| {
+            let topic = String::from_utf8(ext.topic_id?).ok()?;
+            Some(PartialMessage {
+                topic: TopicHash::from_raw(topic),
+                group_id: ext.group_id?,
+                message: ext.partial_message,
+                metadata: ext.parts_metadata,
+            })
+        });
+
         Ok(Some(HandlerEvent::Message {
             rpc: Rpc {
                 messages,
-                subscriptions: rpc
-                    .subscriptions
-                    .into_iter()
-                    .map(|sub| Subscription {
-                        action: if Some(true) == sub.subscribe {
-                            SubscriptionAction::Subscribe
-                        } else {
-                            SubscriptionAction::Unsubscribe
-                        },
-                        topic_hash: TopicHash::from_raw(sub.topic_id.unwrap_or_default()),
-                    })
-                    .collect(),
+                subscriptions,
                 control_msgs,
+                partial_topics,
+                partial,
             },
             invalid_messages,
         }))
@@ -623,6 +657,8 @@ mod tests {
                 messages: vec![message.clone()],
                 subscriptions: vec![],
                 control_msgs: vec![],
+                partial_topics: vec![],
+                partial: None,
             };
 
             let mut codec = GossipsubCodec::new(u32::MAX as usize, ValidationMode::Strict);
@@ -695,6 +731,48 @@ mod tests {
             }),
         ] {
             assert_eq!(encode_frame(rpc.clone()).concat(), codec_frame(rpc));
+        }
+    }
+
+    #[test]
+    /// A partial message and a partial-requesting subscription survive the codec, and
+    /// `frame_len` is the size of the frame that carries the partial message.
+    fn partial_messages_roundtrip() {
+        let topic = TopicHash::from_raw("/leansim/run/subnet/3");
+        let partial = PartialMessage {
+            topic: topic.clone(),
+            group_id: 0u64.to_le_bytes().to_vec(),
+            message: Some(vec![9; 70_000]),
+            metadata: Some(vec![1, 2, 3]),
+        };
+        for metadata_only in [false, true] {
+            let mut partial = partial.clone();
+            if metadata_only {
+                partial.message = None;
+            }
+            let frame = codec_frame(RpcOut::Partial(partial.clone()));
+            assert_eq!(frame.len(), partial.frame_len());
+            assert_eq!(encode_frame(RpcOut::Partial(partial.clone())).concat(), frame);
+            let mut codec = GossipsubCodec::new(u32::MAX as usize, ValidationMode::Strict);
+            match codec.decode(&mut BytesMut::from(&frame[..])).unwrap().unwrap() {
+                HandlerEvent::Message { rpc, .. } => assert_eq!(rpc.partial, Some(partial)),
+                _ => panic!("Must decode a message"),
+            }
+        }
+
+        let mut codec = GossipsubCodec::new(u32::MAX as usize, ValidationMode::Strict);
+        let mut buf = BytesMut::from(&codec_frame(RpcOut::SubscribePartial(topic.clone()))[..]);
+        match codec.decode(&mut buf).unwrap().unwrap() {
+            HandlerEvent::Message { rpc, .. } => {
+                assert_eq!(rpc.partial_topics, vec![topic.clone()]);
+                assert_eq!(rpc.subscriptions[0].action, SubscriptionAction::Subscribe);
+            }
+            _ => panic!("Must decode a message"),
+        }
+        let mut buf = BytesMut::from(&codec_frame(RpcOut::Subscribe(topic))[..]);
+        match codec.decode(&mut buf).unwrap().unwrap() {
+            HandlerEvent::Message { rpc, .. } => assert!(rpc.partial_topics.is_empty()),
+            _ => panic!("Must decode a message"),
         }
     }
 

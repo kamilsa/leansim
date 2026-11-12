@@ -66,6 +66,10 @@ Experiments retain leansim's original flat simulation settings and
 runner = "docker"
 runs = 1
 parallelism = 10
+# Shadow pins its workers and the processes they run to the lowest-numbered
+# cores. Set false when several simulations share a machine, or they all land
+# on the same cores; confine each with taskset instead.
+cpu_pinning = true
 
 [docker]
 shadow_image = "kamilsa/shadow-arm:latest"
@@ -142,6 +146,11 @@ gossipsub_explicit_aggregator_count = 0
 # false sends local publications to mesh peers and explicit peers only. Set true
 # to also publish directly to every connected subscribed peer.
 gossipsub_flood_publish = false
+
+# false stops the heartbeat's gossip to non-mesh peers: no IHAVE is sent, so no
+# IWANT follows and messages travel over mesh links only. With bundled
+# propagation it also stops the advertisements to non-mesh peers.
+gossipsub_gossip = true
 ```
 
 The first gossipsub heartbeat fires after `gossipsub_heartbeat_initial_delay_ms`,
@@ -238,7 +247,9 @@ node configs get `traffic_log = true`.
 - Each logged host records `TrafficBucket` events every `traffic_log_bucket_ms`
   (default 100 ms): bytes sent and received in that bucket broken down by
   `signature`, `duplicate_signature`, `proof_announce`, `proof_request`,
-  `proof_payload`, and `proof_control` (acks, missing answers).
+  `proof_payload`, `proof_control` (acks, missing answers), and with signature
+  sync `sync_control` (bitmaps, pull requests, acks) and `sync_payload` (pulled
+  signatures, coded packets).
 - At exit it writes one `TrafficPeer` event per peer with the run's totals.
 - Incoming signatures are attributed to the peer that forwarded them. Gossipsub
   does not expose which peers a forward went to, so outgoing gossip is attributed
@@ -269,6 +280,180 @@ node configs get `traffic_log = true`.
 |---|---|---|
 | `traffic_log_nodes` | `[]` | Hosts that keep traffic logs |
 | `traffic_log_bucket_ms` | `100` | Bucket width of the traffic chart |
+
+#### Signature sync
+
+Signatures always travel by gossipsub's eager push. `signature_sync` adds a
+per-hop protocol between each subnet's gossipsub mesh neighbours (libp2p
+request-response, `/leansim/sigsync/1`). Nobody needs to know which hosts
+aggregate: every subscriber collects and relays the subnet's signatures, and
+messages go to one mesh neighbour each, never forwarded as they are.
+
+- `none`: gossipsub only.
+- `bitmap_pull`: neighbours send each other a bitmap of the signatures they hold
+  (one bit per validator of the subnet, 128 B for 1,024 validators) whenever it
+  changes, and every `sync_refresh_ms` while incomplete. A host pulls a
+  signature it lacks from the neighbours that advertised it once the first
+  advertisement is `sync_grace_ms` old, at most `sync_pull_batch` per neighbour
+  per tick, spreading the pulls over the advertisers.
+- `coded_repair`: the same bitmaps; a host pushes each neighbour random
+  GF(2^8) combinations of the signatures that neighbour lacks, counting a
+  signature as lacking only if the neighbour's bitmap came `sync_grace_ms` after
+  this host got it. Each neighbour sends ceil(`sync_coded_redundancy` x gaps /
+  its mesh size) packets per bitmap heard, so the mesh shares a peer's repair
+  without coordinating, and every combination is useful to the receiver whoever
+  else sent one. Receivers run incremental Gaussian elimination; a signature
+  learned by gossip or decoding is subtracted from pending equations. Each
+  packet carries a 2-byte index and a coefficient per signature plus one
+  signature-sized payload. `sync_coded_degree = 0` combines about log2(gaps) + 2
+  signatures (at most 16): with uncoordinated senders, degrees 2-3 leave 8-20 %
+  of gaps undecodable however many packets arrive. `sync_coded_degree = 1` sends
+  uncoded random repairs, the no-coding control.
+
+The simulator carries no real signature bytes: each signature stands in as a
+one-byte symbol, combined alongside the coefficients, so every decode is
+checked (`coded_mismatches` must stay 0). Shadow does not model CPU time, so
+encoding and decoding are free in simulated time.
+
+`gossipsub_idontwant_threshold_bytes` turns on the gossipsub v1.2 IDONTWANT
+backported to the vendored gossipsub: on first receipt of a message larger than
+the threshold, a host tells the topic's other mesh peers not to send it, and a
+forward still in a peer's send queue is dropped when that peer's IDONTWANT
+arrives.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `gossipsub_idontwant_threshold_bytes` | `0` | IDONTWANT for larger messages; 0 = off |
+| `signature_sync` | `"none"` | `none`, `bitmap_pull` or `coded_repair` |
+| `sync_interval_ms` | `100` | Tick: send changed bitmaps, plan pulls or repairs |
+| `sync_grace_ms` | `300` | Gossip's head start before pulling or repairing |
+| `sync_refresh_ms` | `1000` | Repeat an incomplete host's bitmap; re-arm repair budgets |
+| `sync_pull_batch` | `16` | Signatures pulled from one neighbour per tick |
+| `sync_pull_timeout_ms` | `1000` | Retry an unanswered pull elsewhere after this |
+| `sync_coded_degree` | `0` | Signatures per coded packet; 0 = about log2(gaps) + 2 |
+| `sync_coded_redundancy` | `1.1` | Coded packets the mesh sends per gap |
+| `sync_coded_per_tick` | `8` | Coded packets to one neighbour per tick |
+
+Every `SigReceived` names how the signature came (`via`: `gossip`, `pull`,
+`coded`, and with bundles `bundle`, `backlog` or `requested`), and a signature already held
+through any path counts as a duplicate.
+Each host writes a `TransportStats` event at exit with gossipsub control ids
+(IHAVE, IWANT, IDONTWANT, suppressed and dropped forwards), the messages that
+answered its IWANTs (`iwant_responses`, `iwant_response_duplicates`: a message
+from a peer it sent IWANT for it within `iwant_followup_time`), the signature
+copies it sent into subnets it does not subscribe to (`fanout_sigs_sent`) and the sync
+protocol's messages and bytes. The analyzer turns these into
+`signature_transport`: deliveries by path and a wire-byte ledger (gossiped and
+pulled signatures, coded packets, bitmaps, pull requests, gossipsub control
+ids). Byte counts are application-level approximations; QUIC and libp2p framing
+are not included. The `nodemap-*-allhosts-sync-{gossip,pull,coded}-sub64`
+experiments compare the three on the same network.
+
+Each host also logs a `MeshDegree` event per subscribed subnet, right after
+signing and at exit: its gossipsub mesh peers on that subnet. An eager push sends
+every signature over every mesh link at least once, and twice when both ends'
+copies cross, so duplicates per first copy cannot go below about half the mesh
+degree minus one. The analyzer's `mesh` metrics give the degree distribution per
+sample, the mesh links (half the sum of degrees at signing), `copies_per_link`
+(pushed copies received, without IWANT responses and without the copies
+publishers sent in from outside the mesh, per link and signature) and
+`one_copy_per_link_duplicates_per_first_copy`, what pushes would leave if no
+copies crossed. The summary's transport caption shows them.
+
+#### Bundled propagation (EIP-8334)
+
+`signature_propagation = "bundled"` replaces one gossipsub message per signature
+with [EIP-8334](https://github.com/ethereum/EIPs/pull/11905)'s bundled
+attestation propagation, as the EIP stood before it moved to waggle: signatures
+travel in bundles over gossipsub's partial messages extension, and peers
+reconcile by validator index instead of IHAVE/IWANT. The extension is backported
+to the vendored gossipsub. A subscription to a partial topic sets `SubOpts`'
+`requestsPartial`/`supportsPartial`; a partial message (`RPC.partial`: topic,
+group, `partialMessage`, `partsMetadata`) goes to one peer and is never
+forwarded by gossipsub; on a partial topic the heartbeat sends no IHAVE to peers
+that requested partial messages and hands them to the application as gossip
+peers instead. The mesh, fanout and peer selection are gossipsub's own.
+
+- Every `bundle_tick_ms` (EIP: 20 ms), a host pushes each mesh peer the signatures
+  it holds and the peer is not known to hold, in bundles of at most
+  `bundle_max_signatures` (EIP: 50). A peer is known to hold a signature it sent,
+  one it was sent, and one it advertised. A signature a peer delivers while the
+  host waits for its tick is never sent back: that is how bundling saves
+  duplicates over gossipsub's forward-on-receipt (`pushes_avoided` counts them).
+  Ticks fall on a per-host clock with a random phase. A host's own signatures wait
+  for its next tick too; one that signs in a subnet it does not subscribe to
+  pushes them to fanout peers.
+- A peer that was not a push target at the subnet's previous tick (a new mesh
+  peer, say) gets everything held then too, as the EIP's set reconciliation
+  implies; gossipsub forwards only new messages to a new mesh peer. These go in
+  bundles of their own, logged as `via: "backlog"` (`backlog_sigs_sent` counts
+  them), so their duplicates show apart from fresh pushes.
+- With `bundle_stagger_ms`, the two ends of a mesh link take turns instead of
+  both pushing at once (the EIP has no stagger). For each signature a hash of
+  the signature and the two peer ids names the end that pushes first; the other
+  end pushes only once it has held the signature that long without the peer
+  delivering or advertising it (`lazy_sigs_sent` counts those; `pushes_avoided`
+  counts the ones the wait saved). A host's own signatures always go out at once.
+  Without a stagger most mesh links carry a signature in both directions
+  (`copies_per_link` in the `mesh` metrics).
+- With `bundle_announce` on top of a stagger, the end that waits also tells the
+  peer at once that it holds the signature, in the parts metadata `available`
+  list the EIP keeps for gossip peers (`announce_ids_sent`). A peer that hears
+  this before it holds the signature never pushes it back; when it gets the
+  signature elsewhere it announces in turn, which cancels the waiting end's
+  push, so the link carries no copy at all. A peer that still lacks the
+  signature requests it like any advertised one, after
+  `bundle_request_delay_ms`; the stagger remains as the fallback. A request for
+  a signature already pushed to the requester is not served again
+  (`requests_already_sent`).
+- When gossipsub picks gossip peers, a host advertises to each the signatures it
+  holds that the peer is not known to hold and has not been told about (parts
+  metadata `available`). The receiver requests what it lacks (`requests`), and the
+  advertiser answers with a bundle. A signature requested from one peer is not
+  requested from another for `bundle_request_timeout_ms` (`requests_suppressed`);
+  the EIP itself would request it again. With `bundle_request_delay_ms`, a host
+  waits that long after an advertisement and requests only what has not arrived
+  meanwhile (`requests_avoided`); the EIP requests at once.
+- The partial-message group is the slot, so every message uses slot 0. The run
+  has one slot.
+
+`bundle_tick_ms = 0` pushes each arrival at once, which is gossipsub's
+forward-on-receipt with bundle framing: the no-batching control. Bundles require
+`signature_sync = "none"`.
+
+What the model leaves out or adds:
+
+- The EIP's shared `AttestationData` is not modelled: every signature keeps its
+  full `signature_payload_bytes`, so bundles save duplicates only, not the data
+  the EIP deduplicates. Validator indices are 8 bytes, as SSZ `ValidatorIndex`.
+- Bundles carry simulator bookkeeping that a real one would not: each
+  signature's publishing host (4 bytes) and why the bundle was sent (push,
+  backlog or requested; 4 bytes).
+- Experiments are homogeneous: no bridging between bundles and full messages.
+- Partial messages carry no gossipsub signature and get no peer scoring.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `signature_propagation` | `"gossipsub"` | `gossipsub` or `bundled` |
+| `bundle_tick_ms` | `20` | Push new signatures every this many ms; 0 = at once |
+| `bundle_max_signatures` | `50` | Signatures per bundle |
+| `bundle_request_timeout_ms` | `1000` | Request a signature from another advertiser after this |
+| `bundle_request_delay_ms` | `0` | Wait this long before requesting advertised signatures; 0 = at once |
+| `bundle_stagger_ms` | `0` | One end of each link waits this long for the other's copy; 0 = both push at once |
+| `bundle_announce` | `false` | The waiting end announces what it holds; needs a stagger |
+
+`TransportStats` adds bundles, the signatures they carried and their bytes,
+signatures served on request or pushed as backlog, parts metadata (frames, bytes, indices advertised
+and requested), `pushes_avoided`, `lazy_sigs_sent`, `announce_ids_sent`, `requests_already_sent`, `requests_suppressed`, `requests_avoided` and `invalid_partials`.
+Byte counts are gossipsub frames (protobuf framing included, QUIC excluded). The
+ledger in `signature_transport` gets `bundled_signatures` (every copy received,
+signature plus index), `bundle_framing` (the rest of the bundle frames) and
+`parts_metadata`. In bundled mode `NodeStats` counts bundle frames sent and
+signatures received exactly, not estimated as for gossip. On a traffic-logging
+host, bundles out and signatures in are `signature` (`duplicate_signature` for
+copies already held), and parts metadata and bundle framing are `sync_control`.
+`nodemap-*-allhosts-sync-bundled-sub64` runs the gossip baseline's network with
+bundles.
 
 ## Output
 

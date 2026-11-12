@@ -1,0 +1,56 @@
+# 32k network of all 13,613 hosts of the node map (all_hosts = true), as
+# experiments/nodemap-32k-broadcast-gossip-agg4-sig2400-super10-sub16 on the server:
+# signature propagation with 4 local aggregators per subnet; no recursive aggregation,
+# so nothing follows the local proofs. Configuration: ann-m4-s1600-d200-allhosts-agg4.
+run_id = "32k-allhosts-sub16-ann-m4-s1600-d200-agg4"
+run_timeout_secs = 15
+
+validator_count = 32768
+node_map = "nodes.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+subscribe_to_duty_subnets = false
+random_peer_count = 0
+publish_subnet_peer_count = 8
+subnet_count = 16
+local_aggregators_per_subnet = 4
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 3
+gossipsub_mesh_n = 4
+gossipsub_mesh_n_high = 6
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+mesh_warmup_ms = 3000
+gossipsub_idontwant_threshold_bytes = 1000
+signature_propagation = "bundled"
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+bundle_stagger_ms = 1600
+bundle_announce = true
+bundle_request_delay_ms = 200
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+supernode_by_validator_count = 10
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "native"
+runs = 1
+parallelism = 48
+cpu_pinning = false
+
+[output]
+dir = "/home/kamilsa/dev/leansim-signature-sync/output-32k-allhosts/ann-m4-s1600-d200-allhosts-agg4"

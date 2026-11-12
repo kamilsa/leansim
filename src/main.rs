@@ -7,16 +7,20 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use libp2p::Swarm;
 
-use leansim::config::experiment::{NodeConfig, NodeRole};
+use leansim::config::experiment::{NodeConfig, NodeRole, SignaturePropagation, SignatureSync};
 use leansim::config::plan::AggregationPlan;
 use leansim::messages::proof::ProofId;
 use leansim::messages::wire::WireMessage;
-use leansim::metrics::events::{emit, JsonlEvent};
+use leansim::metrics::events::{emit, JsonlEvent, MeshSample, SigVia};
 use leansim::metrics::traffic::{Bucket, Direction, Kind, TrafficMeter};
 use leansim::network::swarm::{peer_id_for, NetEvent, ReceivedMessage, SimBehaviour};
+use leansim::node::bundle_io::BundleIo;
+use leansim::node::bundles::{next_tick, BundleSettings, BundleSync};
 use leansim::node::proof_io::ProofIo;
 use leansim::node::recursive::ProofExchange;
+use leansim::node::sigsync::{SigSync, SyncSettings};
 use leansim::node::state::NodeState;
+use leansim::node::sync_io::{Delivery, SyncIo};
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +78,17 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
     );
     let signing_subnets = state.signing_subnets();
     let subscribed_subnets = state.subscribed_subnets();
+    let bundled = node_config.experiment.signature_propagation == SignaturePropagation::Bundled;
+    // Bundles track every subnet this host hears or signs in; a subnet it only signs
+    // in is pushed to fanout peers.
+    let bundle_subnets: Vec<u32> = subscribed_subnets
+        .iter()
+        .chain(&state.aggregated_subnets)
+        .chain(&signing_subnets)
+        .copied()
+        .collect::<std::collections::BTreeSet<u32>>()
+        .into_iter()
+        .collect();
     let mut explicit_peers = leansim::network::swarm::ExplicitPeerManager::new(
         &node_config.explicit_peer_addrs,
         &node_config.selected_aggregator_addrs,
@@ -85,6 +100,13 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &node_config.experiment,
     )?;
 
+    if bundled {
+        leansim::network::swarm::enable_partial_topics(
+            &mut swarm,
+            bundle_subnets.iter().copied(),
+            &node_config.experiment.run_id,
+        );
+    }
     leansim::network::swarm::subscribe_to_topics(
         &mut swarm,
         &state.aggregated_subnets,
@@ -125,6 +147,43 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         Duration::from_millis(experiment.recursive_aggregation_time_ms),
     );
     let mut proof_io = ProofIo::new(state.node_id, experiment.aggregate_proof_bytes);
+    // Signature sync tracks every subnet this host hears gossip on.
+    let mut sync: SigSync<libp2p::PeerId> = SigSync::new(
+        SyncSettings::from_config(experiment),
+        subscribed_subnets.union(&state.aggregated_subnets).copied(),
+        u64::from(state.node_id),
+    );
+    let mut sync_io = SyncIo::new(experiment.signature_payload_bytes);
+    let sync_interval = Duration::from_millis(experiment.sync_interval_ms.max(1));
+    let mut bundles: BundleSync<libp2p::PeerId> = BundleSync::new(
+        BundleSettings::from_config(experiment),
+        bundle_subnets.iter().copied(),
+    )
+    .with_local(*swarm.local_peer_id());
+    // Subnets this host is in the mesh of; the rest of its bundle subnets are publish-only.
+    let mesh_subnets: std::collections::BTreeSet<u32> = subscribed_subnets
+        .union(&state.aggregated_subnets)
+        .copied()
+        .collect();
+    let mut bundle_io = BundleIo::new(experiment, bundle_subnets.iter().copied())
+        .with_publish_only(
+            bundle_subnets
+                .iter()
+                .copied()
+                .filter(|subnet| !mesh_subnets.contains(subnet)),
+        );
+    let bundle_tick = Duration::from_millis(experiment.bundle_tick_ms);
+    // Each host's tick clock has its own phase, as real hosts' would.
+    let bundle_anchor = {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(u64::from(state.node_id));
+        let offset_ms = rng.gen_range(0..experiment.bundle_tick_ms.max(1));
+        tokio::time::Instant::now() + Duration::from_millis(offset_ms)
+    };
+    // The next tick with signatures to push; None while there are none.
+    let mut next_bundle_tick: Option<tokio::time::Instant> = None;
+    // Signatures received and bytes they took, for NodeStats in bundled mode.
+    let (mut bundle_recv_bytes, mut bundle_recv_msgs) = (0u64, 0u64);
     // Traffic logs only on the hosts the launcher flags, so the rest stay untouched.
     let mut meter = node_config
         .traffic_log
@@ -149,25 +208,46 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
     .await?;
 
     if !state.validator_ids.is_empty() {
-        leansim::node::validator::validator_init(&state, &mut swarm).await?;
+        leansim::node::validator::validator_init(&state, &mut swarm, !bundled).await?;
+        let now = tokio::time::Instant::now();
+        for &validator_id in &state.validator_ids {
+            let subnet = state.config.subnet_for_validator(validator_id);
+            sync.deliver(subnet, validator_id, state.node_id, now);
+            if bundled {
+                bundles.deliver(subnet, u64::from(validator_id), state.node_id, None, now);
+            }
+        }
+        // Own signatures go out at the next tick, like any other.
+        if bundled {
+            next_bundle_tick = Some(next_tick(bundle_anchor, bundle_tick, now));
+        }
     }
     if node_config.role == NodeRole::LocalAggregator {
         leansim::node::local_aggregator::record_own_signatures(&state);
     }
+    emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Signing);
 
     let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);
     let end = tokio::time::Instant::now() + timeout;
+    let mut next_sync =
+        (sync.mode() != SignatureSync::None).then(|| tokio::time::Instant::now() + sync_interval);
 
     loop {
         if tokio::time::Instant::now() >= end {
             break;
         }
         // Wake for the next message, the next proof to finish, or the end of the run.
-        let wake = [state.next_proof_due(), exchange.next_due()]
-            .into_iter()
-            .flatten()
-            .min()
-            .map_or(end, |due| due.min(end));
+        let wake = [
+            state.next_proof_due(),
+            exchange.next_due(),
+            next_sync,
+            next_bundle_tick,
+            bundles.next_request_due(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map_or(end, |due| due.min(end));
         let event = tokio::time::timeout_at(
             wake,
             leansim::network::swarm::next_event(&mut swarm, &mut explicit_peers),
@@ -176,8 +256,75 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
 
         match event {
             Ok(Some(NetEvent::Gossip(received))) => {
-                handle_signature(&state, &swarm, meter.as_mut(), received)
+                handle_signature(&state, &swarm, &mut sync, meter.as_mut(), received)
             }
+            Ok(Some(NetEvent::SyncRequest {
+                peer,
+                request,
+                channel,
+            })) => {
+                let deliveries = sync_io.on_request(
+                    &mut swarm,
+                    &mut sync,
+                    meter.as_mut(),
+                    peer,
+                    request,
+                    channel,
+                    tokio::time::Instant::now(),
+                    state.elapsed_ms(),
+                );
+                record_deliveries(&state, deliveries);
+            }
+            Ok(Some(NetEvent::SyncResponse {
+                peer,
+                request_id,
+                response,
+            })) => {
+                let deliveries = sync_io.on_response(
+                    &mut sync,
+                    meter.as_mut(),
+                    peer,
+                    request_id,
+                    response,
+                    tokio::time::Instant::now(),
+                    state.elapsed_ms(),
+                );
+                record_deliveries(&state, deliveries);
+            }
+            Ok(Some(NetEvent::SyncFailed { request_id })) => {
+                sync_io.on_failure(&mut sync, request_id)
+            }
+            Ok(Some(NetEvent::Partial { peer, message })) => {
+                let now = tokio::time::Instant::now();
+                let deliveries = bundle_io.on_partial(
+                    &mut swarm,
+                    &mut bundles,
+                    meter.as_mut(),
+                    peer,
+                    message,
+                    now,
+                    state.elapsed_ms(),
+                );
+                bundle_recv_msgs += deliveries.len() as u64;
+                bundle_recv_bytes += deliveries.iter().map(|d| d.byte_size).sum::<u64>();
+                // New signatures go out at the next tick, even if a later one was
+                // already planned for staggered pushes. With announcements, so does
+                // the answer to what the peer announced.
+                if experiment.bundle_announce || deliveries.iter().any(|d| !d.duplicate) {
+                    let tick_at = next_tick(bundle_anchor, bundle_tick, now);
+                    next_bundle_tick =
+                        Some(next_bundle_tick.map_or(tick_at, |planned| planned.min(tick_at)));
+                }
+                record_deliveries(&state, deliveries);
+            }
+            Ok(Some(NetEvent::PartialGossip { topic, peers })) => bundle_io.on_gossip(
+                &mut swarm,
+                &mut bundles,
+                meter.as_mut(),
+                &topic,
+                &peers,
+                state.elapsed_ms(),
+            ),
             Ok(Some(NetEvent::ProofRequest { request, channel })) => proof_io.on_request(
                 &mut swarm,
                 &mut exchange,
@@ -211,6 +358,41 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         }
 
         let now = tokio::time::Instant::now();
+        if bundles.next_request_due().is_some_and(|due| due <= now) {
+            bundle_io.send_due_requests(
+                &mut swarm,
+                &mut bundles,
+                meter.as_mut(),
+                now,
+                state.elapsed_ms(),
+            );
+        }
+        if next_bundle_tick.is_some_and(|due| due <= now) {
+            bundle_io.flush(
+                &mut swarm,
+                &mut bundles,
+                meter.as_mut(),
+                now,
+                state.elapsed_ms(),
+            );
+            // Staggered pushes still waiting get the first tick after they are due.
+            next_bundle_tick = bundles
+                .next_lazy_due()
+                .map(|due| next_tick(bundle_anchor, bundle_tick, due));
+        }
+        if let Some(due) = next_sync.filter(|due| *due <= now) {
+            let run_id = &state.config.run_id;
+            let gossipsub = &swarm.behaviour().gossipsub;
+            let actions = sync.tick(now, |subnet| {
+                let topic = libp2p::gossipsub::IdentTopic::new(
+                    leansim::network::topics::subnet_topic(run_id, subnet),
+                );
+                gossipsub.mesh_peers(&topic.hash()).copied().collect()
+            });
+            sync_io.execute(&mut swarm, meter.as_mut(), actions, state.elapsed_ms());
+            // Skip ticks missed while busy rather than bursting to catch up.
+            next_sync = Some((due + sync_interval).max(now));
+        }
         for proof in leansim::node::local_aggregator::complete_due_proofs(&state) {
             let actions = exchange.proof_ready(ProofId::subnet(proof.subnet), now);
             proof_io.execute(&mut swarm, meter.as_mut(), actions, state.elapsed_ms());
@@ -250,13 +432,33 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    emit(&JsonlEvent::NodeStats {
-        node_id: state.node_id,
-        bytes_sent: state.bytes_sent_sig.load(Ordering::Relaxed),
-        bytes_received: state.bytes_recv_sig.load(Ordering::Relaxed),
-        msgs_sent: state.msgs_sent_sig.load(Ordering::Relaxed),
-        msgs_received: state.msgs_recv_sig.load(Ordering::Relaxed),
-    });
+    emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Exit);
+    let bundle_stats = bundle_io.final_stats(&bundles);
+    emit(&sync_io.transport_stats(
+        state.node_id,
+        swarm.behaviour().gossipsub.control_stats(),
+        sync.pending_rows(),
+        bundle_stats,
+    ));
+    // Bundles are counted as sent, not estimated like gossip forwards.
+    let node_stats = if bundled {
+        JsonlEvent::NodeStats {
+            node_id: state.node_id,
+            bytes_sent: bundle_stats.bundle_bytes_sent,
+            bytes_received: bundle_recv_bytes,
+            msgs_sent: bundle_stats.bundle_sigs_sent,
+            msgs_received: bundle_recv_msgs,
+        }
+    } else {
+        JsonlEvent::NodeStats {
+            node_id: state.node_id,
+            bytes_sent: state.bytes_sent_sig.load(Ordering::Relaxed),
+            bytes_received: state.bytes_recv_sig.load(Ordering::Relaxed),
+            msgs_sent: state.msgs_sent_sig.load(Ordering::Relaxed),
+            msgs_received: state.msgs_recv_sig.load(Ordering::Relaxed),
+        }
+    };
+    emit(&node_stats);
 
     let writes = zero_copy_write::stats();
     eprintln!(
@@ -268,29 +470,94 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Logs how many gossipsub mesh peers the host has on each subnet it subscribes to.
+fn emit_mesh_degrees(
+    state: &NodeState,
+    swarm: &Swarm<SimBehaviour>,
+    subnets: &std::collections::BTreeSet<u32>,
+    at: MeshSample,
+) {
+    for &subnet in subnets {
+        let topic = libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(
+            &state.config.run_id,
+            subnet,
+        ));
+        emit(&JsonlEvent::MeshDegree {
+            node_id: state.node_id,
+            subnet_id: subnet,
+            peers: swarm
+                .behaviour()
+                .gossipsub
+                .mesh_peers(&topic.hash())
+                .count() as u32,
+            at,
+            ts_ms: state.elapsed_ms(),
+        });
+    }
+}
+
+/// Logs signatures the sync protocol delivered and feeds them to local aggregation.
+fn record_deliveries(state: &NodeState, deliveries: Vec<Delivery>) {
+    let ts_ms = state.elapsed_ms();
+    for delivery in deliveries {
+        emit(&JsonlEvent::SigReceived {
+            node_id: state.node_id,
+            from_id: delivery.origin,
+            validator_id: Some(delivery.validator_id),
+            from_peer_id: delivery.from_peer.to_base58(),
+            subnet_id: delivery.subnet,
+            duplicate: delivery.duplicate,
+            ts_ms,
+            byte_size: delivery.byte_size,
+            via: delivery.via,
+        });
+        if !delivery.duplicate && state.role == NodeRole::LocalAggregator {
+            leansim::node::local_aggregator::record_signature(
+                state,
+                delivery.subnet,
+                delivery.validator_id,
+            );
+        }
+    }
+}
+
 /// Counts one gossiped signature, unique or duplicate, and feeds local aggregation.
+/// A signature already held through the sync protocol counts as a duplicate.
 /// On a traffic-logging host it also records the bytes, incoming per forwarding
 /// peer and outgoing per mesh peer it estimates a forward to.
 fn handle_signature(
     state: &NodeState,
     swarm: &Swarm<SimBehaviour>,
+    sync: &mut SigSync<libp2p::PeerId>,
     mut meter: Option<&mut TrafficMeter>,
     received: ReceivedMessage,
 ) {
     let wire_msg = received.wire_msg;
     let from_peer_str = received.from_peer.to_base58();
     let msg_id = wire_msg.message_id();
-    let is_dup = received.is_duplicate;
-    if !is_dup {
-        state.mark_seen(msg_id);
-    }
-
     let WireMessage::ValidatorSignature {
         sender_id,
         validator_id,
         subnet_id,
         ..
     } = &wire_msg;
+    // Signatures this one let the decoder finish, after itself.
+    let mut decoded = Vec::new();
+    let mut is_dup = received.is_duplicate;
+    if !is_dup && sync.tracks(*subnet_id) {
+        let held = sync.deliver(
+            *subnet_id,
+            *validator_id,
+            *sender_id,
+            tokio::time::Instant::now(),
+        );
+        is_dup = held.is_empty();
+        decoded.extend(held.into_iter().skip(1));
+    }
+    if !received.is_duplicate {
+        state.mark_seen(msg_id);
+    }
+
     let size = wire_msg.encode().len() as u64;
     // Mesh_n configured, D_lazy ≈ ceil(sqrt(mesh_n))
     let d_lazy = ((state.config.gossipsub_mesh_n as f64).sqrt().ceil() as u64).max(1);
@@ -308,7 +575,8 @@ fn handle_signature(
             size,
             &format!("peer:{from_peer_str}"),
         );
-        if !is_dup {
+        // Gossipsub forwards whatever is new to it, even if sync delivered it first.
+        if !received.is_duplicate {
             for peer in forwarding_peers(swarm, &state.config.run_id, *subnet_id, d_lazy) {
                 meter.record(ts_ms, Direction::Out, Kind::Signature, size, &peer);
             }
@@ -326,10 +594,11 @@ fn handle_signature(
         duplicate: is_dup,
         ts_ms,
         byte_size: size,
+        via: SigVia::Gossip,
     });
     // Approximate lazy gossip traffic. Full-message forwarding to mesh and
     // explicit peers is not observable at this layer.
-    if !is_dup {
+    if !received.is_duplicate {
         state
             .bytes_sent_sig
             .fetch_add(size * d_lazy, Ordering::Relaxed);
@@ -339,6 +608,21 @@ fn handle_signature(
     if state.role == NodeRole::LocalAggregator {
         leansim::node::local_aggregator::handle_message(state, &wire_msg);
     }
+    record_deliveries(
+        state,
+        decoded
+            .into_iter()
+            .map(|held| Delivery {
+                subnet: *subnet_id,
+                validator_id: held.validator_id,
+                origin: held.origin,
+                via: SigVia::Coded,
+                duplicate: false,
+                byte_size: 0,
+                from_peer: received.from_peer,
+            })
+            .collect(),
+    );
 }
 
 /// The mesh peers a unique signature on `subnet` would be forwarded to, up to the

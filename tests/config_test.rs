@@ -1,4 +1,6 @@
-use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole};
+use leansim::config::experiment::{
+    ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole, SignaturePropagation, SignatureSync,
+};
 use leansim::network::swarm::warmup_ms;
 
 fn base_config() -> ExperimentConfig {
@@ -26,6 +28,24 @@ fn base_config() -> ExperimentConfig {
         mesh_warmup_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
+        gossipsub_gossip: true,
+        gossipsub_idontwant_threshold_bytes: 0,
+        signature_sync: SignatureSync::None,
+        sync_interval_ms: 100,
+        sync_grace_ms: 300,
+        sync_pull_batch: 16,
+        sync_pull_timeout_ms: 1000,
+        sync_coded_degree: 0,
+        sync_coded_redundancy: 1.1,
+        sync_coded_per_tick: 8,
+        sync_refresh_ms: 1000,
+        signature_propagation: SignaturePropagation::Gossipsub,
+        bundle_tick_ms: 20,
+        bundle_max_signatures: 50,
+        bundle_request_timeout_ms: 1000,
+        bundle_request_delay_ms: 0,
+        bundle_stagger_ms: 0,
+        bundle_announce: false,
         network_defaults: NetworkDefaults::default(),
         use_geo_latency: false,
         geo_seed: 0,
@@ -64,6 +84,22 @@ subnet_count = 1
 
     assert_eq!(exp.gossipsub_explicit_aggregator_count, 0);
     assert!(!exp.gossipsub_flood_publish);
+    assert!(exp.gossipsub_gossip);
+}
+
+#[test]
+fn gossip_can_be_switched_off() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+gossipsub_gossip = false
+"#,
+    )
+    .unwrap();
+
+    assert!(!exp.gossipsub_gossip);
 }
 
 #[test]
@@ -384,4 +420,134 @@ fn traffic_bucket_width_must_be_positive() {
     assert!(exp.validate().is_err());
     exp.traffic_log_bucket_ms = 100;
     assert!(exp.validate().is_ok());
+}
+
+#[test]
+fn signature_sync_defaults_to_gossip_only() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_sync, SignatureSync::None);
+    assert_eq!(exp.gossipsub_idontwant_threshold_bytes, 0);
+    assert_eq!(exp.sync_coded_degree, 0);
+    assert_eq!(exp.sync_coded_redundancy, 1.1);
+}
+
+#[test]
+fn signature_sync_modes_deserialize_and_validate() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+signature_sync = "coded_repair"
+gossipsub_idontwant_threshold_bytes = 1000
+sync_coded_degree = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_sync, SignatureSync::CodedRepair);
+    assert_eq!(exp.gossipsub_idontwant_threshold_bytes, 1000);
+    exp.validate().unwrap();
+
+    let pull: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+signature_sync = "bitmap_pull"
+"#,
+    )
+    .unwrap();
+    assert_eq!(pull.signature_sync, SignatureSync::BitmapPull);
+}
+
+#[test]
+fn signature_sync_rejects_bad_settings() {
+    let mut exp = base_config();
+    exp.signature_sync = SignatureSync::CodedRepair;
+    exp.sync_coded_redundancy = 0.0;
+    assert!(exp.validate().is_err());
+    exp.sync_coded_redundancy = 1.1;
+    exp.sync_interval_ms = 0;
+    assert!(exp.validate().is_err());
+    // Mode none ignores the sync settings.
+    exp.signature_sync = SignatureSync::None;
+    exp.validate().unwrap();
+}
+
+#[test]
+fn signature_propagation_defaults_to_gossipsub() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_propagation, SignaturePropagation::Gossipsub);
+    assert_eq!(exp.bundle_tick_ms, 20);
+    assert_eq!(exp.bundle_max_signatures, 50);
+    assert_eq!(exp.bundle_request_timeout_ms, 1000);
+    assert_eq!(exp.bundle_request_delay_ms, 0);
+    assert_eq!(exp.bundle_stagger_ms, 0);
+    assert!(!exp.bundle_announce);
+}
+
+#[test]
+fn bundled_propagation_deserializes_and_validates() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+signature_propagation = "bundled"
+bundle_tick_ms = 0
+bundle_max_signatures = 8
+bundle_request_delay_ms = 100
+bundle_stagger_ms = 150
+bundle_announce = true
+"#,
+    )
+    .unwrap();
+    assert_eq!(exp.signature_propagation, SignaturePropagation::Bundled);
+    assert_eq!(exp.bundle_tick_ms, 0);
+    assert_eq!(exp.bundle_max_signatures, 8);
+    assert_eq!(exp.bundle_request_delay_ms, 100);
+    assert_eq!(exp.bundle_stagger_ms, 150);
+    assert!(exp.bundle_announce);
+    exp.validate().unwrap();
+}
+
+#[test]
+fn bundled_propagation_rejects_bad_settings() {
+    let mut exp = base_config();
+    exp.signature_propagation = SignaturePropagation::Bundled;
+    exp.validate().unwrap();
+    exp.signature_sync = SignatureSync::BitmapPull;
+    assert!(
+        exp.validate().is_err(),
+        "bundles replace gossip, so no sync on top"
+    );
+    exp.signature_sync = SignatureSync::None;
+    exp.bundle_max_signatures = 0;
+    assert!(exp.validate().is_err());
+    exp.bundle_max_signatures = 50;
+    exp.bundle_request_timeout_ms = 0;
+    assert!(exp.validate().is_err());
+    exp.bundle_request_timeout_ms = 1000;
+    exp.bundle_announce = true;
+    assert!(exp.validate().is_err(), "announcements need a stagger");
+    exp.bundle_stagger_ms = 200;
+    exp.validate().unwrap();
+    exp.bundle_request_timeout_ms = 0;
+    // Gossipsub ignores the bundle settings.
+    exp.signature_propagation = SignaturePropagation::Gossipsub;
+    exp.validate().unwrap();
 }

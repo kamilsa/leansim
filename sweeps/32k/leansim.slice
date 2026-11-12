@@ -1,0 +1,10 @@
+# Hard cap on all leansim simulations of this user, together (installed in
+# ~/.config/systemd/user/). The machine has 503 GiB; this leaves at least 170 GiB
+# to other users even at the cap. No swap, so jobs never push others into swap.
+[Unit]
+Description=leansim simulations (memory capped)
+
+[Slice]
+MemoryHigh=310G
+MemoryMax=330G
+MemorySwapMax=0

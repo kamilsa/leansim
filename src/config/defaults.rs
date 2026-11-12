@@ -70,3 +70,55 @@ pub const fn default_aggregate_proof_bytes() -> usize {
 pub const fn default_traffic_log_bucket_ms() -> u64 {
     100
 }
+
+pub const fn default_sync_interval_ms() -> u64 {
+    100
+}
+
+pub const fn default_sync_grace_ms() -> u64 {
+    300
+}
+
+pub const fn default_sync_pull_batch() -> usize {
+    16
+}
+
+pub const fn default_sync_pull_timeout_ms() -> u64 {
+    1000
+}
+
+pub const fn default_sync_coded_redundancy() -> f64 {
+    1.1
+}
+
+pub const fn default_sync_coded_per_tick() -> usize {
+    8
+}
+
+pub const fn default_sync_refresh_ms() -> u64 {
+    1000
+}
+
+/// EIP-8334's recommended ATTESTATION_BUNDLE_TICK_DURATION.
+pub const fn default_bundle_tick_ms() -> u64 {
+    20
+}
+
+/// EIP-8334's MAX_ATTESTATIONS_PER_BUNDLE.
+pub const fn default_bundle_max_signatures() -> usize {
+    50
+}
+
+pub const fn default_bundle_request_timeout_ms() -> u64 {
+    1000
+}
+
+/// EIP-8334 pushes from both ends of a link at once.
+pub const fn default_bundle_stagger_ms() -> u64 {
+    0
+}
+
+/// EIP-8334 requests advertised signatures at once.
+pub const fn default_bundle_request_delay_ms() -> u64 {
+    0
+}

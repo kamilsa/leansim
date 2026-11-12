@@ -40,6 +40,9 @@ LONG_WARMUP_MS = 3000
 MAX_RECURSION_ARITY = 16
 # The proof protocol's CBOR codec reads at most 10 MiB per response; keep headroom.
 MAX_PROOF_BYTES = 8 * 1024 * 1024
+# Per-hop signature sync modes (config::experiment::SignatureSync).
+SIGNATURE_SYNC_MODES = ("none", "bitmap_pull", "coded_repair")
+SIGNATURE_PROPAGATION_MODES = ("gossipsub", "bundled")
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
 _GLOBAL_AGGREGATION_REMOVED = "dedicated global aggregators were replaced by recursive_aggregation (attesters in recursive groups)"
 REMOVED_KEYS = {
@@ -131,8 +134,45 @@ def validate_experiment(config: dict) -> None:
         die("signature_payload_bytes must be greater than zero")
     if not isinstance(setting(config, "gossipsub_flood_publish", False), bool):
         die("gossipsub_flood_publish must be a boolean")
+    if not isinstance(setting(config, "gossipsub_gossip", True), bool):
+        die("gossipsub_gossip must be a boolean")
     if "gossipsub_heartbeat_initial_delay_ms" in config:
         as_int(config["gossipsub_heartbeat_initial_delay_ms"], "gossipsub_heartbeat_initial_delay_ms", minimum=0)
+    as_int(setting(config, "gossipsub_idontwant_threshold_bytes", 0), "gossipsub_idontwant_threshold_bytes", minimum=0)
+    sync_mode = setting(config, "signature_sync", "none")
+    if sync_mode not in SIGNATURE_SYNC_MODES:
+        die(f"signature_sync must be one of {', '.join(SIGNATURE_SYNC_MODES)}")
+    for key, default, minimum in (
+        ("sync_interval_ms", 100, 1),
+        ("sync_grace_ms", 300, 0),
+        ("sync_pull_batch", 16, 1),
+        ("sync_pull_timeout_ms", 1000, 1),
+        ("sync_coded_degree", 0, 0),
+        ("sync_coded_per_tick", 8, 0),
+        ("sync_refresh_ms", 1000, 0),
+    ):
+        as_int(setting(config, key, default), key, minimum=minimum)
+    if as_number(setting(config, "sync_coded_redundancy", 1.1), "sync_coded_redundancy", minimum=0) <= 0:
+        die("sync_coded_redundancy must be greater than zero")
+    if sync_mode != "none" and validators // subnets > 65536:
+        die("signature_sync supports at most 65,536 validators per subnet")
+    propagation = setting(config, "signature_propagation", "gossipsub")
+    if propagation not in SIGNATURE_PROPAGATION_MODES:
+        die(f"signature_propagation must be one of {', '.join(SIGNATURE_PROPAGATION_MODES)}")
+    for key, default, minimum in (
+        ("bundle_tick_ms", 20, 0),
+        ("bundle_max_signatures", 50, 1),
+        ("bundle_request_timeout_ms", 1000, 1),
+        ("bundle_request_delay_ms", 0, 0),
+        ("bundle_stagger_ms", 0, 0),
+    ):
+        as_int(setting(config, key, default), key, minimum=minimum)
+    if not isinstance(setting(config, "bundle_announce", False), bool):
+        die("bundle_announce must be a boolean")
+    if config.get("bundle_announce") and not config.get("bundle_stagger_ms"):
+        die("bundle_announce requires bundle_stagger_ms > 0")
+    if propagation == "bundled" and sync_mode != "none":
+        die('signature_propagation = "bundled" requires signature_sync = "none"')
     node_map = config.get("node_map")
     if node_map is not None:
         if not isinstance(node_map, str) or not node_map.strip():
@@ -275,6 +315,16 @@ def experiment_defaults(experiment: dict) -> dict:
         "gossipsub_heartbeat_interval_ms": 1000,
         "gossipsub_explicit_aggregator_count": 0,
         "gossipsub_flood_publish": False,
+        "gossipsub_gossip": True,
+        "gossipsub_idontwant_threshold_bytes": 0,
+        "signature_sync": "none",
+        "signature_propagation": "gossipsub",
+        "bundle_tick_ms": 20,
+        "bundle_max_signatures": 50,
+        "bundle_request_timeout_ms": 1000,
+        "bundle_request_delay_ms": 0,
+        "bundle_stagger_ms": 0,
+        "bundle_announce": False,
         "use_geo_latency": False,
         "geo_seed": 42,
         "geo_jitter": 0.0,
@@ -1252,17 +1302,27 @@ def cargo_build_release() -> None:
     subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT, check=True)
 
 
-def native_run_shadow(output_dir: Path, parallelism: int) -> None:
+def shadow_command(parallelism: int, cpu_pinning: bool) -> list[str]:
+    """The Shadow invocation, run from the output directory. Shadow pins its workers
+    and the processes they run to the lowest-numbered cores by default, so several
+    simulations on one machine pile onto the same cores unless pinning is off."""
+    command = ["shadow", "-d", "shadow.data", "--progress", "true", "--parallelism", str(parallelism)]
+    if not cpu_pinning:
+        command += ["--use-cpu-pinning", "false"]
+    return command + ["shadow.yaml"]
+
+
+def native_run_shadow(output_dir: Path, parallelism: int, cpu_pinning: bool) -> None:
     if shutil.which("shadow") is None:
         die('shadow is not on PATH; install Shadow or set [run].runner = "docker"')
     log("running Shadow natively")
-    subprocess.run(["shadow", "-d", "shadow.data", "--progress", "true", "--parallelism", str(parallelism), "shadow.yaml"], cwd=output_dir, check=True)
+    subprocess.run(shadow_command(parallelism, cpu_pinning), cwd=output_dir, check=True)
 
 
-def docker_run_shadow(image: str, output_dir: Path, parallelism: int) -> None:
+def docker_run_shadow(image: str, output_dir: Path, parallelism: int, cpu_pinning: bool) -> None:
     subprocess.run(["docker", "rm", "-f", "leansim-shadow-run"], check=False, capture_output=True)
     log("running Shadow in Docker")
-    command = f"shadow -d shadow.data --progress true --parallelism {parallelism} shadow.yaml"
+    command = " ".join(shadow_command(parallelism, cpu_pinning))
     subprocess.run(
         ["docker", "run", "--rm", "--name", "leansim-shadow-run", "--platform", "linux/arm64", "--security-opt", "seccomp=unconfined", "--shm-size", "4g", "-v", f"{output_dir}:{output_dir}", "-w", str(output_dir), "--entrypoint", "/bin/bash", image, "-c", command],
         check=True,
@@ -1341,6 +1401,9 @@ def main() -> None:
     runs = as_int(run.get("runs", 1), "run.runs", minimum=1)
     # 0 (the default) = every logical core of the machine running Shadow.
     parallelism = as_int(run.get("parallelism", 0), "run.parallelism", minimum=0) or os.cpu_count() or 1
+    cpu_pinning = run.get("cpu_pinning", True)
+    if not isinstance(cpu_pinning, bool):
+        die("[run].cpu_pinning must be a boolean")
     output_dir = resolve_path(str(output.get("dir", "output")))
     overlays = [resolve_path(path) for path in args.overlay]
 
@@ -1376,9 +1439,9 @@ def main() -> None:
             continue
         shutil.rmtree(output_dir / "shadow.data", ignore_errors=True)
         if runner == "docker":
-            docker_run_shadow(image, output_dir, parallelism)
+            docker_run_shadow(image, output_dir, parallelism, cpu_pinning)
         else:
-            native_run_shadow(output_dir, parallelism)
+            native_run_shadow(output_dir, parallelism, cpu_pinning)
         write_run_meta(output_dir, manifest)
         analyze(output_dir, overlays, serve=False, append=True)
     if args.serve:

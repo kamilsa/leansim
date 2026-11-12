@@ -1,0 +1,10 @@
+{
+  "max_jobs": 2,
+  "budget_gib": 280,
+  "host_reserve_gib": 120,
+  "estimate_gib": 130,
+  "estimate_margin": 1.15,
+  "cpus": "0-47",
+  "poll_s": 15,
+  "retry": []
+}

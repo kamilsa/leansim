@@ -1,5 +1,11 @@
+pub mod bundle_io;
+pub mod bundles;
+pub mod decoder;
+pub mod gf256;
 pub mod local_aggregator;
 pub mod proof_io;
 pub mod recursive;
+pub mod sigsync;
 pub mod state;
+pub mod sync_io;
 pub mod validator;

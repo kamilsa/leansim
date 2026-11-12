@@ -9,9 +9,24 @@ message RPC {
 	message SubOpts {
 		optional bool subscribe = 1; // subscribe or unsubscribe
 		optional string topic_id = 2;
+		// Partial messages extension (leansim backport): the sender wants partial
+		// messages on this topic, and can send them.
+		optional bool requestsPartial = 3;
+		optional bool supportsPartial = 4;
 	}
 
 	optional ControlMessage control = 3;
+	// Partial messages extension (leansim backport).
+	optional PartialMessagesExtension partial = 10;
+}
+
+message PartialMessagesExtension {
+	optional bytes topicID = 1;
+	optional bytes groupID = 2;
+	// An encoded partial message.
+	optional bytes partialMessage = 3;
+	// An encoded representation of the parts a peer has and wants.
+	optional bytes partsMetadata = 4;
 }
 
 message Message {
@@ -28,6 +43,7 @@ message ControlMessage {
 	repeated ControlIWant iwant = 2;
 	repeated ControlGraft graft = 3;
 	repeated ControlPrune prune = 4;
+	repeated ControlIDontWant idontwant = 5;
 }
 
 message ControlIHave {
@@ -37,6 +53,10 @@ message ControlIHave {
 
 message ControlIWant {
 	repeated bytes message_ids= 1;
+}
+
+message ControlIDontWant {
+	repeated bytes message_ids = 1;
 }
 
 message ControlGraft {
