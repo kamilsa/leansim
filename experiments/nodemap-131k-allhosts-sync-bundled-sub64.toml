@@ -1,0 +1,77 @@
+# Signature transport comparison on
+# experiments/nodemap-131k-allhosts-sub64.toml's network (same hosts, subnets,
+# aggregators and 90% local threshold): EIP-8334 bundles over gossipsub partial
+# messages instead of one gossipsub message per signature. Each host pushes its
+# mesh peers the signatures they lack every bundle_tick_ms, and reconciles with
+# gossip peers by validator index instead of IHAVE/IWANT.
+# Baseline: nodemap-131k-allhosts-sync-gossip-sub64.toml.
+run_id = "nodemap-131k-allhosts-sync-bundled-sub64"
+run_timeout_secs = 120
+
+validator_count = 131072
+node_map = "nodes.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+# Mainnet-faithful subscriptions: validator hosts join the subnets their
+# validators publish in (their duties) on top of the 2 random gossip subnets;
+# relays keep the 2 random ones.
+subscribe_to_duty_subnets = true
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in (~29 connections per host).
+random_peer_count = 0
+subnet_count = 64
+local_aggregators_per_subnet = 16
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+# IDONTWANT is kept on as in the baseline; no signature travels as a full
+# gossipsub message here, so it never fires.
+gossipsub_idontwant_threshold_bytes = 1000
+signature_sync = "none"
+signature_propagation = "bundled"
+# EIP-8334's recommended tick and bundle cap. bundle_tick_ms = 0 pushes each
+# arrival at once: the no-batching control.
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+# A signature requested from one gossip peer is not requested from another
+# until this long without it arriving.
+bundle_request_timeout_ms = 1000
+# Every host warms up 3 s before signing: about 2 round trips on the slowest
+# links (up to 259 ms one-way) to learn subscriptions, then a heartbeat to graft
+# meshes. The launcher's dial-count rule would pick 1,500 ms here, which cuts it
+# close on intercontinental links.
+mesh_warmup_ms = 3000
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "native"  # local cargo build + shadow on PATH
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[output]
+dir = "output-nodemap-131k-allhosts-sync-bundled-sub64"

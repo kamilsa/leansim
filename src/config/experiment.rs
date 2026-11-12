@@ -19,6 +19,18 @@ pub enum SignatureSync {
     CodedRepair,
 }
 
+/// How subnet signatures propagate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignaturePropagation {
+    /// One gossipsub message per signature.
+    #[default]
+    Gossipsub,
+    /// EIP-8334 (gossipsub partial messages version): signatures pushed in bundles to
+    /// mesh peers every tick, and reconciled with gossip peers by validator index.
+    Bundled,
+}
+
 /// Network defaults applied to all node-to-node links in Shadow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDefaults {
@@ -122,6 +134,11 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub gossipsub_flood_publish: bool,
 
+    /// Whether the heartbeat gossips to non-mesh peers. False sends no IHAVE, so no
+    /// IWANT follows; with bundles it also stops the advertisements to non-mesh peers.
+    #[serde(default = "default_true")]
+    pub gossipsub_gossip: bool,
+
     /// Gossipsub v1.2 IDONTWANT for messages larger than this many bytes; 0 = off.
     #[serde(default)]
     pub gossipsub_idontwant_threshold_bytes: usize,
@@ -165,6 +182,42 @@ pub struct ExperimentConfig {
     /// Re-arm a neighbour's repair budget after this long without a new bitmap.
     #[serde(default = "defaults::default_sync_refresh_ms")]
     pub sync_refresh_ms: u64,
+
+    /// Gossipsub messages or EIP-8334 bundles.
+    #[serde(default)]
+    pub signature_propagation: SignaturePropagation,
+
+    /// Bundled: a host pushes its new signatures every this many ms; 0 pushes each
+    /// arrival at once.
+    #[serde(default = "defaults::default_bundle_tick_ms")]
+    pub bundle_tick_ms: u64,
+
+    /// Bundled: most signatures in one bundle.
+    #[serde(default = "defaults::default_bundle_max_signatures")]
+    pub bundle_max_signatures: usize,
+
+    /// Bundled: a signature requested from a gossip peer is not requested from another
+    /// until this long has passed without it arriving.
+    #[serde(default = "defaults::default_bundle_request_timeout_ms")]
+    pub bundle_request_timeout_ms: u64,
+
+    /// Bundled: wait this long after an advertisement before requesting, and request
+    /// only what has not arrived meanwhile; 0 requests at once, as the EIP does.
+    #[serde(default = "defaults::default_bundle_request_delay_ms")]
+    pub bundle_request_delay_ms: u64,
+
+    /// Bundled: for each signature one end of a mesh link (picked by a hash) pushes
+    /// at once, and the other waits this long for that copy before pushing; 0
+    /// pushes from both ends at once, as the EIP does.
+    #[serde(default = "defaults::default_bundle_stagger_ms")]
+    pub bundle_stagger_ms: u64,
+
+    /// Bundled, with a stagger: the end of a link that waits announces the
+    /// signature to the other end at once, so that end need not push it back, and
+    /// a peer announces back what it was announced once it holds it. The EIP
+    /// sends no parts metadata to mesh peers.
+    #[serde(default)]
+    pub bundle_announce: bool,
 
     #[serde(default)]
     pub network_defaults: NetworkDefaults,
@@ -261,6 +314,22 @@ impl ExperimentConfig {
             }
             if !(self.sync_coded_redundancy > 0.0 && self.sync_coded_redundancy.is_finite()) {
                 return Err("sync_coded_redundancy must be a positive number".into());
+            }
+        }
+        if self.signature_propagation == SignaturePropagation::Bundled {
+            if self.signature_sync != SignatureSync::None {
+                return Err(
+                    "signature_propagation = \"bundled\" requires signature_sync = \"none\"".into(),
+                );
+            }
+            if self.bundle_max_signatures == 0 {
+                return Err("bundle_max_signatures must be > 0".into());
+            }
+            if self.bundle_request_timeout_ms == 0 {
+                return Err("bundle_request_timeout_ms must be > 0".into());
+            }
+            if self.bundle_announce && self.bundle_stagger_ms == 0 {
+                return Err("bundle_announce requires bundle_stagger_ms > 0".into());
             }
         }
         Ok(())
@@ -369,6 +438,10 @@ fn default_local_aggregators() -> usize {
 
 fn default_false() -> bool {
     false
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_geo_seed() -> u64 {

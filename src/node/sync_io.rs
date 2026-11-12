@@ -11,6 +11,7 @@ use crate::messages::sync::{SyncRequest, SyncResponse, SyncSignature};
 use crate::metrics::events::{JsonlEvent, SigVia};
 use crate::metrics::traffic::{Direction, Kind, TrafficMeter};
 use crate::network::swarm::SimBehaviour;
+use crate::node::bundle_io::BundleStats;
 use crate::node::sigsync::{Action, SigSync};
 
 /// A signature that reached this host through the sync protocol.
@@ -275,14 +276,16 @@ impl SyncIo {
         }
     }
 
-    /// The run's transport counters for this host, gossipsub control included.
+    /// The run's transport counters for this host, gossipsub control and bundles included.
     pub fn transport_stats(
         &self,
         node_id: u32,
         control: libp2p::gossipsub::ControlStats,
         pending_rows: usize,
+        bundles: BundleStats,
     ) -> JsonlEvent {
         let s = self.stats;
+        let b = bundles;
         JsonlEvent::TransportStats {
             node_id,
             ihave_ids_sent: control.ihave_ids_sent,
@@ -294,6 +297,9 @@ impl SyncIo {
             idontwant_ids_received: control.idontwant_ids_received,
             forwards_suppressed: control.forwards_suppressed,
             queued_forwards_dropped: control.queued_forwards_dropped,
+            iwant_responses: control.iwant_responses_received,
+            iwant_response_duplicates: control.iwant_responses_duplicate,
+            fanout_sigs_sent: control.fanout_publishes_sent + b.fanout_sigs_sent,
             have_sent: s.have_sent,
             have_bytes_sent: s.have_bytes_sent,
             want_sent: s.want_sent,
@@ -312,6 +318,23 @@ impl SyncIo {
             acks_sent: s.acks_sent,
             sync_failures: s.failures,
             pending_rows: pending_rows as u64,
+            bundles_sent: b.bundles_sent,
+            bundle_sigs_sent: b.bundle_sigs_sent,
+            bundle_bytes_sent: b.bundle_bytes_sent,
+            bundle_framing_bytes_sent: b.bundle_framing_bytes_sent,
+            requested_sigs_served: b.requested_sigs_served,
+            backlog_sigs_sent: b.backlog_sigs_sent,
+            metadata_sent: b.metadata_sent,
+            metadata_bytes_sent: b.metadata_bytes_sent,
+            available_ids_sent: b.available_ids_sent,
+            request_ids_sent: b.request_ids_sent,
+            pushes_avoided: b.pushes_avoided,
+            lazy_sigs_sent: b.lazy_sigs_sent,
+            announce_ids_sent: b.announce_ids_sent,
+            requests_already_sent: b.requests_already_sent,
+            requests_suppressed: b.requests_suppressed,
+            requests_avoided: b.requests_avoided,
+            invalid_partials: b.invalid_partials,
         }
     }
 }

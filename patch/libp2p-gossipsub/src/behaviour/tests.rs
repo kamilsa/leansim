@@ -375,6 +375,8 @@ fn proto_to_message(rpc: &proto::RPC) -> Rpc {
             })
             .collect(),
         control_msgs,
+        partial_topics: vec![],
+        partial: None,
     }
 }
 
@@ -2158,6 +2160,41 @@ fn test_gossip_to_at_least_gossip_lazy_peers() {
 }
 
 #[test]
+fn test_no_gossip_with_zero_gossip_lazy_and_factor() {
+    let config = ConfigBuilder::default()
+        .gossip_lazy(0)
+        .gossip_factor(0.0)
+        .build()
+        .unwrap();
+
+    // more peers than fit in the mesh, so some are gossip candidates
+    let (mut gs, _, topic_hashes) = inject_nodes1()
+        .peer_no(config.mesh_n_low() + 7)
+        .topics(vec!["topic".into()])
+        .to_subscribe(true)
+        .gs_config(config)
+        .create_network();
+
+    let raw_message = RawMessage {
+        source: Some(PeerId::random()),
+        data: vec![].into(),
+        sequence_number: Some(0),
+        topic: topic_hashes[0].clone(),
+        signature: None,
+        key: None,
+        validated: true,
+    };
+    gs.handle_received_message(raw_message, &PeerId::random());
+
+    gs.emit_gossip();
+
+    assert_eq!(
+        count_control_msgs(&gs, |_, action| matches!(action, ControlAction::IHave { .. })),
+        0
+    );
+}
+
+#[test]
 fn test_gossip_to_at_most_gossip_factor_peers() {
     let config: Config = Config::default();
 
@@ -2946,6 +2983,8 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
                 messages: vec![raw_message1],
                 subscriptions: vec![subscription.clone()],
                 control_msgs: vec![control_action],
+                partial_topics: vec![],
+                partial: None,
             },
             invalid_messages: Vec::new(),
         },
@@ -2972,6 +3011,8 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
                 messages: vec![raw_message3],
                 subscriptions: vec![subscription],
                 control_msgs: vec![control_action],
+                partial_topics: vec![],
+                partial: None,
             },
             invalid_messages: Vec::new(),
         },
@@ -3578,6 +3619,8 @@ fn test_scoring_p4_invalid_signature() {
                 messages: vec![],
                 subscriptions: vec![],
                 control_msgs: vec![],
+                partial_topics: vec![],
+                partial: None,
             },
             invalid_messages: vec![(m, ValidationError::InvalidSignature)],
         },
@@ -5192,4 +5235,283 @@ fn test_idontwant_sent_and_honoured() {
     assert_eq!(gs.control_stats().forwards_suppressed, 1);
     assert_eq!(gs.control_stats().idontwant_ids_received, 1);
     let _ = peers;
+}
+
+/// A peer subscribes to `topic`, requesting partial messages on it when `partial`.
+fn receive_subscription(
+    gs: &mut Behaviour<IdentityTransform, AllowAllSubscriptionFilter>,
+    peer: PeerId,
+    topic: &TopicHash,
+    action: SubscriptionAction,
+    partial: bool,
+) {
+    gs.on_connection_handler_event(
+        peer,
+        ConnectionId::new_unchecked(0),
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![],
+                subscriptions: vec![Subscription {
+                    action,
+                    topic_hash: topic.clone(),
+                }],
+                control_msgs: vec![],
+                partial_topics: if partial { vec![topic.clone()] } else { vec![] },
+                partial: None,
+            },
+            invalid_messages: vec![],
+        },
+    );
+}
+
+/// A node with `peer_no` connected peers that has not subscribed to anything yet.
+fn partial_network(
+    peer_no: usize,
+) -> (
+    Behaviour<IdentityTransform, AllowAllSubscriptionFilter>,
+    Vec<PeerId>,
+    TopicHash,
+) {
+    let (gs, peers, _) = inject_nodes1().peer_no(peer_no).create_network();
+    (gs, peers, Topic::new("partial").hash())
+}
+
+#[test]
+fn partial_topic_subscriptions_request_partial_messages() {
+    let (mut gs, peers, topic) = partial_network(3);
+    gs.set_partial_topic(topic.clone());
+    gs.events.clear();
+    gs.subscribe(&Topic::new("partial")).unwrap();
+    let flagged = gs
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ToSwarm::NotifyHandler {
+                    event: HandlerIn::Message(RpcOut::SubscribePartial(t)),
+                    ..
+                } if *t == topic
+            )
+        })
+        .count();
+    assert_eq!(flagged, peers.len(), "every peer hears the partial subscription");
+
+    // A peer that connects later hears it too.
+    gs.events.clear();
+    let late = add_peer(&mut gs, &[], false, false);
+    assert!(gs.events.iter().any(|e| matches!(
+        e,
+        ToSwarm::NotifyHandler {
+            peer_id,
+            event: HandlerIn::Message(RpcOut::SubscribePartial(_)),
+            ..
+        } if *peer_id == late
+    )));
+}
+
+#[test]
+fn peers_requesting_partial_messages_are_tracked_until_they_leave() {
+    let (mut gs, peers, topic) = partial_network(3);
+    receive_subscription(&mut gs, peers[0], &topic, SubscriptionAction::Subscribe, true);
+    receive_subscription(&mut gs, peers[1], &topic, SubscriptionAction::Subscribe, false);
+    assert!(gs.peer_requests_partial(&peers[0], &topic));
+    assert!(!gs.peer_requests_partial(&peers[1], &topic));
+
+    receive_subscription(&mut gs, peers[0], &topic, SubscriptionAction::Unsubscribe, true);
+    assert!(!gs.peer_requests_partial(&peers[0], &topic));
+
+    receive_subscription(&mut gs, peers[2], &topic, SubscriptionAction::Subscribe, true);
+    disconnect_peer(&mut gs, &peers[2]);
+    assert!(!gs.peer_requests_partial(&peers[2], &topic));
+}
+
+#[test]
+fn partial_messages_reach_the_application_only_on_partial_topics() {
+    let (mut gs, peers, topic) = partial_network(1);
+    let message = PartialMessage {
+        topic: topic.clone(),
+        group_id: vec![0; 8],
+        message: Some(vec![1, 2, 3]),
+        metadata: None,
+    };
+    let deliver = |gs: &mut Behaviour<_, _>| {
+        gs.on_connection_handler_event(
+            peers[0],
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![],
+                    subscriptions: vec![],
+                    control_msgs: vec![],
+                    partial_topics: vec![],
+                    partial: Some(message.clone()),
+                },
+                invalid_messages: vec![],
+            },
+        );
+    };
+    gs.events.clear();
+    deliver(&mut gs);
+    assert!(gs.events.is_empty(), "not a partial topic: ignored");
+
+    gs.set_partial_topic(topic.clone());
+    deliver(&mut gs);
+    match gs.events.pop_front() {
+        Some(ToSwarm::GenerateEvent(Event::Partial {
+            propagation_source,
+            message: received,
+        })) => {
+            assert_eq!(propagation_source, peers[0]);
+            assert_eq!(received, message);
+        }
+        other => panic!("expected a partial message event, got {other:?}"),
+    }
+}
+
+#[test]
+fn gossip_on_partial_topics_names_peers_instead_of_sending_ihave() {
+    let (mut gs, peers, topic) = partial_network(20);
+    gs.set_partial_topic(topic.clone());
+    gs.subscribe(&Topic::new("partial")).unwrap();
+    // Half the peers request partial messages, the others subscribe plainly.
+    for (i, peer) in peers.iter().enumerate() {
+        receive_subscription(&mut gs, *peer, &topic, SubscriptionAction::Subscribe, i % 2 == 0);
+    }
+    // A full message in the cache, so plain peers have something to IHAVE.
+    let mut seq = 0;
+    let message = random_message(&mut seq, &[topic.clone()]);
+    let msg_id = gs.config.message_id(&gs.data_transform.inbound_transform(message.clone()).unwrap());
+    gs.mcache.put(&msg_id, message);
+    gs.events.clear();
+    gs.control_pool.clear();
+
+    gs.emit_gossip();
+
+    let mesh = gs.mesh[&topic].clone();
+    let partial_gossip: Vec<PeerId> = gs
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            ToSwarm::GenerateEvent(Event::PartialGossip { topic: t, peers }) if *t == topic => {
+                Some(peers.clone())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(!partial_gossip.is_empty());
+    for peer in &partial_gossip {
+        assert!(gs.peer_requests_partial(peer, &topic));
+        assert!(!mesh.contains(peer), "gossip goes to non-mesh peers");
+        assert!(!gs.control_pool.contains_key(peer), "no IHAVE to a partial peer");
+    }
+    for (peer, actions) in &gs.control_pool {
+        assert!(!gs.peer_requests_partial(peer, &topic));
+        assert!(actions.iter().all(|a| matches!(a, ControlAction::IHave { .. })));
+    }
+}
+
+#[test]
+fn an_empty_partial_topic_still_gossips() {
+    let (mut gs, peers, topic) = partial_network(20);
+    gs.set_partial_topic(topic.clone());
+    gs.subscribe(&Topic::new("partial")).unwrap();
+    for peer in &peers {
+        receive_subscription(&mut gs, *peer, &topic, SubscriptionAction::Subscribe, true);
+    }
+    gs.events.clear();
+    gs.emit_gossip();
+    assert!(gs.events.iter().any(|e| matches!(
+        e,
+        ToSwarm::GenerateEvent(Event::PartialGossip { peers, .. }) if peers.len() == gs.config.gossip_lazy()
+    )));
+}
+
+#[test]
+fn partial_targets_are_mesh_peers_or_a_stable_fanout() {
+    let (mut gs, peers, topic) = partial_network(20);
+    gs.set_partial_topic(topic.clone());
+    for (i, peer) in peers.iter().enumerate() {
+        receive_subscription(&mut gs, *peer, &topic, SubscriptionAction::Subscribe, i != 0);
+    }
+
+    // Not subscribed: a fanout of mesh_n peers, all requesting partial messages, kept
+    // from one call to the next.
+    let fanout = gs.partial_targets(&topic);
+    assert_eq!(fanout.len(), gs.config.mesh_n());
+    assert!(!fanout.contains(&peers[0]));
+    assert_eq!(gs.partial_targets(&topic), fanout);
+    assert!(gs.fanout_last_pub.contains_key(&topic));
+
+    // Subscribed: the mesh, without peers that did not request partial messages.
+    gs.subscribe(&Topic::new("partial")).unwrap();
+    let mesh: Vec<PeerId> = gs.mesh[&topic]
+        .iter()
+        .copied()
+        .filter(|p| *p != peers[0])
+        .collect();
+    assert_eq!(gs.partial_targets(&topic), mesh);
+}
+
+#[test]
+fn send_partial_queues_one_rpc_and_reports_its_frame() {
+    let (mut gs, peers, topic) = partial_network(1);
+    let message = PartialMessage {
+        topic,
+        group_id: vec![0; 8],
+        message: None,
+        metadata: Some(vec![5; 40]),
+    };
+    gs.events.clear();
+    assert_eq!(gs.send_partial(&peers[0], message.clone()), message.frame_len());
+    assert!(matches!(
+        gs.events.pop_front(),
+        Some(ToSwarm::NotifyHandler {
+            peer_id,
+            event: HandlerIn::Message(RpcOut::Partial(sent)),
+            ..
+        }) if peer_id == peers[0] && sent == message
+    ));
+    assert_eq!(gs.send_partial(&PeerId::random(), message), 0);
+}
+
+#[test]
+fn iwant_responses_are_counted_apart_from_forwards() {
+    let config = ConfigBuilder::default().build().unwrap();
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(3)
+        .topics(vec!["iwant".into()])
+        .to_subscribe(true)
+        .gs_config(config.clone())
+        .create_network();
+    let mut seq = 0;
+    let first = random_message(&mut seq, &topics);
+    let second = random_message(&mut seq, &topics);
+    let id = |gs: &Behaviour<IdentityTransform, AllowAllSubscriptionFilter>, m: &RawMessage| {
+        gs.config
+            .message_id(&gs.data_transform.inbound_transform(m.clone()).unwrap())
+    };
+    let (first_id, second_id) = (id(&gs, &first), id(&gs, &second));
+
+    // Peer 0 advertises both; we ask it for both.
+    gs.handle_ihave(
+        &peers[0],
+        vec![(topics[0].clone(), vec![first_id.clone(), second_id.clone()])],
+    );
+    assert_eq!(gs.control_stats().iwant_ids_sent, 2);
+
+    // The first comes as a forward from peer 1, then as the IWANT response from peer 0:
+    // a duplicate response. The second arrives from peer 0 first: a useful response.
+    gs.handle_received_message(first.clone(), &peers[1]);
+    gs.handle_received_message(first.clone(), &peers[0]);
+    gs.handle_received_message(second.clone(), &peers[0]);
+    // A forward of the second from peer 2 is no response at all.
+    gs.handle_received_message(second, &peers[2]);
+    // Nor is a repeat from peer 0: its IWANT was answered.
+    gs.handle_received_message(first, &peers[0]);
+
+    let stats = gs.control_stats();
+    assert_eq!(stats.iwant_responses_received, 2);
+    assert_eq!(stats.iwant_responses_duplicate, 1);
 }

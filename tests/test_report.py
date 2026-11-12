@@ -75,6 +75,51 @@ class FigureTests(unittest.TestCase):
         ])
         self.assertEqual(report.config_groups({}, {}), [])
 
+    def test_config_names_bundled_propagation(self) -> None:
+        config = {"signature_propagation": "bundled", "bundle_tick_ms": 20, "bundle_max_signatures": 50}
+        self.assertEqual(report.config_groups(config, {}), [
+            ("Gossip", [("Propagation", "bundled",
+                         "every 20 ms, at most 50 a bundle; EIP-8334 over gossipsub partial messages")]),
+        ])
+        config["bundle_tick_ms"] = 0
+        self.assertIn("every arrival", report.config_groups(config, {})[0][1][0][2])
+        config["bundle_stagger_ms"] = 200
+        self.assertIn("one end of each link waits 200 ms", report.config_groups(config, {})[0][1][0][2])
+        config["bundle_announce"] = True
+        self.assertIn("waits 200 ms and announces", report.config_groups(config, {})[0][1][0][2])
+
+    def test_transport_section_shows_bundle_paths_and_ledger(self) -> None:
+        empty = {"unique": 0, "duplicate": 0, "bytes": 0}
+        metrics = {"signature_transport": {
+            "hosts": 2,
+            "deliveries": {"gossip": empty, "pull": empty, "coded": empty,
+                           "bundle": {"unique": 5, "duplicate": 2, "bytes": 7000},
+                           "backlog": {"unique": 0, "duplicate": 3, "bytes": 3000},
+                           "requested": {"unique": 1, "duplicate": 0, "bytes": 1000}},
+            "wire_bytes": {"bundled_signatures": 8000, "bundle_framing": 300, "parts_metadata": 200, "total": 8500},
+            "counters": {"idontwant_ids_sent": 0, "forwards_suppressed": 0, "have_sent": 0, "want_sent": 0,
+                         "coded_sent": 0, "bundles_sent": 3, "bundle_sigs_sent": 8, "pushes_avoided": 4,
+                         "backlog_sigs_sent": 3, "lazy_sigs_sent": 2, "announce_ids_sent": 7, "iwant_responses": 5, "iwant_response_duplicates": 4,
+                         "metadata_sent": 2, "available_ids_sent": 6, "request_ids_sent": 1,
+                         "requested_sigs_served": 1, "requests_avoided": 2},
+        }}
+        metrics["mesh"] = {
+            "links_sampled_at": "signing", "copies_per_link": 1.3,
+            "push_duplicates_per_first_copy": 4.25, "one_copy_per_link_duplicates_per_first_copy": 3.1,
+            "degree": {"signing": {"mean": 8.2, "min": 4, "max": 12}},
+        }
+        section = report.transport_section(metrics)
+        self.assertIn("mesh degree 8.2 on average (4–12) at signing", section)
+        self.assertIn("1.30 copies of a signature per mesh link; one per link would leave 3.10 pushed duplicates "
+                      "per first copy instead of 4.25", section)
+        self.assertEqual(report.mesh_facts(None), [])
+        for text in ("Bundled signatures", "Bundle framing", "Parts metadata", "Bundle push", "Bundle request",
+                     "Bundle backlog", "3 pushed as backlog to new mesh peers", "2 pushed after the stagger ran out", "7 announced to mesh peers",
+                     "5 IWANT responses, 4 already held on arrival",
+                     "8 signatures sent in 3 bundles, 4 pushes avoided", "6 indices advertised, 1 requested, 1 served", "2 arrived during the request delay"):
+            self.assertIn(text, section)
+        self.assertNotIn("Coded repair", section)
+
     def test_subnet_proof_candles_and_one_dot_per_aggregator(self) -> None:
         metrics = {"subnet_proofs": [
             {"subnet": 2, "count": 2, "min": 0, "p25": 0, "p50": 0, "p75": 700, "max": 700,

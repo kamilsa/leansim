@@ -594,7 +594,8 @@ def config_groups(config, metrics):
     if has("subnet_subscriptions_per_node"):
         gossip.append(("Subnet subscriptions", f'{config["subnet_subscriptions_per_node"]} per host',
                        "plus the subnets its validators sign in" if config.get("subscribe_to_duty_subnets") else ""))
-    for key, label in (("gossipsub_flood_publish", "Flood publish"), ("gossipsub_idontwant", "IDONTWANT")):
+    for key, label in (("gossipsub_flood_publish", "Flood publish"), ("gossipsub_gossip", "IHAVE/IWANT gossip"),
+                       ("gossipsub_idontwant", "IDONTWANT")):
         if key in config:
             gossip.append((label, "on" if config[key] else "off", ""))
     if "gossipsub_idontwant_threshold_bytes" in config:
@@ -610,6 +611,21 @@ def config_groups(config, metrics):
                 degree = config["sync_coded_degree"] or "log2(gaps)+2"
                 note += f', degree {degree}, redundancy {config["sync_coded_redundancy"]}'
         gossip.append(("Signature sync", names.get(mode, str(mode)), note))
+    if config.get("signature_propagation") == "bundled":
+        note = "EIP-8334 over gossipsub partial messages"
+        if has("bundle_tick_ms", "bundle_max_signatures"):
+            tick = config["bundle_tick_ms"]
+            note = (f'{"every arrival" if tick == 0 else f"every {tick:,} ms"}, '
+                    f'at most {config["bundle_max_signatures"]} a bundle; {note}')
+        if config.get("bundle_stagger_ms"):
+            note += f'; one end of each link waits {config["bundle_stagger_ms"]:,} ms'
+            if config.get("bundle_announce"):
+                note += " and announces"
+        if config.get("bundle_request_delay_ms"):
+            note += f'; requests wait {config["bundle_request_delay_ms"]:,} ms'
+        gossip.append(("Propagation", "bundled", note))
+    elif "signature_propagation" in config:
+        gossip.append(("Propagation", "gossipsub", "one message per signature"))
     return [(title, rows) for title, rows in (("Signatures", signatures), ("Aggregation", aggregation), ("Gossip", gossip)) if rows]
 
 
@@ -635,12 +651,29 @@ def config_section(config, metrics):
 TRANSPORT_LABELS = (
     ("gossip_signatures", "Gossiped signatures", "every copy received, duplicates included"),
     ("pulled_signatures", "Pulled signatures", "answers to bitmap pulls"),
+    ("bundled_signatures", "Bundled signatures", "every copy received with its index, duplicates included"),
+    ("bundle_framing", "Bundle framing", "what bundle frames add to their signatures"),
+    ("parts_metadata", "Parts metadata", "validator indices advertised to gossip peers and requested"),
     ("coded_packets", "Coded repair packets", "one signature-sized payload each"),
     ("bitmaps", "Bitmaps", "held-signature bitmaps to mesh neighbours"),
     ("pull_requests", "Pull requests", ""),
     ("gossip_control", "Gossipsub control ids", "IHAVE, IWANT, IDONTWANT"),
     ("sync_acks", "Sync acks", ""),
 )
+
+
+def mesh_facts(mesh):
+    """Mesh degree and copies per mesh link, as caption sentences."""
+    if not mesh or not mesh.get("degree"):
+        return []
+    sample = mesh.get("links_sampled_at")
+    degree = mesh["degree"].get(sample) or next(iter(mesh["degree"].values()))
+    facts = [f'mesh degree {degree["mean"]:.1f} on average ({degree["min"]}–{degree["max"]}) at {sample}']
+    if mesh.get("copies_per_link") is not None:
+        facts.append(f'{mesh["copies_per_link"]:.2f} copies of a signature per mesh link; one per link would leave '
+                     f'{mesh["one_copy_per_link_duplicates_per_first_copy"]:.2f} pushed duplicates per first copy '
+                     f'instead of {mesh["push_duplicates_per_first_copy"]:.2f}')
+    return facts
 
 
 def transport_section(metrics):
@@ -662,11 +695,29 @@ def transport_section(metrics):
     deliveries = transport["deliveries"]
     delivery_rows = "".join(
         f'<tr><td>{name}</td><td>{count(deliveries[via]["unique"])}</td><td>{count(deliveries[via]["duplicate"])}</td></tr>'
-        for via, name in (("gossip", "Gossip"), ("pull", "Pull"), ("coded", "Coded repair"))
-        if deliveries[via]["unique"] or deliveries[via]["duplicate"]
+        for via, name in (("gossip", "Gossip"), ("pull", "Pull"), ("coded", "Coded repair"),
+                          ("bundle", "Bundle push"), ("backlog", "Bundle backlog"),
+                          ("requested", "Bundle request"))
+        if via in deliveries and (deliveries[via]["unique"] or deliveries[via]["duplicate"])
     )
     c = transport["counters"]
     facts = [f'{count(c["idontwant_ids_sent"])} IDONTWANT sent, {count(c["forwards_suppressed"] + c.get("queued_forwards_dropped", 0))} forwards avoided']
+    if c.get("iwant_responses"):
+        facts.append(f'{count(c["iwant_responses"])} IWANT responses, {count(c.get("iwant_response_duplicates", 0))} already held on arrival')
+    if c.get("bundles_sent"):
+        facts.append(f'{count(c["bundle_sigs_sent"])} signatures sent in {count(c["bundles_sent"])} bundles, '
+                     f'{count(c.get("pushes_avoided", 0))} pushes avoided by waiting for the tick'
+                     + (f', {count(c["backlog_sigs_sent"])} pushed as backlog to new mesh peers' if c.get("backlog_sigs_sent") else "")
+                     + (f', {count(c["lazy_sigs_sent"])} pushed after the stagger ran out' if c.get("lazy_sigs_sent") else "")
+                     + (f', {count(c["announce_ids_sent"])} announced to mesh peers' if c.get("announce_ids_sent") else ""))
+    if c.get("metadata_sent"):
+        facts.append(f'{count(c["metadata_sent"])} parts metadata, {count(c.get("available_ids_sent", 0))} indices advertised, '
+                     f'{count(c.get("request_ids_sent", 0))} requested, {count(c.get("requested_sigs_served", 0))} served'
+                     + (f', {count(c["requests_suppressed"])} not re-requested while in flight' if c.get("requests_suppressed") else "")
+                     + (f', {count(c["requests_avoided"])} arrived during the request delay' if c.get("requests_avoided") else ""))
+    if c.get("invalid_partials"):
+        facts.append(f'{count(c["invalid_partials"])} malformed bundles or metadata dropped')
+    facts.extend(mesh_facts(metrics.get("mesh")))
     if c["have_sent"]:
         facts.append(f'{count(c["have_sent"])} bitmaps')
     if c["want_sent"]:

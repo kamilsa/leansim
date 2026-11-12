@@ -207,7 +207,11 @@ fn build_gossipsub(
     key: &identity::Keypair,
     config: &ExperimentConfig,
 ) -> Result<gossipsub::Behaviour> {
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
+    let mut builder = gossipsub::ConfigBuilder::default();
+    if !config.gossipsub_gossip {
+        builder.gossip_lazy(0).gossip_factor(0.0);
+    }
+    let gossipsub_config = builder
         .mesh_n_low(config.gossipsub_mesh_n_low)
         .mesh_n(config.gossipsub_mesh_n)
         .mesh_n_high(config.gossipsub_mesh_n_high)
@@ -228,6 +232,22 @@ fn build_gossipsub(
         gossipsub_config,
     )
     .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
+}
+
+/// Marks `subnets`' topics as partial-message topics (EIP-8334 bundles). Call it
+/// before subscribing, so subscriptions request partial messages.
+pub fn enable_partial_topics(
+    swarm: &mut Swarm<SimBehaviour>,
+    subnets: impl IntoIterator<Item = u32>,
+    run_id: &str,
+) {
+    for subnet in subnets {
+        let topic = IdentTopic::new(topics::subnet_topic(run_id, subnet));
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .set_partial_topic(topic.hash());
+    }
 }
 
 /// Subscribes to the host's subnet topics: every subnet in `subscribed_subnets`
@@ -305,6 +325,16 @@ pub enum NetEvent {
     SyncFailed {
         request_id: request_response::OutboundRequestId,
     },
+    /// A partial message: an EIP-8334 bundle, parts metadata, or both.
+    Partial {
+        peer: PeerId,
+        message: gossipsub::PartialMessage,
+    },
+    /// The gossipsub heartbeat chose these gossip peers for a partial topic.
+    PartialGossip {
+        topic: gossipsub::TopicHash,
+        peers: Vec<PeerId>,
+    },
 }
 
 /// Runs the swarm until the next gossip message or proof-protocol event.
@@ -375,6 +405,18 @@ pub async fn next_event(
                     }));
                 }
             }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(gossipsub::Event::Partial {
+                propagation_source,
+                message,
+            })) => {
+                return Some(NetEvent::Partial {
+                    peer: propagation_source,
+                    message,
+                });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(
+                gossipsub::Event::PartialGossip { topic, peers },
+            )) => return Some(NetEvent::PartialGossip { topic, peers }),
             SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
                 request_response::Event::Message { message, .. },
             )) => {

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use leansim::config::experiment::{ExperimentConfig, NetworkDefaults, NodeRole, SignatureSync};
+use leansim::config::experiment::{
+    ExperimentConfig, NetworkDefaults, NodeRole, SignaturePropagation, SignatureSync,
+};
 use leansim::messages::wire::WireMessage;
 use leansim::node::state::{NodeState, PendingProof};
 
@@ -30,6 +32,7 @@ fn test_config() -> ExperimentConfig {
         mesh_warmup_ms: None,
         gossipsub_explicit_aggregator_count: 0,
         gossipsub_flood_publish: false,
+        gossipsub_gossip: true,
         gossipsub_idontwant_threshold_bytes: 0,
         signature_sync: SignatureSync::None,
         sync_interval_ms: 100,
@@ -40,6 +43,13 @@ fn test_config() -> ExperimentConfig {
         sync_coded_redundancy: 1.1,
         sync_coded_per_tick: 8,
         sync_refresh_ms: 1000,
+        signature_propagation: SignaturePropagation::Gossipsub,
+        bundle_tick_ms: 20,
+        bundle_max_signatures: 50,
+        bundle_request_timeout_ms: 1000,
+        bundle_request_delay_ms: 0,
+        bundle_stagger_ms: 0,
+        bundle_announce: false,
         network_defaults: NetworkDefaults::default(),
         use_geo_latency: false,
         geo_seed: 0,

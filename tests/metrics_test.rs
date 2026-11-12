@@ -61,3 +61,22 @@ fn traffic_events_serialize_with_their_fields() {
         r#"{"event":"TrafficPeer","node_id":7,"peer":"node:9","inbound_bytes":10,"outbound_bytes":20,"inbound_msgs":1,"outbound_msgs":2}"#
     );
 }
+
+#[test]
+fn mesh_degree_events_serialize_with_their_sample() {
+    use leansim::metrics::events::MeshSample;
+    let line = serde_json::to_string(&JsonlEvent::MeshDegree {
+        node_id: 4,
+        subnet_id: 7,
+        peers: 9,
+        at: MeshSample::Signing,
+        ts_ms: 1650,
+    })
+    .unwrap();
+    assert_eq!(
+        line,
+        r#"{"event":"MeshDegree","node_id":4,"subnet_id":7,"peers":9,"at":"signing","ts_ms":1650}"#
+    );
+    let exit = serde_json::to_string(&MeshSample::Exit).unwrap();
+    assert_eq!(exit, r#""exit""#);
+}

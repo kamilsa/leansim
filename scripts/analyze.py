@@ -16,6 +16,7 @@ from report import generate_html
 
 EVENT_NAMES = {
     "NodePeerId",
+    "MeshDegree",
     "SigSent",
     "SigReceived",
     "LocalProofGenerated",
@@ -35,12 +36,18 @@ EVENT_NAMES = {
 TRANSPORT_FIELDS = (
     "ihave_ids_sent", "ihave_bytes_sent", "iwant_ids_sent", "iwant_bytes_sent",
     "idontwant_ids_sent", "idontwant_bytes_sent", "idontwant_ids_received", "forwards_suppressed", "queued_forwards_dropped",
+    "iwant_responses", "iwant_response_duplicates", "fanout_sigs_sent",
     "have_sent", "have_bytes_sent", "want_sent", "want_ids_sent", "want_bytes_sent",
     "pull_sigs_served", "pull_bytes_served", "pulled_received", "pulled_duplicates",
     "coded_sent", "coded_bytes_sent", "coded_received", "coded_innovative", "coded_decoded",
     "coded_mismatches", "acks_sent", "sync_failures", "pending_rows",
+    "bundles_sent", "bundle_sigs_sent", "bundle_bytes_sent", "bundle_framing_bytes_sent",
+    "requested_sigs_served", "backlog_sigs_sent", "metadata_sent", "metadata_bytes_sent", "available_ids_sent",
+    "request_ids_sent", "pushes_avoided", "lazy_sigs_sent", "announce_ids_sent", "requests_already_sent",
+    "requests_suppressed", "requests_avoided", "invalid_partials",
 )
-SIG_VIAS = ("gossip", "pull", "coded")
+SIG_VIAS = ("gossip", "pull", "coded", "bundle", "backlog", "requested")
+MESH_SAMPLES = ("signing", "exit")
 
 
 def number(value):
@@ -333,7 +340,7 @@ CONFIG_KEYS = (
     "recursive_aggregation", "recursive_aggregation_arity", "recursive_aggregation_time_ms",
     "recursive_group_size", "recursive_proofs_per_child", "aggregate_proof_bytes",
     "gossipsub_mesh_n", "gossipsub_mesh_n_low", "gossipsub_mesh_n_high", "gossipsub_heartbeat_interval_ms",
-    "gossipsub_flood_publish", "gossipsub_idontwant", "gossipsub_idontwant_threshold_bytes",
+    "gossipsub_flood_publish", "gossipsub_gossip", "gossipsub_idontwant", "gossipsub_idontwant_threshold_bytes",
     "signature_sync", "sync_interval_ms", "sync_grace_ms", "sync_pull_batch",
     "sync_coded_degree", "sync_coded_redundancy", "sync_coded_per_tick",
 )
@@ -491,6 +498,8 @@ def build_snapshot(output_dir):
     via_counts = {via: {"unique": 0, "duplicate": 0, "bytes": 0} for via in SIG_VIAS}
     transport = {field: 0 for field in TRANSPORT_FIELDS}
     transport_hosts = 0
+    # Sample ("signing", "exit") -> (node, subnet) -> mesh peers.
+    mesh_degrees = defaultdict(dict)
     parsed_events = 0
     invalid_lines = 0
 
@@ -542,6 +551,12 @@ def build_snapshot(output_dir):
                 peer_id = event.get("peer_id")
                 if node_id is not None and isinstance(peer_id, str) and peer_id:
                     peer_ids[peer_id] = node_id
+            elif name == "MeshDegree":
+                node_id = integer(event.get("node_id"))
+                subnet_id = integer(event.get("subnet_id"))
+                peers = integer(event.get("peers"))
+                if None not in (node_id, subnet_id, peers) and peers >= 0 and event.get("at") in MESH_SAMPLES:
+                    mesh_degrees[event["at"]][(node_id, subnet_id)] = peers
             elif name == "SigSent":
                 timestamp = number(event.get("ts_ms"))
                 node_id = integer(event.get("node_id"))
@@ -793,6 +808,7 @@ def build_snapshot(output_dir):
             "duplicate_signature_events": duplicate_sigs,
             "duplicate_to_unique_ratio": ratio,
             "signature_transport": transport_summary(via_counts, transport, transport_hosts, len(signing_hosts)),
+            "mesh": mesh_summary(mesh_degrees, sent_sources_by_subnet, via_counts, transport, unique_receive_events),
             "unique_validators": unique_validators,
             "signing_hosts": len(signing_hosts),
             "signature_arrival_ms": {"p50": arrival_at(50), "p90": arrival_at(90), "p95": arrival_at(95), "p99": arrival_at(99)},
@@ -813,6 +829,7 @@ def build_snapshot(output_dir):
             "subnet_proofs": subnet_proof_rows(local_proofs, t0, hosts),
             "subnet_hosts": subnet_host_summary(hosts),
             "signature_cdf_by_subnet": signature_cdf_by_subnet,
+            "subnet_completion_ms": subnet_completion(hosts, received_by_node_subnet, sent_by_node, sent_sources_by_subnet, t0),
             "population": host_population(hosts, experiment),
             "aggregators": aggregator_population(hosts),
         },
@@ -823,12 +840,17 @@ def build_snapshot(output_dir):
 
 def transport_summary(via_counts, transport, hosts, signing_hosts):
     """Bytes on the wire for signature transport, by category, from the receivers'
-    gossip and pull logs and the senders' TransportStats; None without those."""
+    gossip, pull and bundle logs and the senders' TransportStats; None without those."""
     if not hosts:
         return None
     wire = {
         "gossip_signatures": via_counts["gossip"]["bytes"],
         "pulled_signatures": via_counts["pull"]["bytes"],
+        # EIP-8334 bundles: each signature with its index, pushed (new or backlog) or
+        # requested, then what the frames add to them, and the parts metadata.
+        "bundled_signatures": sum(via_counts[via]["bytes"] for via in ("bundle", "backlog", "requested")),
+        "bundle_framing": transport["bundle_framing_bytes_sent"],
+        "parts_metadata": transport["metadata_bytes_sent"],
         "coded_packets": transport["coded_bytes_sent"],
         "bitmaps": transport["have_bytes_sent"],
         "pull_requests": transport["want_bytes_sent"],
@@ -845,6 +867,108 @@ def transport_summary(via_counts, transport, hosts, signing_hosts):
         "counters": transport,
         "signing_hosts": signing_hosts,
     }
+
+
+def mesh_summary(mesh_degrees, signers_by_subnet, via_counts, transport, first_copies):
+    """Mesh degrees per sample, and how many copies of a signature a mesh link carried.
+
+    An eager push sends every signature over every mesh link at least once: the
+    side that has it first sends it, and both sides do when their copies cross.
+    Links are counted from the degrees at signing (half their sum per subnet).
+    Copies on mesh links are the pushed copies received (gossip forwards without
+    IWANT responses, or bundle pushes), less the copies publishers sent into
+    subnets they do not subscribe to. None without MeshDegree events."""
+    if not mesh_degrees:
+        return None
+    degree = {}
+    for sample in MESH_SAMPLES:
+        values = sorted(mesh_degrees.get(sample, {}).values())
+        if not values:
+            continue
+        histogram = defaultdict(int)
+        for value in values:
+            histogram[value] += 1
+        degree[sample] = {
+            "count": len(values),
+            "mean": sum(values) / len(values),
+            "min": values[0],
+            "p50": median(values),
+            "max": values[-1],
+            "histogram": {str(value): histogram[value] for value in sorted(histogram)},
+        }
+    sample = "signing" if "signing" in degree else "exit"
+    links_by_subnet = defaultdict(float)
+    for (_, subnet), peers in mesh_degrees[sample].items():
+        links_by_subnet[subnet] += peers / 2
+    link_copies_min = sum(links * len(signers_by_subnet.get(subnet, ())) for subnet, links in links_by_subnet.items())
+    pushed = sum(via_counts[via]["unique"] + via_counts[via]["duplicate"] for via in ("gossip", "bundle", "backlog"))
+    pushed_duplicates = sum(via_counts[via]["duplicate"] for via in ("gossip", "bundle", "backlog"))
+    pushed -= transport["iwant_responses"]
+    pushed_duplicates -= transport["iwant_response_duplicates"]
+    fanout = transport["fanout_sigs_sent"]
+    link_copies = pushed - fanout
+    crossing = link_copies - link_copies_min
+    return {
+        "degree": degree,
+        "links": sum(links_by_subnet.values()),
+        "links_sampled_at": sample,
+        "fanout_copies": fanout,
+        "link_copies": link_copies,
+        "link_copies_min": link_copies_min,
+        "copies_per_link": link_copies / link_copies_min if link_copies_min else None,
+        "crossing_copies": crossing,
+        "push_duplicates_per_first_copy": pushed_duplicates / first_copies if first_copies else None,
+        # What pushes would leave if no two copies crossed on a link.
+        "one_copy_per_link_duplicates_per_first_copy": (pushed_duplicates - crossing) / first_copies if first_copies else None,
+    }
+
+
+def subnet_completion(hosts, received_by_node_subnet, sent_by_node, signers_by_subnet, t0, fractions=(0.9, 1.0)):
+    """When each subscribed host held a fraction of its subnets' signatures.
+
+    One entry per (host, subnet) the host subscribes to or aggregates, from the
+    manifest (a host with no subscriptions listed is in the subnets it signs in,
+    as the simulator defaults): the time from the first signature sent until the host held
+    ceil(fraction x signers) of the subnet's signatures, its own validators
+    counting from when they signed. Percentiles count pairs that never got there
+    as infinitely late. A pure propagation metric: it needs no aggregators. None
+    without subscriptions in the manifest."""
+    pairs = []
+    for node_id, host in hosts.items():
+        subscribed = host.get("subscribed_subnets") or host.get("signing_subnets") or ()
+        subnets = set(subscribed) | set(host.get("aggregated_subnets") or ())
+        pairs.extend((node_id, subnet) for subnet in subnets if signers_by_subnet.get(subnet))
+    if not pairs:
+        return None
+    reached = {fraction: [] for fraction in fractions}
+    for node_id, subnet in pairs:
+        held = dict(received_by_node_subnet.get((node_id, subnet), {}))
+        for own_subnet, key, own_time in sent_by_node.get(node_id, ()):
+            if own_subnet == subnet:
+                held.setdefault(key, own_time)
+        times = sorted(held.values())
+        signers = len(signers_by_subnet[subnet])
+        for fraction in fractions:
+            needed = math.ceil(signers * fraction - 1e-9)
+            if needed and len(times) >= needed:
+                reached[fraction].append(times[needed - 1] - t0)
+
+    def at(values, percent):
+        index = math.ceil(len(pairs) * percent / 100) - 1
+        return values[index] if 0 <= index < len(values) else None
+
+    summary = {"pairs": len(pairs)}
+    for fraction, values in reached.items():
+        values.sort()
+        key = f"{round(fraction * 100)}pct"
+        summary[key] = {
+            "reached": len(values),
+            "p50": at(values, 50),
+            "p95": at(values, 95),
+            "p99": at(values, 99),
+            "max": at(values, 100),
+        }
+    return summary
 
 
 def snapshot_identity(snapshot):
@@ -952,6 +1076,11 @@ def self_test():
             '{"event":"SigReceived","node_id":3,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":true,"ts_ms":150,"byte_size":10}',
             '{"event":"TransportStats","node_id":1,"have_bytes_sent":5,"coded_bytes_sent":40,"idontwant_bytes_sent":3,"acks_sent":2}',
             '{"event":"TransportStats","node_id":2,"want_bytes_sent":4,"ihave_bytes_sent":1}',
+            '{"event":"SigReceived","node_id":4,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":125,"byte_size":18,"via":"bundle"}',
+            '{"event":"SigReceived","node_id":4,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":true,"ts_ms":126,"byte_size":18,"via":"bundle"}',
+            '{"event":"SigReceived","node_id":5,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":400,"byte_size":18,"via":"requested"}',
+            '{"event":"SigReceived","node_id":5,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":true,"ts_ms":401,"byte_size":18,"via":"backlog"}',
+            '{"event":"TransportStats","node_id":4,"bundle_framing_bytes_sent":6,"metadata_bytes_sent":7,"pushes_avoided":3}',
         )), encoding="utf-8")
         signature_transport = build_snapshot(transport_dir)["metrics"]["signature_transport"]
         assert signature_transport["deliveries"]["gossip"] == {"unique": 1, "duplicate": 1, "bytes": 20}
@@ -960,8 +1089,79 @@ def self_test():
         wire = signature_transport["wire_bytes"]
         assert (wire["gossip_signatures"], wire["pulled_signatures"], wire["coded_packets"]) == (20, 12, 40)
         assert (wire["bitmaps"], wire["pull_requests"], wire["gossip_control"], wire["sync_acks"]) == (5, 4, 4, 2)
-        assert wire["total"] == 87
-        assert signature_transport["hosts"] == 2
+        assert signature_transport["deliveries"]["bundle"] == {"unique": 1, "duplicate": 1, "bytes": 36}
+        assert signature_transport["deliveries"]["requested"]["unique"] == 1
+        assert signature_transport["deliveries"]["backlog"] == {"unique": 0, "duplicate": 1, "bytes": 18}
+        assert (wire["bundled_signatures"], wire["bundle_framing"], wire["parts_metadata"]) == (72, 6, 7)
+        assert wire["total"] == 87 + 72 + 6 + 7
+        assert signature_transport["counters"]["pushes_avoided"] == 3
+        assert signature_transport["hosts"] == 3
+
+        # Three hosts in a triangle mesh on one subnet, and host 9 publishing two
+        # signatures into it from outside (fanout) to hosts 1 and 2. Each signature
+        # crosses the three links four times: one link carries it both ways.
+        mesh_dir = root / "mesh"
+        stdout = mesh_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        received = []
+        for validator in (0, 1):
+            received += [(1, False), (2, False), (3, False), (1, True), (2, True), (3, True)]
+        stdout.write_text("\n".join(
+            [f'{{"event":"MeshDegree","node_id":{node},"subnet_id":0,"peers":2,"at":"signing","ts_ms":90}}' for node in (1, 2, 3)]
+            + ['{"event":"MeshDegree","node_id":1,"subnet_id":0,"peers":3,"at":"exit","ts_ms":900}',
+               '{"event":"MeshDegree","node_id":1,"subnet_id":0,"peers":2,"at":"sometime","ts_ms":900}']
+            + [f'{{"event":"SigSent","node_id":9,"validator_id":{validator},"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}}' for validator in (0, 1)]
+            + [f'{{"event":"SigReceived","node_id":{node},"from_id":9,"validator_id":{index // 6},"subnet_id":0,"duplicate":{str(duplicate).lower()},"ts_ms":120,"byte_size":10}}'
+               for index, (node, duplicate) in enumerate(received)]
+            + ['{"event":"TransportStats","node_id":9,"fanout_sigs_sent":4}']
+        ), encoding="utf-8")
+        mesh = build_snapshot(mesh_dir)["metrics"]["mesh"]
+        assert mesh["degree"]["signing"] == {"count": 3, "mean": 2.0, "min": 2, "p50": 2, "max": 2, "histogram": {"2": 3}}
+        assert mesh["degree"]["exit"]["max"] == 3
+        assert (mesh["links"], mesh["links_sampled_at"], mesh["fanout_copies"]) == (3.0, "signing", 4)
+        # 12 copies received, 4 from the publisher: 8 on 3 links x 2 signatures.
+        assert (mesh["link_copies"], mesh["link_copies_min"], mesh["crossing_copies"]) == (8, 6.0, 2.0)
+        assert abs(mesh["copies_per_link"] - 8 / 6) < 1e-9
+        assert mesh["push_duplicates_per_first_copy"] == 1.0
+        assert abs(mesh["one_copy_per_link_duplicates_per_first_copy"] - 4 / 6) < 1e-9
+        assert build_snapshot(transport_dir)["metrics"]["mesh"] is None
+
+        # Subnet completion: in subnet 0 validators 0 (host 1's own, signed at 100),
+        # 1 (host 3's, at 110) and 2 (host 4's, at 105) sign. Host 1 completes at 170,
+        # host 2 at 180; host 4 lists no subscriptions, so it counts in the subnet it
+        # signs in, where it never gets the others.
+        completion_dir = root / "completion"
+        stdout = completion_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        stdout.write_text("\n".join((
+            '{"event":"SigSent","node_id":1,"validator_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
+            '{"event":"SigSent","node_id":3,"validator_id":1,"subnet_id":0,"seq":0,"ts_ms":110,"byte_size":10}',
+            '{"event":"SigSent","node_id":4,"validator_id":2,"subnet_id":0,"seq":0,"ts_ms":105,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":3,"validator_id":1,"subnet_id":0,"duplicate":false,"ts_ms":160,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":4,"validator_id":2,"subnet_id":0,"duplicate":false,"ts_ms":170,"byte_size":10}',
+            '{"event":"SigReceived","node_id":2,"from_id":1,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":130,"byte_size":10}',
+            '{"event":"SigReceived","node_id":2,"from_id":1,"validator_id":0,"subnet_id":0,"duplicate":true,"ts_ms":135,"byte_size":10}',
+            '{"event":"SigReceived","node_id":2,"from_id":3,"validator_id":1,"subnet_id":0,"duplicate":false,"ts_ms":150,"byte_size":10}',
+            '{"event":"SigReceived","node_id":2,"from_id":4,"validator_id":2,"subnet_id":0,"duplicate":false,"ts_ms":180,"byte_size":10}',
+        )), encoding="utf-8")
+        (completion_dir / "run-manifest.json").write_text(json.dumps({
+            "experiment": {"local_threshold": 0.9},
+            "nodes": [
+                {"node_id": 1, "subscribed_subnets": [0], "aggregated_subnets": []},
+                {"node_id": 2, "subscribed_subnets": [0, 5], "aggregated_subnets": []},
+                {"node_id": 3, "subscribed_subnets": [], "aggregated_subnets": []},
+                # No subscriptions listed: in the subnet it signs in, where it holds
+                # its own signature but never gets validator 0's.
+                {"node_id": 4, "signing_subnets": [0]},
+            ],
+        }), encoding="utf-8")
+        completion = build_snapshot(completion_dir)["metrics"]["subnet_completion_ms"]
+        # Subnet 5 has no signers, so three pairs. 90% of 3 signers is all three; the
+        # pair that never gets there counts as infinitely late.
+        assert completion["pairs"] == 3
+        assert completion["90pct"] == {"reached": 2, "p50": 80, "p95": None, "p99": None, "max": None}
+        assert completion["100pct"] == completion["90pct"]
+        assert build_snapshot(transport_dir)["metrics"]["subnet_completion_ms"] is None
 
         primary_dir = fixture("primary", 7, 0)
         overlay_dir = fixture("overlay", 8, 1)

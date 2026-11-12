@@ -105,20 +105,20 @@ pub struct CodedOutcome {
 
 /// A fixed-size bitmap of a subnet's validators.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Bits(Vec<u64>);
+pub(crate) struct Bits(Vec<u64>);
 
 impl Bits {
-    fn new(len: usize) -> Self {
+    pub(crate) fn new(len: usize) -> Self {
         Self(vec![0; len.div_ceil(64)])
     }
 
-    fn get(&self, i: usize) -> bool {
+    pub(crate) fn get(&self, i: usize) -> bool {
         self.0
             .get(i / 64)
             .is_some_and(|word| word >> (i % 64) & 1 == 1)
     }
 
-    fn set(&mut self, i: usize) {
+    pub(crate) fn set(&mut self, i: usize) {
         if let Some(word) = self.0.get_mut(i / 64) {
             *word |= 1 << (i % 64);
         }

@@ -60,8 +60,8 @@ use crate::time_cache::DuplicateCache;
 use crate::topic::{Hasher, Topic, TopicHash};
 use crate::transform::{DataTransform, IdentityTransform};
 use crate::types::{
-    ControlAction, Message, MessageAcceptance, MessageId, PeerInfo, RawMessage, Subscription,
-    SubscriptionAction,
+    ControlAction, Message, MessageAcceptance, MessageId, PartialMessage, PeerInfo, RawMessage,
+    Subscription, SubscriptionAction,
 };
 use crate::types::{PeerConnections, PeerKind, RpcOut};
 use crate::{rpc_proto::proto, TopicScoreParams};
@@ -90,6 +90,14 @@ pub struct ControlStats {
     pub forwards_suppressed: u64,
     /// Forwards already queued for a peer and dropped when its IDONTWANT came.
     pub queued_forwards_dropped: u64,
+    /// Messages received from a peer this node had sent IWANT for them, within
+    /// `iwant_followup_time`: IWANT responses, as opposed to mesh forwards.
+    pub iwant_responses_received: u64,
+    /// IWANT responses that were already held when they arrived.
+    pub iwant_responses_duplicate: u64,
+    /// Copies of this node's publications sent on topics it is not subscribed to
+    /// (fanout and explicit peers): they enter a topic's mesh from outside it.
+    pub fanout_publishes_sent: u64,
 }
 
 /// Determines if published messages should be signed or not.
@@ -175,6 +183,19 @@ pub enum Event {
         raw_data: Vec<u8>,
         /// The topic the message was received on.
         topic: TopicHash,
+    },
+    /// A partial message arrived (partial messages extension, leansim backport). It is
+    /// never forwarded: the application decides what to do with its parts and metadata.
+    Partial {
+        /// The peer that sent it.
+        propagation_source: PeerId,
+        message: PartialMessage,
+    },
+    /// The heartbeat chose these gossip peers for a partial-message topic. Instead of an
+    /// IHAVE, the application should send them its parts metadata.
+    PartialGossip {
+        topic: TopicHash,
+        peers: Vec<PeerId>,
     },
 }
 
@@ -349,6 +370,16 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// Control traffic counters (leansim instrumentation).
     control_stats: ControlStats,
 
+    /// IWANTs sent and not yet answered, by peer and message, with when they went out
+    /// (leansim instrumentation: tells IWANT responses from forwards).
+    iwant_outstanding: HashMap<(PeerId, MessageId), Instant>,
+
+    /// Topics on which this node requests and sends partial messages.
+    partial_topics: HashSet<TopicHash>,
+
+    /// The topics each peer requested partial messages on when it subscribed.
+    partial_peers: HashMap<PeerId, BTreeSet<TopicHash>>,
+
     /// Keeps track of IWANT messages that we are awaiting to send.
     /// This is used to prevent sending duplicate IWANT messages for the same message.
     pending_iwant_msgs: HashSet<MessageId>,
@@ -501,6 +532,9 @@ where
             count_received_ihave: HashMap::new(),
             count_sent_iwant: HashMap::new(),
             control_stats: ControlStats::default(),
+            iwant_outstanding: HashMap::new(),
+            partial_topics: HashSet::new(),
+            partial_peers: HashMap::new(),
             pending_iwant_msgs: HashSet::new(),
             connected_peers: HashMap::new(),
             published_message_ids: DuplicateCache::new(config.published_message_ids_cache_time()),
@@ -548,6 +582,104 @@ where
             .is_some_and(|topics| topics.contains(topic))
     }
 
+    /// Requests and sends partial messages on `topic` (partial messages extension, leansim
+    /// backport). Call it before subscribing, so the subscription announces it. On such a
+    /// topic the heartbeat sends no IHAVE to peers that requested partial messages; it emits
+    /// [`Event::PartialGossip`] for them instead.
+    pub fn set_partial_topic(&mut self, topic: TopicHash) {
+        self.partial_topics.insert(topic);
+    }
+
+    /// Whether `peer_id` requested partial messages on `topic` when it subscribed.
+    pub fn peer_requests_partial(&self, peer_id: &PeerId, topic: &TopicHash) -> bool {
+        self.partial_peers
+            .get(peer_id)
+            .is_some_and(|topics| topics.contains(topic))
+    }
+
+    /// The peers to push partial messages on `topic` to: its mesh peers, or, on a topic this
+    /// node is not subscribed to, its fanout peers (chosen as `publish` would and kept alive
+    /// by every call), plus explicit peers subscribed to it. Only peers that requested
+    /// partial messages on the topic are returned.
+    pub fn partial_targets(&mut self, topic_hash: &TopicHash) -> Vec<PeerId> {
+        let mut peers: BTreeSet<PeerId> = BTreeSet::new();
+        if let Some(mesh_peers) = self.mesh.get(topic_hash) {
+            peers.extend(mesh_peers);
+        } else {
+            if self.fanout.get(topic_hash).map_or(true, BTreeSet::is_empty) {
+                let new_peers = get_random_peers(
+                    &self.topic_peers,
+                    &self.connected_peers,
+                    topic_hash,
+                    self.config.mesh_n(),
+                    |p| {
+                        !self.explicit_peers.contains(p)
+                            && self.peer_requests_partial(p, topic_hash)
+                            && !self
+                                .score_below_threshold(p, |pst| pst.publish_threshold)
+                                .0
+                    },
+                );
+                self.fanout.insert(topic_hash.clone(), new_peers);
+            }
+            peers.extend(self.fanout.get(topic_hash).into_iter().flatten());
+            self.fanout_last_pub
+                .insert(topic_hash.clone(), Instant::now());
+        }
+        for peer in &self.explicit_peers {
+            if self.is_peer_subscribed(peer, topic_hash) {
+                peers.insert(*peer);
+            }
+        }
+        peers
+            .into_iter()
+            .filter(|peer| self.peer_requests_partial(peer, topic_hash))
+            .collect()
+    }
+
+    /// Sends `message` to `peer_id` alone; partial messages are never forwarded. Returns the
+    /// bytes of the frame that carries it, or 0 if the peer is not connected.
+    pub fn send_partial(&mut self, peer_id: &PeerId, message: PartialMessage) -> usize {
+        if !self.connected_peers.contains_key(peer_id) {
+            return 0;
+        }
+        let bytes = message.frame_len();
+        self.send_message(*peer_id, RpcOut::Partial(message));
+        bytes
+    }
+
+    /// The subscription announcement for `topic_hash`, flagged when it is a partial topic.
+    fn subscribe_rpc(&self, topic_hash: TopicHash) -> RpcOut {
+        if self.partial_topics.contains(&topic_hash) {
+            RpcOut::SubscribePartial(topic_hash)
+        } else {
+            RpcOut::Subscribe(topic_hash)
+        }
+    }
+
+    /// Records which of `peer_id`'s subscriptions requested partial messages.
+    fn handle_partial_subscriptions(
+        &mut self,
+        subscriptions: &[Subscription],
+        partial_topics: &[TopicHash],
+        peer_id: &PeerId,
+    ) {
+        for subscription in subscriptions {
+            let topic = &subscription.topic_hash;
+            let requested = subscription.action == SubscriptionAction::Subscribe
+                && partial_topics.contains(topic)
+                && self.is_peer_subscribed(peer_id, topic);
+            if requested {
+                self.partial_peers
+                    .entry(*peer_id)
+                    .or_default()
+                    .insert(topic.clone());
+            } else if let Some(topics) = self.partial_peers.get_mut(peer_id) {
+                topics.remove(topic);
+            }
+        }
+    }
+
     /// Lists all known peers and their associated protocol.
     pub fn peer_protocol(&self) -> impl Iterator<Item = (&PeerId, &PeerKind)> {
         self.connected_peers.iter().map(|(k, v)| (k, &v.kind))
@@ -579,7 +711,7 @@ where
         // send subscription request to all peers
         for peer in self.peer_topics.keys().copied().collect::<Vec<_>>() {
             tracing::debug!(%peer, "Sending SUBSCRIBE to peer");
-            let event = RpcOut::Subscribe(topic_hash.clone());
+            let event = self.subscribe_rpc(topic_hash.clone());
             self.send_message(peer, event);
         }
 
@@ -739,6 +871,9 @@ where
 
         if recipient_peers.is_empty() {
             return Err(PublishError::InsufficientPeers);
+        }
+        if !self.mesh.contains_key(&topic_hash) {
+            self.control_stats.fanout_publishes_sent += recipient_peers.len() as u64;
         }
 
         // If the message isn't a duplicate and we have sent it to some peers add it to the
@@ -1304,9 +1439,12 @@ where
             iwant_ids_vec.truncate(iask);
             *iasked += iask;
 
+            let now = Instant::now();
             for message_id in &iwant_ids_vec {
                 // Add all messages to the pending list
                 self.pending_iwant_msgs.insert(message_id.clone());
+                self.iwant_outstanding
+                    .insert((*peer_id, message_id.clone()), now);
             }
 
             if let Some((_, _, _, gossip_promises)) = &mut self.peer_score {
@@ -1819,7 +1957,15 @@ where
             return;
         }
 
+        // An answer to one of our IWANTs, rather than a forward?
+        let iwant_response = self
+            .iwant_outstanding
+            .remove(&(*propagation_source, msg_id.clone()))
+            .is_some();
+        self.control_stats.iwant_responses_received += u64::from(iwant_response);
+
         if !self.duplicate_cache.insert(msg_id.clone()) {
+            self.control_stats.iwant_responses_duplicate += u64::from(iwant_response);
             tracing::debug!(message=%msg_id, "Message already received, ignoring");
             if let Some((peer_score, ..)) = &mut self.peer_score {
                 peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
@@ -2136,6 +2282,12 @@ where
 
         // clean up ihave counters
         self.count_sent_iwant.clear();
+
+        // IWANTs unanswered past the followup time are broken promises, not responses.
+        let followup = self.config.iwant_followup_time();
+        let now = Instant::now();
+        self.iwant_outstanding
+            .retain(|_, sent| now.duration_since(*sent) < followup);
         self.count_received_ihave.clear();
 
         // apply iwant penalties
@@ -2529,9 +2681,13 @@ where
     /// and fanout peers
     fn emit_gossip(&mut self) {
         let mut rng = thread_rng();
+        // Gossip peers of partial topics, handed to the application (partial messages
+        // extension): they get parts metadata instead of an IHAVE.
+        let mut partial_gossip = Vec::new();
         for (topic_hash, peers) in self.mesh.iter().chain(self.fanout.iter()) {
             let mut message_ids = self.mcache.get_gossip_message_ids(topic_hash);
-            if message_ids.is_empty() {
+            let partial = self.partial_topics.contains(topic_hash);
+            if message_ids.is_empty() && !partial {
                 continue;
             }
 
@@ -2569,7 +2725,15 @@ where
 
             tracing::debug!("Gossiping IHAVE to {} peers", to_msg_peers.len());
 
+            let mut partial_peers = Vec::new();
             for peer in to_msg_peers {
+                if partial && self.peer_requests_partial(&peer, topic_hash) {
+                    partial_peers.push(peer);
+                    continue;
+                }
+                if message_ids.is_empty() {
+                    continue;
+                }
                 let mut peer_message_ids = message_ids.clone();
 
                 if peer_message_ids.len() > self.config.max_ihave_length() {
@@ -2593,6 +2757,13 @@ where
                     },
                 );
             }
+            if !partial_peers.is_empty() {
+                partial_gossip.push((topic_hash.clone(), partial_peers));
+            }
+        }
+        for (topic, peers) in partial_gossip {
+            self.events
+                .push_back(ToSwarm::GenerateEvent(Event::PartialGossip { topic, peers }));
         }
     }
 
@@ -2965,7 +3136,8 @@ where
         tracing::debug!(peer=%peer_id, "New peer connected");
         // We need to send our subscriptions to the newly-connected node.
         for topic_hash in self.mesh.clone().into_keys() {
-            self.send_message(peer_id, RpcOut::Subscribe(topic_hash));
+            let event = self.subscribe_rpc(topic_hash);
+            self.send_message(peer_id, event);
         }
     }
 
@@ -3076,6 +3248,7 @@ where
             // Forget px and outbound status for this peer
             self.px_peers.remove(&peer_id);
             self.outbound_peers.remove(&peer_id);
+            self.partial_peers.remove(&peer_id);
 
             // Remove peer from peer_topics and connected_peers
             // NOTE: It is possible the peer has already been removed from all mappings if it does not
@@ -3217,6 +3390,11 @@ where
                 // Update connected peers topics
                 if !rpc.subscriptions.is_empty() {
                     self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
+                    self.handle_partial_subscriptions(
+                        &rpc.subscriptions,
+                        &rpc.partial_topics,
+                        &propagation_source,
+                    );
                 }
 
                 // Check if peer is graylisted in which case we ignore the event
@@ -3258,6 +3436,23 @@ where
                         break;
                     }
                     self.handle_received_message(raw_message, &propagation_source);
+                }
+
+                // Hand partial messages on our partial topics to the application.
+                if let Some(message) = rpc.partial {
+                    if self.partial_topics.contains(&message.topic) {
+                        self.events
+                            .push_back(ToSwarm::GenerateEvent(Event::Partial {
+                                propagation_source,
+                                message,
+                            }));
+                    } else {
+                        tracing::debug!(
+                            peer=%propagation_source,
+                            topic=%message.topic,
+                            "Partial message on a topic without partial messages; ignoring"
+                        );
+                    }
                 }
 
                 // Handle control messages
