@@ -1,0 +1,51 @@
+# 32k network of the hosts that run validators (all_hosts = false), as
+# experiments/nodemap-32k-broadcast-gossip-agg4-sig2400-super10-sub16 on the server:
+# signature propagation only, no aggregators. Configuration: gossip-m4-noihave (no IHAVE/IWANT gossip).
+run_id = "32k-valhosts-sub16-gossip-m4-noihave"
+run_timeout_secs = 25
+
+validator_count = 32768
+node_map = "nodes.csv"
+all_hosts = false
+subnet_subscriptions_per_node = 2
+subscribe_to_duty_subnets = false
+random_peer_count = 0
+publish_subnet_peer_count = 8
+subnet_count = 16
+# No aggregation step: only propagation is measured.
+local_aggregators_per_subnet = 0
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 3
+gossipsub_mesh_n = 4
+gossipsub_mesh_n_high = 6
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+mesh_warmup_ms = 3000
+gossipsub_idontwant_threshold_bytes = 1000
+gossipsub_gossip = false
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+supernode_by_validator_count = 10
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "native"
+runs = 1
+parallelism = 24
+cpu_pinning = false
+
+[output]
+dir = "/home/kamilsa/dev/leansim-signature-sync/output-32k-valhosts/gossip-m4-noihave"
