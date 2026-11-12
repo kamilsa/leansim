@@ -32,3 +32,5 @@ gossip-m8-pull
 gossip-m8-coded
 gossip-m8-noihave
 gossip-m4-noihave
+ann-m4-s1600-d200-allhosts-agg4
+ann-m4-s1600-d200-allhosts-agg4-sig2400
