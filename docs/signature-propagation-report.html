@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reducing duplicate signatures in subnet propagation</title>
+<style>
+:root {
+  --ink: #1f2933; --muted: #5f6b7a; --line: #e3e7ec; --soft: #f6f8fa;
+  --blue: #0072B2; --sky: #56B4E9; --green: #009E73; --orange: #E69F00;
+  --red: #D55E00; --purple: #8e5ea2; --grey: #8a8f98;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 940px; margin: 0 auto; padding: 44px 24px 90px; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 24px; margin: 56px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+h3 { font-size: 18px; margin: 30px 0 8px; }
+p { margin: 10px 0; }
+.sub { color: var(--muted); margin: 0 0 26px; }
+a { color: var(--blue); }
+code { font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft);
+  padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+  overflow-x: auto; }
+pre code { background: none; padding: 0; }
+ul { padding-left: 22px; }
+li { margin: 5px 0; }
+.summary { background: var(--soft); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; }
+.summary p:first-child { margin-top: 0; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 18px 0 6px; }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff; }
+.tile .big { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; }
+.tile .big span { color: var(--muted); font-weight: 500; font-size: 18px; }
+.tile .what { color: var(--muted); font-size: 14px; }
+.finding { border-left: 4px solid var(--green); background: #f1faf6; padding: 10px 16px; margin: 16px 0;
+  border-radius: 0 8px 8px 0; }
+.finding.neg { border-left-color: var(--red); background: #fdf3ee; }
+.finding.note { border-left-color: var(--orange); background: #fdf8ea; }
+figure { margin: 22px 0; padding: 16px 16px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption { color: var(--muted); font-size: 14px; margin-top: 10px; }
+.chart-title { font-weight: 600; font-size: 15px; margin: 0 0 6px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14.5px; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; border-bottom: 2px solid var(--line); }
+th:first-child, td:first-child { text-align: left; white-space: normal; }
+tr.best td { background: #f1faf6; font-weight: 600; }
+tr.base td { color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13.5px; color: var(--muted); margin: 6px 0 0; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+svg .lbl { font-size: 13px; fill: var(--ink); }
+svg .val { font-size: 13px; fill: var(--ink); font-weight: 600; }
+svg .tick { font-size: 12px; fill: var(--muted); }
+svg .axis { font-size: 12.5px; fill: var(--muted); }
+svg .grid { stroke: var(--line); stroke-width: 1; }
+svg .d-title { font-size: 14px; font-weight: 650; fill: var(--ink); }
+svg .d-text { font-size: 12.5px; fill: var(--ink); }
+svg .d-muted { font-size: 12px; fill: var(--muted); }
+svg .d-out { font-size: 13px; font-weight: 650; fill: var(--ink); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.small { font-size: 14px; color: var(--muted); }
+@media (max-width: 720px) { .tiles, .two { grid-template-columns: 1fr; } h1 { font-size: 28px; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Reducing duplicate signatures in subnet propagation</h1>
+<p class="sub">leansim experiments on branch <code>signature-sync</code> · updated 12 November 2026 · Shadow simulations of 32,768 validators in 16 committees</p>
+
+<div class="summary">
+<p><b>Summary.</b> The best setup we have found so far for propagating validator signatures inside a subnet is a
+small gossipsub mesh, signatures pushed in bundles, and a rule under which the two ends of each mesh link
+<em>take turns</em>: for every signature one end pushes it and the other only announces that it holds it.
+On a network of 32,768 validators in 16 committees of 2,048, this delivers every signature with
+<b>0.90 duplicates per first copy instead of 4.34</b> and sends <b>67% fewer bytes</b> than plain gossipsub.
+The slowest hosts get their signatures sooner: 95% of hosts hold 90% of their committee after 1,974 ms instead of
+2,505 ms. The median host gets there <b>184 ms later</b> (1,386 against 1,202 ms); two variants in the conclusion avoid
+that at the price of more duplicates.</p>
+<div class="tiles">
+  <div class="tile"><div class="big">4.34 <span>→</span> 0.90</div><div class="what">duplicates per first copy</div></div>
+  <div class="tile"><div class="big">109.8 <span>→</span> 36.4 GB</div><div class="what">bytes on the wire for one slot</div></div>
+  <div class="tile"><div class="big">2,505 <span>→</span> 1,974 ms</div><div class="what">until 95% of hosts hold 90% of their committee</div></div>
+</div>
+<p class="small" style="margin-bottom:0">Baseline: gossipsub with IDONTWANT at the mesh-8 setting. Best: the setup in
+<a href="#conclusion">the conclusion</a>. One seed, lossless network; see <a href="#caveats">caveats</a>.</p>
+</div>
+
+<figure>
+<p class="chart-title">The path from the baseline to the best setup: duplicates per first copy</p>
+<div id="c-journey"></div>
+<div class="legend"><span><i style="background:var(--grey)"></i>gossipsub</span><span><i style="background:var(--blue)"></i>EIP-8334 bundles</span><span><i style="background:var(--orange)"></i>+ turn-taking</span><span><i style="background:var(--green)"></i>+ announcements</span></div>
+<figcaption>Each row adds one change to the row above it, except the switch from the mesh-8 to the mesh-4 setting.
+EIP-8334 bundles alone do not reduce duplicates; the mesh size and the announcements do.</figcaption>
+</figure>
+
+<h2 id="setup">1. What we simulate and what we measure</h2>
+<p>Each run is one slot: every validator signs once and the signature travels through its committee's subnet. These
+runs have no aggregation step; they measure propagation only.</p>
+<ul>
+<li><b>Network.</b> 32,768 validators in 16 committees of 2,048, one committee per subnet, on 3,713 hosts from a
+mainnet-like node map: the 2,974 hosts that run validators and 739 relays. Each host subscribes to 2 random subnets, so
+a subnet has about 464 hosts, and publishes its validators' signatures into their committees' subnets, usually from
+outside the subnet through fanout peers.</li>
+<li><b>Links.</b> Country-based latency. Hosts with at least 10 validators have 1 Gbit/s; the others have 50 Mbit/s up
+and 100 Mbit/s down. About half of all deliveries go to the fast hosts.</li>
+<li><b>Signatures</b> are 1,200 bytes. Propagation appears to be bandwidth-bound: median delivery takes around a
+second, far longer than link latencies. We infer this from the delivery times; we have not measured queues directly.</li>
+<li><b>34 configurations</b>, one run each, on the server's native Shadow. Every run delivered every signature to
+every subscriber except one, gossipsub at the mesh-3 setting (section 4).</li>
+</ul>
+<p>The node map has 13,613 hosts in all. With every one of them the baseline needed more memory than we may use on the
+shared server, so these runs keep the validator-running hosts. Earlier, smaller runs are compared in
+<a href="#scales">section 8</a>.</p>
+<h3>Metrics</h3>
+<ul>
+<li><b>Duplicates per first copy</b>: copies of a signature a host receives after it already holds it, divided by the
+first copies. This is the headline number.</li>
+<li><b>Delivery</b>: time from the first signature sent to a host receiving a signature, over all (host, signature)
+pairs, for the slower (regular) hosts; median and 95th percentile.</li>
+<li><b>90% of committee</b>: time from the first signature sent until a subscribed host holds 90% of its committee's
+signatures, which is what an aggregator would need. Median and 95th percentile over the 7,426 host-subnet pairs.</li>
+<li><b>Slowest full committee</b>: when the last host-subnet pair held all 2,048 signatures.</li>
+<li><b>Wire bytes</b>: signature copies plus all control traffic, summed over hosts (QUIC framing excluded).</li>
+</ul>
+
+<h2 id="why">2. Why gossipsub produces duplicates</h2>
+<p>Gossipsub forwards a message to every mesh peer the moment it arrives. Each mesh link therefore carries each
+signature at least once, and it carries it twice whenever both ends receive it from somewhere else at about the same
+time and push it at each other.</p>
+<figure>
+<svg viewBox="0 0 720 250" role="img" aria-label="A signature flooding a five-host mesh">
+  <defs>
+    <marker id="a1b" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#0072B2"/></marker>
+    <marker id="a1o" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#D55E00"/></marker>
+  </defs>
+  <g stroke="#0072B2" stroke-width="2.5" fill="none" marker-end="url(#a1b)">
+    <line x1="60" y1="125" x2="126" y2="125"/>
+    <line x1="170" y1="116" x2="278" y2="65"/>
+    <line x1="170" y1="134" x2="278" y2="185"/>
+    <line x1="324" y1="55" x2="476" y2="55"/>
+    <line x1="324" y1="195" x2="476" y2="195"/>
+  </g>
+  <g stroke="#D55E00" stroke-width="2.5" fill="none" stroke-dasharray="6 4" marker-end="url(#a1o)">
+    <line x1="293" y1="79" x2="293" y2="171"/>
+    <line x1="307" y1="171" x2="307" y2="79"/>
+    <line x1="493" y1="79" x2="493" y2="171"/>
+    <line x1="507" y1="171" x2="507" y2="79"/>
+  </g>
+  <rect x="22" y="107" width="36" height="36" rx="6" fill="#fff" stroke="#5f6b7a" stroke-width="2"/>
+  <text x="40" y="130" text-anchor="middle" class="d-text">P</text>
+  <g fill="#fff" stroke="#1f2933" stroke-width="2">
+    <circle cx="150" cy="125" r="22"/><circle cx="300" cy="55" r="22"/><circle cx="300" cy="195" r="22"/>
+    <circle cx="500" cy="55" r="22"/><circle cx="500" cy="195" r="22"/>
+  </g>
+  <g class="d-text" text-anchor="middle">
+    <text x="150" y="130">A</text><text x="300" y="60">B</text><text x="300" y="200">C</text>
+    <text x="500" y="60">D</text><text x="500" y="200">E</text>
+  </g>
+  <text x="40" y="165" text-anchor="middle" class="d-muted">publisher</text>
+  <text x="332" y="129" class="d-muted">B and C push</text><text x="332" y="144" class="d-muted">at each other</text>
+  <text x="532" y="129" class="d-muted">so do</text><text x="532" y="144" class="d-muted">D and E</text>
+  <line x1="600" y1="30" x2="640" y2="30" stroke="#0072B2" stroke-width="2.5" marker-end="url(#a1b)"/>
+  <text x="648" y="34" class="d-text">first copy</text>
+  <line x1="600" y1="54" x2="640" y2="54" stroke="#D55E00" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#a1o)"/>
+  <text x="648" y="58" class="d-text">duplicate</text>
+</svg>
+<figcaption>One signature on a small mesh. Six mesh links carry eight copies: on two links both ends held the signature
+before the other's copy arrived. Half of the copies on mesh links are duplicates.</figcaption>
+</figure>
+<p>We added instrumentation to measure this directly (mesh-8 setting):</p>
+<ul>
+<li><b>Each mesh link carries a signature 1.69 times on average.</b> About 70% of links carry
+it in both directions. If every link carried it once, pushed duplicates would fall from
+4.26 to 2.12 per first copy.</li>
+<li><b>The mesh is smaller than configured.</b> The setting "low 4, target 8, high 12" produces an average degree of
+6.17. Degree follows the low mark, probably because gossipsub only grafts up to the target when a
+host is below the low mark.</li>
+<li><b>Mesh forwards cause almost all of it.</b> 4.26 of the 4.34
+duplicates per first copy come from mesh forwards and 0.08 from IWANT responses (81% of
+which arrive already held).</li>
+<li><b>IDONTWANT barely acts.</b> It avoided about 19,000 forwards out of 66 million duplicates, because a forward
+leaves before any IDONTWANT can arrive.</li>
+</ul>
+<div class="finding">The floor for any scheme that pushes on every mesh link is about <b>half the mesh degree minus
+one</b> duplicates per first copy. Getting there needs the two ends of a link to stop pushing at each other; going
+below it needs fewer links that push.</div>
+
+<h3>Gossipsub without IHAVE and IWANT</h3>
+<p>To check how much the gossip to non-mesh peers contributes, we switched it off: no IHAVE is sent, so no IWANT
+follows, and signatures travel over mesh links only.</p>
+<div class="scroll"><table>
+<tr><th>Gossipsub</th><th>Mesh<br>setting</th><th>Duplicates<br>per first copy</th><th>Delivery<br>p50 / p95 (ms)</th><th>90% of committee<br>p50 / p95 (ms)</th><th>Slowest full<br>committee (ms)</th><th>Wire<br>GB</th></tr>
+<tr class="base"><td>with IHAVE/IWANT</td><td>8</td><td>4.34</td><td>877 / 2,159</td><td>1,202 / 2,505</td><td>5,565</td><td>109.8</td></tr>
+<tr><td>without</td><td>8</td><td>4.21</td><td>878 / 2,081</td><td>1,195 / 2,449</td><td>4,635</td><td>100.5</td></tr>
+<tr class="base"><td>with IHAVE/IWANT</td><td>4</td><td>2.50</td><td>981 / 2,138</td><td>1,379 / 2,469</td><td>4,629</td><td>70.5</td></tr>
+<tr><td>without</td><td>4</td><td>2.36</td><td>993 / 2,145</td><td>1,394 / 2,473</td><td>4,205</td><td>64.8</td></tr>
+</table></div>
+<div class="finding note"><b>Switching IHAVE/IWANT off saves a little and costs nothing here.</b> Duplicates fall by
+3% at the mesh-8 setting and
+6% at the mesh-4 setting, bytes by about 8%, every signature
+still arrives, and the 90% times move by 15 ms or less at the median. The mesh forwards, where almost all duplicates
+come from, are untouched.</div>
+<p class="small">This network loses no packets, so the recovery that IHAVE/IWANT exists for is never needed in these
+runs; the result says nothing about how the mesh alone copes with loss or churn. One seed each, so the small timing
+differences may be noise.</p>
+
+<h2 id="eip">3. EIP-8334 bundles</h2>
+<p>We started from <a href="https://github.com/ethereum/EIPs/pull/11905">EIP-8334</a> as it stood before it moved to
+waggle: signatures travel over gossipsub's partial-messages extension, which we backported to the vendored gossipsub.</p>
+<ul>
+<li>Every 20 ms tick a host pushes each mesh peer the signatures that peer is not known to hold, in bundles of up to 50.
+A signature a peer delivers while the host waits for its tick is not sent back.</li>
+<li>No metadata goes to mesh peers. At each gossipsub heartbeat a host advertises validator indices to a few non-mesh
+peers, which request what they lack.</li>
+</ul>
+<figure>
+<svg viewBox="0 0 720 200" role="img" aria-label="Forwarding each signature at once compared with bundling per tick">
+  <text x="10" y="58" class="d-title">Gossipsub</text>
+  <text x="10" y="76" class="d-muted">forward on receipt</text>
+  <text x="10" y="150" class="d-title">Bundles</text>
+  <text x="10" y="168" class="d-muted">push at each tick</text>
+  <g fill="#8a8f98"><rect x="186" y="44" width="4" height="24"/><rect x="211" y="44" width="4" height="24"/><rect x="228" y="44" width="4" height="24"/><rect x="286" y="44" width="4" height="24"/><rect x="306" y="44" width="4" height="24"/><rect x="341" y="44" width="4" height="24"/><rect x="416" y="44" width="4" height="24"/><rect x="436" y="44" width="4" height="24"/><rect x="451" y="44" width="4" height="24"/><rect x="516" y="44" width="4" height="24"/></g>
+  <g fill="#0072B2"><rect x="190" y="44" width="10" height="24"/><rect x="215" y="44" width="10" height="24"/><rect x="232" y="44" width="10" height="24"/><rect x="290" y="44" width="10" height="24"/><rect x="310" y="44" width="10" height="24"/><rect x="345" y="44" width="10" height="24"/><rect x="420" y="44" width="10" height="24"/><rect x="440" y="44" width="10" height="24"/><rect x="455" y="44" width="10" height="24"/><rect x="520" y="44" width="10" height="24"/></g>
+  <g stroke="#5f6b7a" stroke-dasharray="3 4"><line x1="250" y1="112" x2="250" y2="178"/><line x1="350" y1="112" x2="350" y2="178"/><line x1="450" y1="112" x2="450" y2="178"/><line x1="550" y1="112" x2="550" y2="178"/></g>
+  <g class="d-muted" text-anchor="middle"><text x="250" y="192">tick</text><text x="350" y="192">tick</text><text x="450" y="192">tick</text><text x="550" y="192">tick</text></g>
+  <g fill="#56B4E9"><circle cx="193" cy="124" r="4"/><circle cx="218" cy="124" r="4"/><circle cx="235" cy="124" r="4"/><circle cx="293" cy="124" r="4"/><circle cx="313" cy="124" r="4"/><circle cx="348" cy="124" r="4"/><circle cx="423" cy="124" r="4"/><circle cx="443" cy="124" r="4"/><circle cx="458" cy="124" r="4"/><circle cx="523" cy="124" r="4"/></g>
+  <g fill="#8a8f98"><rect x="253" y="140" width="4" height="24"/><rect x="353" y="140" width="4" height="24"/><rect x="453" y="140" width="4" height="24"/><rect x="553" y="140" width="4" height="24"/></g>
+  <g fill="#0072B2"><rect x="257" y="140" width="30" height="24"/><rect x="357" y="140" width="30" height="24"/><rect x="457" y="140" width="20" height="24"/><rect x="557" y="140" width="20" height="24"/></g>
+  <g stroke="#fff" stroke-width="1.5"><line x1="267" y1="140" x2="267" y2="164"/><line x1="277" y1="140" x2="277" y2="164"/><line x1="367" y1="140" x2="367" y2="164"/><line x1="377" y1="140" x2="377" y2="164"/><line x1="467" y1="140" x2="467" y2="164"/><line x1="567" y1="140" x2="567" y2="164"/></g>
+  <rect x="600" y="40" width="4" height="14" fill="#8a8f98"/><text x="610" y="52" class="d-text">envelope</text>
+  <rect x="600" y="62" width="10" height="14" fill="#0072B2"/><text x="616" y="74" class="d-text">signature</text>
+  <circle cx="604" cy="94" r="4" fill="#56B4E9"/><text x="616" y="98" class="d-text">arrival</text>
+</svg>
+<figcaption>Ten signatures arriving at a host. Gossipsub forwards each in its own message; bundling sends what arrived
+since the last tick under one envelope, and drops from a peer's bundle anything that peer delivered in the meantime.</figcaption>
+</figure>
+<div class="scroll"><table>
+<tr><th>Mesh-8 setting</th><th>Duplicates<br>per first copy</th><th>Delivery<br>p50 / p95 (ms)</th><th>90% of committee<br>p50 / p95 (ms)</th><th>Slowest full<br>committee (ms)</th><th>Wire<br>GB</th></tr>
+<tr class="base"><td>gossipsub with IDONTWANT</td><td>4.34</td><td>877 / 2,159</td><td>1,202 / 2,505</td><td>5,565</td><td>109.8</td></tr>
+<tr><td>bundles, 20 ms tick (the EIP's default)</td><td>4.59</td><td>817 / 1,782</td><td>1,123 / 2,033</td><td>4,230</td><td>103.9</td></tr>
+<tr><td>bundles, no tick</td><td>4.63</td><td>814 / 1,826</td><td>1,121 / 2,070</td><td>3,882</td><td>107.2</td></tr>
+<tr><td>bundles, 100 ms tick</td><td>4.57</td><td>941 / 1,868</td><td>1,248 / 2,076</td><td>4,127</td><td>103.3</td></tr>
+<tr><td>bundles of one signature, no tick</td><td>4.65</td><td>811 / 1,878</td><td>1,136 / 2,137</td><td>4,349</td><td>114.2</td></tr>
+</table></div>
+<div class="finding neg"><b>EIP-8334 as specified does not reduce duplicates.</b> Its pushes produce as many
+duplicates as gossipsub's forwards (4.28 against 4.26 per first
+copy), and its requests to gossip peers add 0.31 where IWANT adds
+0.08.</div>
+<ul>
+<li><b>The tick is too short to matter.</b> With a 20 ms tick only 0.5% of pushes are avoided, and even 100 ms avoids
+2.6% while delaying the median host by about 125 ms.</li>
+<li><b>What the EIP does give</b> is fewer bytes and faster delivery: 12.4 GB of IHAVE, IWANT and IDONTWANT become
+1.2 GB of framing and metadata, and hosts hold 90% of their committee about 80 ms earlier at the median and 470 ms
+earlier at the 95th percentile.</li>
+<li><b>Not modelled:</b> the EIP's main saving on mainnet is sharing one <code>AttestationData</code> per bundle. We
+kept every signature at its full 1,200 bytes, so that saving is not in these numbers.</li>
+</ul>
+
+<h2 id="mesh">4. First lever: a smaller mesh</h2>
+<p>Since duplicates scale with the number of mesh links, the cheapest lever is the mesh size.</p>
+<figure>
+<p class="chart-title">Duplicates per first copy by mesh setting</p>
+<div id="c-mesh"></div>
+<div class="legend"><span><i style="background:var(--grey)"></i>gossipsub</span><span><i style="background:var(--blue)"></i>EIP-8334 bundles</span></div>
+<figcaption>Settings are low / target / high. The actual average degree is in brackets.</figcaption>
+</figure>
+<div class="scroll"><table>
+<tr><th>Mesh setting<br>(gossipsub)</th><th>Actual degree<br>(range)</th><th>Copies per<br>mesh link</th><th>Pushed duplicates:<br>now → one copy per link</th><th>Duplicates<br>per first copy</th><th>90% of committee<br>p50 / p95 (ms)</th><th>Wire<br>GB</th></tr>
+<tr><td>4 / 8 / 12</td><td>6.17 (4–12)</td><td>1.69</td><td>4.26 → 2.12</td><td>4.34</td><td>1,202 / 2,505</td><td>109.8</td></tr><tr><td>4 / 6 / 8</td><td>5.82 (2–8)</td><td>1.67</td><td>3.90 → 1.94</td><td>3.96</td><td>1,294 / 2,531</td><td>99.9</td></tr><tr><td>3 / 4 / 6</td><td>4.34 (1–6)</td><td>1.57</td><td>2.43 → 1.20</td><td>2.50</td><td>1,379 / 2,469</td><td>70.5</td></tr><tr><td>2 / 3 / 4</td><td>2.89 (0–4)</td><td>1.40</td><td>1.09 → 0.51</td><td>1.24</td><td>1,518 / 2,427</td><td>47.1</td></tr>
+</table></div>
+<p class="small">Pushed duplicates are per first copy; the second figure is what would remain if every mesh link carried
+each signature once. The mesh-3 timings cover the 7,424 pairs that reached 90%.</p>
+<div class="finding note"><b>The mesh-4 setting removes 42% of duplicates and 36% of bytes, and costs the median host
+about 180 ms.</b> Hosts hold 90% of their committee after 1,379 ms at the median instead of 1,202 ms; the 95th
+percentile is unchanged. In the smaller subnets of our earlier runs the same change cost nothing
+(<a href="#scales">section 8</a>).</div>
+<div class="finding neg"><b>The mesh-3 setting lost signatures under gossipsub.</b> Two of the 7,426 host-subnet pairs
+ended up with no mesh peers at all and never received their full committee; 86 more had a single mesh peer. With
+bundles the same two pairs were filled in through requests to gossip peers. The simulation has no packet loss or
+churn, so real networks would do worse.</div>
+<p>We therefore treat the mesh-4 setting as the working point and look for savings that keep its connectivity. Even
+there, 55 pairs have two mesh peers or fewer and one has a single peer.</p>
+
+<h2 id="stagger">5. Second lever: the two ends of a link take turns</h2>
+<p>To stop the two ends of a link pushing the same signature at each other, we let a hash of the signature and the two
+peer ids decide which end <b>pushes first</b>. The other end <b>waits</b>: it pushes only if it has held the signature
+for a stagger delay without the peer delivering it. A host's own signatures are never delayed.</p>
+<figure>
+<svg viewBox="0 0 720 600" role="img" aria-label="What a mesh link carries under each rule">
+  <defs>
+    <marker id="a3o" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#D55E00"/></marker>
+    <marker id="a3b" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#0072B2"/></marker>
+    <marker id="a3g" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#009E73"/></marker>
+    <marker id="a3p" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#8e5ea2"/></marker>
+  </defs>
+  <g stroke="#e3e7ec"><line x1="360" y1="8" x2="360" y2="592"/><line x1="8" y1="300" x2="712" y2="300"/></g>
+
+  <g>
+    <text x="180" y="24" text-anchor="middle" class="d-title">1. Today: both ends push at once</text>
+    <text x="110" y="50" text-anchor="middle" class="d-text">A</text><text x="250" y="50" text-anchor="middle" class="d-text">B</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="110" y1="72" x2="110" y2="256"/><line x1="250" y1="72" x2="250" y2="256"/></g>
+    <circle cx="110" cy="92" r="5" fill="#1f2933"/><circle cx="250" cy="100" r="5" fill="#1f2933"/>
+    <line x1="110" y1="96" x2="245" y2="172" stroke="#D55E00" stroke-width="2.5" marker-end="url(#a3o)"/>
+    <line x1="250" y1="104" x2="115" y2="180" stroke="#D55E00" stroke-width="2.5" marker-end="url(#a3o)"/>
+    <text x="180" y="284" text-anchor="middle" class="d-out">2 copies, both duplicates</text>
+  </g>
+
+  <g transform="translate(360 0)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">2. Turn-taking</text>
+    <text x="110" y="48" text-anchor="middle" class="d-text">A</text><text x="250" y="48" text-anchor="middle" class="d-text">B</text>
+    <text x="110" y="63" text-anchor="middle" class="d-muted">pushes first</text><text x="250" y="63" text-anchor="middle" class="d-muted">waits</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="110" y1="72" x2="110" y2="256"/><line x1="250" y1="72" x2="250" y2="256"/></g>
+    <rect x="244" y="104" width="12" height="68" fill="#E69F00" opacity="0.4"/>
+    <circle cx="110" cy="92" r="5" fill="#1f2933"/><circle cx="250" cy="100" r="5" fill="#1f2933"/>
+    <line x1="110" y1="96" x2="243" y2="172" stroke="#D55E00" stroke-width="2.5" marker-end="url(#a3o)"/>
+    <text x="264" y="142" class="d-muted">waits</text>
+    <text x="250" y="200" text-anchor="middle" class="d-text">✕</text><text x="264" y="200" class="d-muted">push cancelled</text>
+    <text x="180" y="284" text-anchor="middle" class="d-out">1 copy</text>
+  </g>
+
+  <g transform="translate(0 300)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">3. Announce: A gets it elsewhere</text>
+    <text x="110" y="48" text-anchor="middle" class="d-text">A</text><text x="250" y="48" text-anchor="middle" class="d-text">B</text>
+    <text x="110" y="63" text-anchor="middle" class="d-muted">pushes first</text><text x="250" y="63" text-anchor="middle" class="d-muted">waits</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="110" y1="72" x2="110" y2="256"/><line x1="250" y1="72" x2="250" y2="256"/></g>
+    <rect x="244" y="96" width="12" height="138" fill="#E69F00" opacity="0.4"/>
+    <circle cx="250" cy="92" r="5" fill="#1f2933"/>
+    <line x1="250" y1="96" x2="116" y2="150" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a3g)"/>
+    <text x="122" y="104" class="d-muted">"I have it"</text>
+    <circle cx="110" cy="186" r="5" fill="#1f2933"/>
+    <text x="98" y="182" text-anchor="end" class="d-muted">from another</text><text x="98" y="197" text-anchor="end" class="d-muted">peer</text>
+    <line x1="110" y1="190" x2="244" y2="234" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a3g)"/>
+    <text x="124" y="232" class="d-muted">"so do I"</text>
+    <text x="250" y="252" text-anchor="middle" class="d-text">✕</text>
+    <text x="180" y="284" text-anchor="middle" class="d-out">0 copies, 2 short notices</text>
+  </g>
+
+  <g transform="translate(360 300)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">4. Announce: A still lacks it</text>
+    <text x="110" y="48" text-anchor="middle" class="d-text">A</text><text x="250" y="48" text-anchor="middle" class="d-text">B</text>
+    <text x="110" y="63" text-anchor="middle" class="d-muted">pushes first</text><text x="250" y="63" text-anchor="middle" class="d-muted">waits</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="110" y1="72" x2="110" y2="256"/><line x1="250" y1="72" x2="250" y2="256"/></g>
+    <circle cx="250" cy="92" r="5" fill="#1f2933"/>
+    <line x1="250" y1="96" x2="116" y2="150" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a3g)"/>
+    <text x="122" y="104" class="d-muted">"I have it"</text>
+    <rect x="104" y="152" width="12" height="32" fill="#8e5ea2" opacity="0.4"/>
+    <text x="98" y="166" text-anchor="end" class="d-muted">request</text><text x="98" y="181" text-anchor="end" class="d-muted">delay</text>
+    <line x1="110" y1="186" x2="244" y2="212" stroke="#8e5ea2" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a3p)"/>
+    <text x="264" y="216" class="d-muted">request</text>
+    <line x1="250" y1="220" x2="117" y2="248" stroke="#0072B2" stroke-width="2.5" marker-end="url(#a3b)"/>
+    <circle cx="110" cy="252" r="5" fill="#1f2933"/>
+    <text x="264" y="240" class="d-muted">signature</text>
+    <text x="180" y="284" text-anchor="middle" class="d-out">1 copy, and it is needed</text>
+  </g>
+</svg>
+<figcaption>One mesh link and one signature, time running downwards. A dot is the moment a host first holds the
+signature. Orange arrows are copies that arrive as duplicates, the blue arrow is a first copy, dashed arrows are small
+control messages. Panel 2 is this section; panels 3 and 4 are the announcements of section 6.</figcaption>
+</figure>
+<div class="two">
+<figure><p class="chart-title">Duplicates per first copy vs stagger</p><div id="c-stagger-dup"></div></figure>
+<figure><p class="chart-title">Median time to 90% of committee (ms) vs stagger</p><div id="c-stagger-thr"></div></figure>
+</div>
+<p class="small">Bundles with turn-taking and no announcements. Stagger 0 is plain EIP-8334 bundles.</p>
+<ul>
+<li><b>It removes duplicates, at a price in median latency.</b> At the mesh-4 setting, 400 ms cuts duplicates from
+2.65 to 2.21 and delays the median host by about 160 ms; 1,600 ms nearly reaches one copy per link (1.04) at a cost of
+535 ms. The 95th percentile barely moves until the longest stagger.</li>
+<li><b>Why it needs long delays:</b> a signature takes around a second to cross a subnet, so the end that should push
+first often does not hold the signature yet. At 400 ms more waiting pushes ran out the delay (15.3 million) than were
+saved (7.6 million).</li>
+<li><b>At the mesh-8 setting</b> an 800 ms stagger removes 22% of duplicates and delays the median host by about
+220 ms.</li>
+</ul>
+<div class="finding note">Turn-taking alone forces a trade: a long wait removes duplicates but delays the signatures
+that only the waiting end can supply. Announcements remove that trade.</div>
+
+<h2 id="announce">6. Third lever: the waiting end announces</h2>
+<p>The end that waits tells the peer at once that it holds the signature, with an 8-byte validator index in the
+parts-metadata message the EIP already defines for gossip peers. Panels 3 and 4 of the figure above show the two
+outcomes:</p>
+<ul>
+<li><b>The peer gets the signature elsewhere</b>: it never pushes it back, and announces in turn, which cancels the
+waiting end's push. The link carries no copy at all, which is below the one-copy-per-link floor.</li>
+<li><b>The peer still lacks it</b>: it requests the signature, optionally after a short request delay, and is served.
+It no longer has to wait out the stagger, so the stagger becomes a fallback only.</li>
+</ul>
+<figure>
+<p class="chart-title">Duplicates per first copy at the mesh-4 setting</p>
+<div id="c-announce"></div>
+<div class="legend"><span><i style="background:var(--grey)"></i>gossipsub</span><span><i style="background:var(--blue)"></i>EIP-8334 bundles</span><span><i style="background:var(--orange)"></i>turn-taking</span><span><i style="background:var(--green)"></i>turn-taking with announcements</span></div>
+</figure>
+<div class="scroll"><table>
+<tr><th>Mesh-4 setting</th><th>Duplicates<br>per first copy</th><th>Delivery<br>p50 / p95 (ms)</th><th>90% of committee<br>p50 / p95 (ms)</th><th>Slowest full<br>committee (ms)</th><th>Wire<br>GB</th></tr>
+<tr class="base"><td>gossipsub</td><td>2.50</td><td>981 / 2,138</td><td>1,379 / 2,469</td><td>4,629</td><td>70.5</td></tr>
+<tr><td>bundles</td><td>2.65</td><td>926 / 1,917</td><td>1,293 / 2,198</td><td>3,641</td><td>67.7</td></tr>
+<tr><td>turn-taking, stagger 800</td><td>1.90</td><td>1,089 / 2,009</td><td>1,621 / 2,162</td><td>3,565</td><td>54.0</td></tr>
+<tr><td>+ announcements</td><td>1.42</td><td>896 / 1,730</td><td>1,259 / 1,966</td><td>3,389</td><td>45.9</td></tr>
+<tr><td>+ fallback lengthened to 1,600 ms</td><td>1.15</td><td>895 / 1,749</td><td>1,260 / 2,008</td><td>3,339</td><td>40.9</td></tr>
+<tr class="best"><td>+ request delay 200 ms</td><td>0.90</td><td>1,007 / 1,778</td><td>1,386 / 1,974</td><td>3,480</td><td>36.4</td></tr>
+<tr><td>no fallback push at all</td><td>0.88</td><td>1,007 / 1,777</td><td>1,384 / 1,975</td><td>4,360</td><td>36.0</td></tr>
+<tr class="base"><td>for reference: gossipsub at the mesh-3 setting</td><td>1.24</td><td>1,125 / 2,131</td><td>1,518 / 2,427</td><td>incomplete</td><td>47.1</td></tr>
+</table></div>
+<p class="small">"Incomplete": two host-subnet pairs never received their full committee (section 4).</p>
+<div class="finding"><b>Announcements cut duplicates without the stagger's delay.</b> At an 800 ms stagger they take
+duplicates from 1.90 to 1.42 and bring the median host back from 1,621 to 1,259 ms, slightly ahead of plain bundles.
+With the request delay the result has fewer duplicates than gossipsub at mesh 3, is faster, and delivers
+everything.</div>
+<ul>
+<li><b>The stagger length stops mattering for latency.</b> With announcements, 400, 800 and 1,600 ms all give a median
+of about 1,260 ms, so a long fallback is free and saves the most duplicates (1.81, 1.42, 1.15).</li>
+<li><b>The request delay is a trade.</b> Waiting 200 ms before requesting removes about 0.25 duplicates per first copy
+and costs the median host about 125 ms. Without announcements the same delay does little (2.10 against 2.21).</li>
+<li><b>Dropping the fallback gains almost nothing</b> (0.90 to 0.88) and hurts the tail: the slowest pair completes at
+4,360 ms instead of 3,480 ms. It also removes the only recovery path if a request goes unanswered: a host asks just
+the first announcer and does not remember the others. We keep the fallback.</li>
+<li><b>Cost:</b> announcements add about 0.85 GB, 2.3% of the bytes, because each travels in a small frame of its own
+(about 28 bytes per announced index). Packing them tighter would shrink that.</li>
+</ul>
+
+<h2 id="overview">7. The main configurations side by side</h2>
+<div class="two">
+<figure><p class="chart-title">Duplicates per first copy</p><div id="c-b-dup"></div></figure>
+<figure><p class="chart-title">Wire bytes (GB)</p><div id="c-b-gb"></div></figure>
+</div>
+<div class="two">
+<figure><p class="chart-title">90% of committee, median host (ms)</p><div id="c-b-p50"></div></figure>
+<figure><p class="chart-title">90% of committee, 95th-percentile host (ms)</p><div id="c-b-p95"></div></figure>
+</div>
+<div class="legend" style="margin-bottom:14px"><span><i style="background:var(--grey)"></i>gossipsub</span><span><i style="background:var(--blue)"></i>EIP-8334 bundles</span><span><i style="background:var(--orange)"></i>turn-taking</span><span><i style="background:var(--green)"></i>turn-taking with announcements</span></div>
+<div class="scroll"><table>
+<tr><th>Configuration</th><th>Mesh<br>setting</th><th>Duplicates<br>per first copy</th><th>Delivery<br>p50 / p95 (ms)</th><th>90% of committee<br>p50 / p95 (ms)</th><th>Slowest full<br>committee (ms)</th><th>Wire<br>GB</th></tr>
+<tr class="base"><td>gossipsub</td><td>8</td><td>4.34</td><td>877 / 2,159</td><td>1,202 / 2,505</td><td>5,565</td><td>109.8</td></tr>
+<tr><td>bundles</td><td>8</td><td>4.59</td><td>817 / 1,782</td><td>1,123 / 2,033</td><td>4,230</td><td>103.9</td></tr>
+<tr><td>announcements, request delay 200, fallback 1,600</td><td>8</td><td>1.97</td><td>798 / 1,687</td><td>1,207 / 1,853</td><td>3,234</td><td>56.5</td></tr>
+<tr class="base"><td>gossipsub</td><td>4</td><td>2.50</td><td>981 / 2,138</td><td>1,379 / 2,469</td><td>4,629</td><td>70.5</td></tr>
+<tr><td>bundles</td><td>4</td><td>2.65</td><td>926 / 1,917</td><td>1,293 / 2,198</td><td>3,641</td><td>67.7</td></tr>
+<tr><td>turn-taking, stagger 400</td><td>4</td><td>2.21</td><td>1,036 / 1,900</td><td>1,452 / 2,096</td><td>3,478</td><td>59.8</td></tr>
+<tr><td>announcements, fallback 1,600</td><td>4</td><td>1.15</td><td>895 / 1,749</td><td>1,260 / 2,008</td><td>3,339</td><td>40.9</td></tr>
+<tr class="best"><td>announcements, request delay 200, fallback 1,600</td><td>4</td><td>0.90</td><td>1,007 / 1,778</td><td>1,386 / 1,974</td><td>3,480</td><td>36.4</td></tr>
+<tr><td>announcements, request delay 200, no fallback</td><td>4</td><td>0.88</td><td>1,007 / 1,777</td><td>1,384 / 1,975</td><td>4,360</td><td>36.0</td></tr>
+</table></div>
+
+<h2 id="scales">8. Across network sizes</h2>
+<p>Before this batch we ran the same experiments on a smaller network of 1,361 hosts, with aggregators. The duplicate
+and byte savings are the same at all three sizes.</p>
+<div class="scroll"><table>
+<tr><th>Network</th><th>Hosts per subnet</th><th>Duplicates per first copy, baseline → best</th><th>Wire bytes</th></tr>
+<tr><td>65,536 validators, 64 committees of 1,024, 1,361 hosts (Shadow in Docker)</td><td>about 42</td><td>4.35 → 0.85 (−80%)</td><td>20.0 → 6.6 GB (−67%)</td></tr>
+<tr><td>65,536 validators, 32 committees of 2,048, 1,361 hosts</td><td>about 85</td><td>4.59 → 0.90 (−80%)</td><td>42.5 → 13.4 GB (−68%)</td></tr>
+<tr class="best"><td>32,768 validators, 16 committees of 2,048, 3,713 hosts (this report)</td><td>about 464</td><td>4.34 → 0.90 (−79%)</td><td>109.8 → 36.4 GB (−67%)</td></tr>
+</table></div>
+<div class="finding note"><b>Timing depends on the subnet size.</b> In the smaller subnets the best setup was faster
+across the board: aggregators reached their 90% threshold 520 to 780 ms earlier at the median. With about 464 hosts per
+subnet the median host is 184 ms slower and only the tail is faster. A mesh of degree four needs more hops to cover
+a larger subnet, which is the likely reason; we have not measured hop counts.</div>
+<p class="small">The earlier runs measured the aggregators' threshold, not the per-host metric used here. The first
+of them ran in a different Shadow build, which gave somewhat different numbers for the same configuration (4.29 against
+4.59 duplicates per first copy), so compare within a row only.</p>
+
+<h2 id="ruled-out">9. What we tried that did not help</h2>
+<ul>
+<li><b>A longer tick.</b> From 0 to 100 ms it removes about 0.06 duplicates per first copy and delays the median host
+by about 125 ms.</li>
+<li><b>Smaller bundles.</b> One signature per bundle leaves duplicates unchanged, is no faster, and brings back the
+per-message overhead (114.2 GB against 107.2).</li>
+<li><b>Delaying requests to gossip peers</b> on its own: 4.59 to 4.56 with a 200 ms delay.</li>
+<li><b>Bitmap pull and coded repair</b> on top of gossipsub, earlier add-ons on this branch: 4.44 and 4.38 duplicates
+per first copy against 4.34, with more bytes (111.8 and 127.3 GB against 109.8).</li>
+<li><b>A suspected cause that turned out negligible:</b> re-sending old signatures to newly joined mesh peers. It did
+not happen once in these runs, out of 85 million pushes.</li>
+</ul>
+
+<h2 id="conclusion">10. Conclusion: the best setup so far</h2>
+<p>Use a small mesh, bundle the pushes, and let the two ends of each link take turns with announcements.</p>
+<figure>
+<svg viewBox="0 0 720 250" role="img" aria-label="For each signature a host pushes on about half its links and announces on the rest">
+  <defs>
+    <marker id="a4b" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#0072B2"/></marker>
+    <marker id="a4g" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#009E73"/></marker>
+  </defs>
+  <text x="180" y="22" text-anchor="middle" class="d-title">Signature X</text>
+  <text x="540" y="22" text-anchor="middle" class="d-title">Signature Y</text>
+  <g stroke="#0072B2" stroke-width="2.5" marker-end="url(#a4b)">
+    <line x1="162" y1="113" x2="82" y2="66"/><line x1="198" y1="141" x2="278" y2="188"/>
+    <line x1="558" y1="113" x2="638" y2="66"/><line x1="522" y1="141" x2="442" y2="188"/>
+  </g>
+  <g stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a4g)">
+    <line x1="198" y1="113" x2="278" y2="66"/><line x1="162" y1="141" x2="82" y2="188"/>
+    <line x1="522" y1="113" x2="442" y2="66"/><line x1="558" y1="141" x2="638" y2="188"/>
+  </g>
+  <g fill="#fff" stroke="#1f2933" stroke-width="2">
+    <circle cx="180" cy="127" r="22"/><circle cx="64" cy="55" r="20"/><circle cx="296" cy="55" r="20"/><circle cx="64" cy="199" r="20"/><circle cx="296" cy="199" r="20"/>
+    <circle cx="540" cy="127" r="22"/><circle cx="424" cy="55" r="20"/><circle cx="656" cy="55" r="20"/><circle cx="424" cy="199" r="20"/><circle cx="656" cy="199" r="20"/>
+  </g>
+  <g class="d-text" text-anchor="middle">
+    <text x="180" y="132">H</text><text x="64" y="60">1</text><text x="296" y="60">2</text><text x="64" y="204">3</text><text x="296" y="204">4</text>
+    <text x="540" y="132">H</text><text x="424" y="60">1</text><text x="656" y="60">2</text><text x="424" y="204">3</text><text x="656" y="204">4</text>
+  </g>
+  <line x1="250" y1="238" x2="290" y2="238" stroke="#0072B2" stroke-width="2.5" marker-end="url(#a4b)"/><text x="298" y="242" class="d-text">pushes the signature</text>
+  <line x1="450" y1="238" x2="490" y2="238" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a4g)"/><text x="498" y="242" class="d-text">announces it</text>
+</svg>
+<figcaption>Host H has just received a signature and has four mesh peers. A hash of the signature and each pair of peer
+ids decides, link by link, whether H pushes or only announces. The split changes with every signature, so no link is
+permanently passive.</figcaption>
+</figure>
+<pre><code># gossipsub mesh: actual degree about 4.3
+gossipsub_mesh_n_low = 3
+gossipsub_mesh_n = 4
+gossipsub_mesh_n_high = 6
+
+signature_propagation = "bundled"   # EIP-8334 bundles over gossipsub partial messages
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+bundle_stagger_ms = 1600            # the waiting end's fallback push
+bundle_announce = true              # the waiting end announces at once
+bundle_request_delay_ms = 200       # wait before requesting an announced signature
+bundle_request_timeout_ms = 1000</code></pre>
+<div class="scroll"><table>
+<tr><th>Against gossipsub at the mesh-8 setting</th><th>Duplicates per first copy</th><th>Wire GB</th><th>90% of committee p50 / p95</th><th>Slowest full committee</th></tr>
+<tr class="base"><td>baseline: gossipsub, mesh-8 setting</td><td>4.34</td><td>109.8</td><td>1,202 / 2,505 ms</td><td>5,565 ms</td></tr>
+<tr class="best"><td>the setup above</td><td>0.90 (−79%)</td><td>36.4 (−67%)</td><td>1,386 / 1,974 ms</td><td>3,480 ms</td></tr>
+<tr><td>variant: no request delay</td><td>1.15 (−73%)</td><td>40.9 (−63%)</td><td>1,260 / 2,008 ms</td><td>3,339 ms</td></tr>
+<tr><td>variant: the same at the mesh-8 setting</td><td>1.97 (−55%)</td><td>56.5 (−49%)</td><td>1,207 / 1,853 ms</td><td>3,234 ms</td></tr>
+</table></div>
+<div class="finding note"><b>The setup above has the fewest duplicates and bytes, and it trades median latency for
+them.</b> The median host holds 90% of its committee 184 ms later than under the baseline; the slowest 5% get there
+530 ms earlier and the last pair completes 2 s earlier.</div>
+<h3>Variants</h3>
+<ul>
+<li><b>If median latency matters more</b>, set <code>bundle_request_delay_ms = 0</code>: 1.15 duplicates per first
+copy and a median only 58 ms behind the baseline, with the same gain in the tail.</li>
+<li><b>If no median slowdown is acceptable, or mesh-8 connectivity is required</b>, keep the mesh-8 setting and add
+announcements: the median matches the baseline, the tail is the fastest of all, and duplicates and bytes still fall
+by about half.</li>
+</ul>
+<h3>What each ingredient contributes</h3>
+<ul>
+<li><b>The mesh size</b> is the largest single lever: 42% fewer duplicates going from the mesh-8 to the mesh-4
+setting, at a cost of about 180 ms for the median host.</li>
+<li><b>Announcements with turn-taking</b> are the second: they take the mesh-4 setting from 2.65 to 1.15 duplicates
+per first copy and are slightly faster than plain bundles.</li>
+<li><b>The request delay</b> trims a further 0.25 and costs the median host about 125 ms.</li>
+<li><b>Bundling itself</b> does not reduce duplicates, but it carries the other mechanisms, saves bytes and speeds
+delivery up.</li>
+</ul>
+
+<h2 id="caveats">11. Caveats and open questions</h2>
+<ul>
+<li><b>One seed per configuration.</b> The ranking is stable across three network sizes, but the individual numbers
+have not been repeated.</li>
+<li><b>No loss, churn or misbehaving peers.</b> This matters most for the small mesh and for announcements: a peer that
+announces a signature and never serves it could delay a neighbour by up to the request timeout. A retry that remembers
+every announcer is not built yet.</li>
+<li><b>Not every host of the node map.</b> These runs use the 3,713 hosts that run validators. With all 13,613 hosts
+the baseline needed more than 250 GiB of memory 15% of the way through the run, beyond what we may use on the shared
+server.</li>
+<li><b>No aggregation step.</b> The 90% metric says when a host could start aggregating; proof time and proof
+propagation are not in these runs.</li>
+<li><b>Turn-taking and announcements depart from EIP-8334</b>, which sends no metadata to mesh peers. The bundle format
+and the partial-messages transport are the EIP's.</li>
+<li><b>Propagation here appears to be bandwidth-bound.</b> With faster links the timings would likely differ; we have
+not tested how the duplicate savings change.</li>
+<li><b>Requests to non-mesh gossip peers</b> still add about 0.2 duplicates per first copy; switching them off is
+untested, and at the mesh-3 setting they were what completed delivery.</li>
+</ul>
+
+<h2 id="appendix">Appendix: settings and data</h2>
+<p>All of this is on branch <code>signature-sync</code>. Settings added:</p>
+<div class="scroll"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>signature_propagation</code></td><td>"gossipsub"</td><td style="text-align:left;white-space:normal">"bundled" switches to EIP-8334 bundles</td></tr>
+<tr><td><code>bundle_tick_ms</code></td><td>20</td><td style="text-align:left;white-space:normal">Push new signatures every tick; 0 pushes at once</td></tr>
+<tr><td><code>bundle_max_signatures</code></td><td>50</td><td style="text-align:left;white-space:normal">Signatures per bundle</td></tr>
+<tr><td><code>bundle_stagger_ms</code></td><td>0</td><td style="text-align:left;white-space:normal">One end of each link waits this long before pushing; 0 turns turn-taking off</td></tr>
+<tr><td><code>bundle_announce</code></td><td>false</td><td style="text-align:left;white-space:normal">The waiting end announces what it holds; needs a stagger</td></tr>
+<tr><td><code>bundle_request_delay_ms</code></td><td>0</td><td style="text-align:left;white-space:normal">Wait before requesting an advertised or announced signature</td></tr>
+<tr><td><code>bundle_request_timeout_ms</code></td><td>1000</td><td style="text-align:left;white-space:normal">Ask another advertiser after this long</td></tr>
+<tr><td><code>gossipsub_gossip</code></td><td>true</td><td style="text-align:left;white-space:normal">false sends no IHAVE, so no IWANT follows</td></tr>
+<tr><td><code>[run] cpu_pinning</code></td><td>true</td><td style="text-align:left;white-space:normal">Set false when several simulations share a machine</td></tr>
+</table></div>
+<p>The 34 job files, the memory-capped scheduler and the collector are in <code>sweeps/32k/</code>; the numbers in this
+report come from <code>sweeps/32k/results.json</code>. Per-run metrics are in <code>output-32k-valhosts/</code>, here and
+under <code>/home/kamilsa/dev/leansim-signature-sync/</code> on the server. A run took 7 to 25 minutes and 40 to
+113 GiB of memory. The protocol is described in the README section "Bundled propagation (EIP-8334)".</p>
+
+</main>
+<script>
+const C = { gossip: '#8a8f98', bundle: '#0072B2', stagger: '#E69F00', announce: '#009E73' };
+
+function hbar(id, rows, opt) {
+  opt = opt || {};
+  const W = opt.width || 880, labelW = opt.labelW || 330, valW = 76, rowH = 30, pad = 4;
+  const max = opt.max || Math.max(...rows.map(r => r.value)) * 1.02;
+  const H = pad * 2 + rows.length * rowH;
+  const fmt = opt.fmt || (v => String(v));
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  rows.forEach((r, i) => {
+    const y = pad + i * rowH;
+    const w = Math.max(2, (W - labelW - valW) * r.value / max);
+    s += `<text x="${labelW - 10}" y="${y + 20}" text-anchor="end" class="lbl">${r.label}</text>`;
+    s += `<rect x="${labelW}" y="${y + 6}" width="${w.toFixed(1)}" height="${rowH - 12}" rx="3" fill="${r.color}"/>`;
+    s += `<text x="${(labelW + w + 8).toFixed(1)}" y="${y + 20}" class="val">${fmt(r.value)}</text>`;
+  });
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+function lines(id, xs, series, opt) {
+  const W = 440, H = 290, m = { l: 52, r: 78, t: 14, b: 50 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const X = i => m.l + pw * i / (xs.length - 1);
+  const Y = v => m.t + ph * (1 - (v - opt.ymin) / (opt.ymax - opt.ymin));
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  for (let t = opt.ymin; t <= opt.ymax + 1e-9; t += opt.ystep) {
+    s += `<line x1="${m.l}" x2="${m.l + pw}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" class="grid"/>`;
+    s += `<text x="${m.l - 8}" y="${(Y(t) + 4).toFixed(1)}" text-anchor="end" class="tick">${opt.yfmt ? opt.yfmt(t) : t}</text>`;
+  }
+  xs.forEach((x, i) => { s += `<text x="${X(i).toFixed(1)}" y="${H - m.b + 18}" text-anchor="middle" class="tick">${x}</text>`; });
+  s += `<text x="${m.l + pw / 2}" y="${H - 8}" text-anchor="middle" class="axis">${opt.xlabel}</text>`;
+  series.forEach(se => {
+    const pts = se.values.map((v, i) => v == null ? null : [X(i), Y(v)]).filter(Boolean);
+    s += `<polyline fill="none" stroke="${se.color}" stroke-width="2.5" points="${pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}"/>`;
+    pts.forEach(p => { s += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${se.color}"/>`; });
+    const last = pts[pts.length - 1];
+    s += `<text x="${(last[0] + 9).toFixed(1)}" y="${(last[1] + 4).toFixed(1)}" class="lbl" style="fill:${se.color};font-weight:600">${se.name}</text>`;
+  });
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+const two = v => v.toFixed(2);
+const ms = v => v.toLocaleString('en-US') + ' ms';
+
+// All numbers: 32,768 validators in 16 committees of 2,048 on 3,713 hosts (sweeps/32k/results.json).
+hbar('c-journey', [
+  { label: 'gossipsub, mesh-8 setting (baseline)', value: 4.34, color: C.gossip },
+  { label: 'EIP-8334 bundles, mesh-8 setting', value: 4.59, color: C.bundle },
+  { label: 'gossipsub, mesh-4 setting', value: 2.5, color: C.gossip },
+  { label: 'EIP-8334 bundles, mesh-4 setting', value: 2.65, color: C.bundle },
+  { label: '+ turn-taking (stagger 400 ms)', value: 2.21, color: C.stagger },
+  { label: '+ announcements (fallback 1,600 ms)', value: 1.15, color: C.announce },
+  { label: '+ request delay 200 ms (best)', value: 0.9, color: C.announce },
+], { fmt: two, max: 5 });
+
+hbar('c-mesh', [
+  { label: '4 / 8 / 12 [6.17], gossipsub', value: 4.34, color: C.gossip },
+  { label: '4 / 8 / 12 [6.17], bundles', value: 4.59, color: C.bundle },
+  { label: '4 / 6 / 8 [5.82], gossipsub', value: 3.96, color: C.gossip },
+  { label: '4 / 6 / 8 [5.82], bundles', value: 4.15, color: C.bundle },
+  { label: '3 / 4 / 6 [4.34], gossipsub', value: 2.5, color: C.gossip },
+  { label: '3 / 4 / 6 [4.34], bundles', value: 2.65, color: C.bundle },
+  { label: '2 / 3 / 4 [2.89], gossipsub', value: 1.24, color: C.gossip },
+  { label: '2 / 3 / 4 [2.89], bundles', value: 1.33, color: C.bundle },
+], { fmt: two, max: 5 });
+
+const staggers = ['0', '50', '100', '200', '400', '800', '1600'];
+lines('c-stagger-dup', staggers, [
+  { name: 'mesh 8', color: C.bundle, values: [4.59, null, 4.41, 4.27, 4.01, 3.59, null] },
+  { name: 'mesh 4', color: C.stagger, values: [2.65, 2.59, 2.53, 2.42, 2.21, 1.90, 1.59] },
+], { ymin: 0, ymax: 5, ystep: 1, xlabel: 'stagger (ms)' });
+lines('c-stagger-thr', staggers, [
+  { name: 'mesh 8', color: C.bundle, values: [1123, null, 1136, 1172, 1237, 1347, null] },
+  { name: 'mesh 4', color: C.stagger, values: [1293, 1283, 1297, 1343, 1452, 1621, 1828] },
+], { ymin: 1000, ymax: 1900, ystep: 150, xlabel: 'stagger (ms)', yfmt: v => v.toLocaleString('en-US') });
+
+hbar('c-announce', [
+  { label: 'gossipsub', value: 2.5, color: C.gossip },
+  { label: 'bundles', value: 2.65, color: C.bundle },
+  { label: 'turn-taking, stagger 400', value: 2.21, color: C.stagger },
+  { label: 'turn-taking, stagger 800', value: 1.9, color: C.stagger },
+  { label: 'stagger 400 + announcements', value: 1.81, color: C.announce },
+  { label: 'stagger 800 + announcements', value: 1.42, color: C.announce },
+  { label: 'stagger 1,600 + announcements', value: 1.15, color: C.announce },
+  { label: 'stagger 800 + announcements + request delay 200', value: 1.13, color: C.announce },
+  { label: 'stagger 1,600 + announcements + request delay 200', value: 0.9, color: C.announce },
+  { label: 'no fallback + announcements + request delay 200', value: 0.88, color: C.announce },
+], { fmt: two, max: 3, labelW: 380 });
+
+const half = { width: 440, labelW: 196 };
+hbar('c-b-dup', [
+  { label: 'mesh 8: gossipsub', value: 4.34, color: C.gossip },
+  { label: 'mesh 8: bundles', value: 4.59, color: C.bundle },
+  { label: 'mesh 8: announce, delay 200', value: 1.97, color: C.announce },
+  { label: 'mesh 4: gossipsub', value: 2.5, color: C.gossip },
+  { label: 'mesh 4: bundles', value: 2.65, color: C.bundle },
+  { label: 'mesh 4: stagger 400', value: 2.21, color: C.stagger },
+  { label: 'mesh 4: announce', value: 1.15, color: C.announce },
+  { label: 'mesh 4: announce, delay 200', value: 0.9, color: C.announce },
+  { label: 'mesh 4: same, no fallback', value: 0.88, color: C.announce },
+], { ...half, fmt: two, max: 5.4 });
+hbar('c-b-gb', [
+  { label: 'mesh 8: gossipsub', value: 109.8, color: C.gossip },
+  { label: 'mesh 8: bundles', value: 103.9, color: C.bundle },
+  { label: 'mesh 8: announce, delay 200', value: 56.5, color: C.announce },
+  { label: 'mesh 4: gossipsub', value: 70.5, color: C.gossip },
+  { label: 'mesh 4: bundles', value: 67.7, color: C.bundle },
+  { label: 'mesh 4: stagger 400', value: 59.8, color: C.stagger },
+  { label: 'mesh 4: announce', value: 40.9, color: C.announce },
+  { label: 'mesh 4: announce, delay 200', value: 36.4, color: C.announce },
+  { label: 'mesh 4: same, no fallback', value: 36.0, color: C.announce },
+], { ...half, fmt: v => v.toFixed(1), max: 125 });
+hbar('c-b-p50', [
+  { label: 'mesh 8: gossipsub', value: 1202, color: C.gossip },
+  { label: 'mesh 8: bundles', value: 1123, color: C.bundle },
+  { label: 'mesh 8: announce, delay 200', value: 1207, color: C.announce },
+  { label: 'mesh 4: gossipsub', value: 1379, color: C.gossip },
+  { label: 'mesh 4: bundles', value: 1293, color: C.bundle },
+  { label: 'mesh 4: stagger 400', value: 1452, color: C.stagger },
+  { label: 'mesh 4: announce', value: 1260, color: C.announce },
+  { label: 'mesh 4: announce, delay 200', value: 1386, color: C.announce },
+  { label: 'mesh 4: same, no fallback', value: 1384, color: C.announce },
+], { ...half, fmt: v => v.toLocaleString('en-US'), max: 1600 });
+hbar('c-b-p95', [
+  { label: 'mesh 8: gossipsub', value: 2505, color: C.gossip },
+  { label: 'mesh 8: bundles', value: 2033, color: C.bundle },
+  { label: 'mesh 8: announce, delay 200', value: 1853, color: C.announce },
+  { label: 'mesh 4: gossipsub', value: 2469, color: C.gossip },
+  { label: 'mesh 4: bundles', value: 2198, color: C.bundle },
+  { label: 'mesh 4: stagger 400', value: 2096, color: C.stagger },
+  { label: 'mesh 4: announce', value: 2008, color: C.announce },
+  { label: 'mesh 4: announce, delay 200', value: 1974, color: C.announce },
+  { label: 'mesh 4: same, no fallback', value: 1975, color: C.announce },
+], { ...half, fmt: v => v.toLocaleString('en-US'), max: 2900 });
+</script>
+</body>
+</html>
