@@ -34,3 +34,11 @@ gossip-m8-noihave
 gossip-m4-noihave
 ann-m4-s1600-d200-allhosts-agg4
 ann-m4-s1600-d200-allhosts-agg4-sig2400
+bundled-m8-churn20
+gossip-m8-churn20
+gossip-m8-pull-churn20
+gossip-m8-coded-churn20
+bundled-m8-churn20-all
+gossip-m8-churn20-all
+gossip-m8-pull-churn20-all
+gossip-m8-coded-churn20-all

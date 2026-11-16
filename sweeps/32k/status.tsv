@@ -32,3 +32,11 @@ gossip-m8-pull	ok	19:14	22.3	108.0	0
 gossip-m8-coded	ok	19:21	23.9	112.6	0
 gossip-m4-noihave	ok	08:37	17.6	76.6	0
 gossip-m8-noihave	ok	08:44	25.3	96.4	0
+bundled-m8-churn20	ok	13:44	18.7	103.1	0
+gossip-m8-churn20	ok	13:45	20.3	104.7	0
+gossip-m8-pull-churn20	ok	14:07	22.8	107.4	0
+bundled-m8-churn20-all	ok	14:27	19.9	100.1	0
+gossip-m8-churn20-all	ok	14:45	18.6	100.4	0
+gossip-m8-pull-churn20-all	ok	15:07	21.4	102.4	0
+gossip-m8-coded-churn20	ok	15:41	116.0	113.5	0
+gossip-m8-coded-churn20-all	ok	17:03	116.5	109.9	0
