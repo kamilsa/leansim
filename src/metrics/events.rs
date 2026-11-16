@@ -39,6 +39,13 @@ pub enum MeshSample {
 pub enum JsonlEvent {
     /// Emitted by each node at startup to map PeerId → node index.
     NodePeerId { node_id: u32, peer_id: String },
+    /// A churny host came online, or crashed (`online: false`) and lost all
+    /// state. A host that starts the run offline says so at `ts_ms` 0.
+    Churn {
+        node_id: u32,
+        online: bool,
+        ts_ms: u64,
+    },
     /// The host's gossipsub mesh peers on one subnet it subscribes to.
     MeshDegree {
         node_id: u32,
@@ -236,6 +243,13 @@ pub enum JsonlEvent {
         /// Bundles and metadata dropped as malformed.
         #[serde(default)]
         invalid_partials: u64,
+        /// Churn: peers this host told that it restarted, after rejoining.
+        #[serde(default)]
+        restart_notices_sent: u64,
+        /// Churn: peers dropped and redialed because they restarted while this
+        /// host still held a connection to their previous session.
+        #[serde(default)]
+        restart_reconnects: u64,
     },
     /// One bucket of a traffic-logging host, by message kind. No `byte_size`
     /// field, so these never count towards the run's signature traffic.

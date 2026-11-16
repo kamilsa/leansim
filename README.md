@@ -8,7 +8,7 @@ Validators publish signatures and local aggregators collect each subnet's
 threshold into a local proof (computed, not transmitted: global aggregation was
 removed and will be redesigned). Experiments can model
 uniform or country-based latency, supernode bandwidth, sparse network graphs,
-and gossipsub mesh settings.
+gossipsub mesh settings, and churn: hosts that crash and rejoin during the run.
 
 ## Requirements
 
@@ -455,6 +455,84 @@ copies already held), and parts metadata and bundle framing are `sync_control`.
 `nodemap-*-allhosts-sync-bundled-sub64` runs the gossip baseline's network with
 bundles.
 
+#### Churn
+
+With churn, some hosts crash and rejoin while the run goes on, as the churny
+peers of [Lean Gossip](https://ankitku.github.io/stuff/leangossip-debs2026.pdf)
+(Kumar and Manolios, DEBS '26). Regular hosts and supernodes have settings of
+their own, and neither falls back to the other's:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `churn_tick_ms` | `100` | How often a churny host may crash or rejoin (both classes) |
+| `regular_churn_fraction` | `0.0` | Share of the regular hosts that churn |
+| `regular_churn_leave_probability` | `0.01` | Chance per tick that an online churny regular host crashes |
+| `regular_churn_rejoin_probability` | `0.05` | Chance per tick that an offline churny regular host rejoins |
+| `supernode_churn_fraction` | `0.0` | Share of the supernodes that churn |
+| `supernode_churn_leave_probability` | `0.01` | As above, for supernodes |
+| `supernode_churn_rejoin_probability` | `0.05` | As above, for supernodes |
+
+The paper's setup is `regular_churn_fraction = 0.2` and
+`supernode_churn_fraction = 0.2` with the default probabilities: 10 s sessions
+and 2 s gaps on average, so a churny host is online 83% of the time. Setting
+only one fraction leaves the other class always online.
+
+- The launcher picks each class's churny hosts (its fraction of the class,
+  rounded up) and draws their offline windows tick by tick for the whole run.
+  A host starts in the chain's stationary state, so churny hosts are offline at
+  the same rate from the first tick as later; a host can start the run offline.
+  The windows are in the host's node config (`offline_windows_ms`) and in
+  `run-manifest.json`. Hosts come first in a seeded order of their class and
+  each host's windows are seeded by its node id, so a larger fraction adds
+  churny hosts to those of a smaller one without changing their windows, and
+  one class's settings do not move the other's.
+- A crash is silent: the host sends nothing, not even a QUIC close. Its peers
+  keep their connection, keep it in their mesh and keep sending to it until
+  QUIC's idle timeout closes the connection after 10 s (libp2p-quic's default),
+  unless the host is back sooner. Requests to a crashed host fail at their
+  timeout (`sync_pull_timeout_ms`; 10 s for a proof pull).
+- A rejoining host has lost all state but its peer table: the signatures it
+  held, its own included, its mesh, what it knew of its peers, and its proofs.
+  It dials every peer of its table (its seeds and the hosts that dial it,
+  `inbound_peer_addrs`) and enters the network at once: the mesh warmup is a
+  stretch of the run, not of each session.
+- A peer that still holds its connection to the crashed session would end up
+  with an old and a new connection, and gossipsub only greets the first
+  connection to a peer, so the rejoined host would never learn the peer's
+  subscriptions. So a rejoined host tells every peer it connects to when it came
+  back (`/leansim/sigsync/1`, `Restarted`); a peer whose connections to it are
+  older drops them all and dials it again. Every host forgets what it knew
+  about a peer (signatures held, bitmaps heard) when its last connection to
+  that peer closes.
+- A host that is offline when it should sign misses the slot: its validators
+  never sign. A host that crashes after signing does not sign again.
+- What a rejoined host gets back depends on the transport. Gossipsub offers
+  only the last few heartbeats of messages (IHAVE). With `signature_sync`, the
+  host advertises its empty bitmap to its new mesh neighbours and pulls or is
+  repaired. With bundles, every heartbeat a host checks for push targets that
+  were not there at its previous tick and pushes them the backlog (without
+  churn, bundles only tick when signatures arrive). Gossipsub never delivers a
+  host its own messages, so in plain gossipsub a rejoined host does not get its
+  own signatures back.
+- Churn cannot be combined with `gossipsub_explicit_aggregator_count`: the
+  warmup fails if a selected aggregator is offline.
+
+A churny host logs a `Churn` event (`online`, `ts_ms`) whenever it goes offline
+or comes back, a `TransportStats` event per session (with `restart_notices_sent`
+and `restart_reconnects`), and one `NodeStats` for the run. The summary gets a
+Churn section: hosts online at signing, crashes, rejoins and signatures missed
+per class, the share of hosts online over the run, how long rejoined hosts took
+to hold their subnets' signatures again, and subnet completion for stable and
+churny hosts apart. Delivery charts show a class's churny hosts apart from its
+stable ones, signatures a host got again after a crash are counted apart from
+first copies and duplicates, subnet pages say which aggregators churn, and
+traffic pages shade the offline windows. `sweep.py` adds the churn numbers to
+`results.csv` as `churn_*` columns. The summary cannot show the bytes sent to
+hosts that were offline: senders do not know.
+
+`nodemap-small-65k-allhosts-sync-{gossip,pull,coded,bundled}-churn20-sub64` run
+the four signature transports with 20% of the regular hosts churning.
+
 ## Output
 
 For an output directory such as `output/`, a run produces:
@@ -464,7 +542,7 @@ output/
 ├── shadow.yaml                 # generated Shadow configuration
 ├── topology.gml                # generated network graph
 ├── configs/node_<id>.toml      # one node config per simulated process
-├── run-manifest.json           # actual node, validator, country, bandwidth, and role assignments
+├── run-manifest.json           # actual node, validator, country, bandwidth, role, and churn assignments
 ├── aggregation-plan.json       # recursive groups and each host's proof duties (recursive aggregation only)
 ├── traffic-<node>.html         # sent/received dashboard per traffic-logging host
 ├── run-meta.json               # runner, seed, and campaign index
@@ -474,7 +552,7 @@ output/
 ```
 
 `run-manifest.json` is the topology source of truth: read it rather than
-reconstructing seeded geo or supernode assignments.
+reconstructing seeded geo, supernode or churn assignments.
 
 ## Analysis
 

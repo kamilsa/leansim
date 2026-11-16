@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import random
 import tempfile
 import tomllib
 import unittest
@@ -947,3 +948,190 @@ class TrafficLogTests(unittest.TestCase):
             report.write_text("x", encoding="utf-8")
             shadow_sim.clean_output(Path(directory))
             self.assertFalse(report.exists())
+
+
+class ChurnTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        values = {"run_id": "t", "validator_count": 64, "subnet_count": 2, "geo_seed": 7, "supernode_fraction": 0.25,
+                  "run_timeout_secs": 60}
+        values.update(overrides)
+        return shadow_sim.experiment_defaults(values)
+
+    def nodes(self, experiment: dict) -> list[dict]:
+        nodes = shadow_sim.assign_nodes(experiment)
+        supernodes = shadow_sim.supernode_ids(nodes, experiment)
+        for node in nodes:
+            node["supernode"] = node["node_id"] in supernodes
+        shadow_sim.assign_churn(nodes, experiment)
+        return nodes
+
+    def test_defaults_churn_nobody(self) -> None:
+        config = self.config()
+        self.assertEqual(config["churn_tick_ms"], 100)
+        for kind in ("regular", "supernode"):
+            self.assertEqual(config[f"{kind}_churn_fraction"], 0.0)
+            self.assertEqual(config[f"{kind}_churn_leave_probability"], 0.01)
+            self.assertEqual(config[f"{kind}_churn_rejoin_probability"], 0.05)
+        self.assertFalse(shadow_sim.churn_enabled(config))
+        shadow_sim.validate_experiment(config)
+        nodes = self.nodes(config)
+        self.assertFalse(any(node["churny"] for node in nodes))
+        self.assertFalse(any("offline_windows_ms" in node or "inbound_peer_addrs" in node for node in nodes))
+
+    def test_sessions_and_gaps_have_the_lengths_the_probabilities_imply(self) -> None:
+        run_ms = 20_000_000
+        windows = shadow_sim.churn_schedule(random.Random(1), run_ms, 100, 0.01, 0.05)
+        gaps = [end - start for start, end in windows]
+        sessions = [start - previous_end for (_, previous_end), (start, _) in zip(windows, windows[1:])]
+        self.assertAlmostEqual(sum(gaps) / len(gaps), 2_000, delta=200)
+        self.assertAlmostEqual(sum(sessions) / len(sessions), 10_000, delta=1_000)
+        self.assertAlmostEqual(sum(gaps) / run_ms, 1 / 6, delta=0.02)
+
+    def test_windows_fall_on_ticks_in_order_inside_the_run(self) -> None:
+        for seed in range(50):
+            windows = shadow_sim.churn_schedule(random.Random(seed), 60_000, 100, 0.05, 0.2)
+            edges = [edge for window in windows for edge in window]
+            self.assertEqual(edges, sorted(edges))
+            self.assertEqual(len(set(edges)), len(edges), "a window is at least one tick long, and so is a session")
+            self.assertTrue(all(edge % 100 == 0 and 0 <= edge <= 60_000 for edge in edges))
+
+    def test_hosts_start_in_the_stationary_state(self) -> None:
+        starts_offline = sum(
+            bool(windows) and windows[0][0] == 0
+            for windows in (shadow_sim.churn_schedule(random.Random(seed), 200, 100, 0.01, 0.05) for seed in range(6000))
+        )
+        self.assertAlmostEqual(starts_offline / 6000, 1 / 6, delta=0.02)
+
+    def test_a_host_that_never_leaves_has_no_windows(self) -> None:
+        for seed in range(20):
+            self.assertEqual(shadow_sim.churn_schedule(random.Random(seed), 60_000, 100, 0.0, 0.05), [])
+
+    def test_each_class_takes_its_own_fraction(self) -> None:
+        nodes = self.nodes(self.config(regular_churn_fraction=0.2))
+        regular = [node for node in nodes if not node["supernode"]]
+        supernodes = [node for node in nodes if node["supernode"]]
+        self.assertEqual((len(regular), len(supernodes)), (48, 16))
+        self.assertEqual(sum(node["churny"] for node in regular), 10, "20% of 48, rounded up")
+        self.assertEqual(sum(node["churny"] for node in supernodes), 0, "supernodes inherit nothing")
+
+        nodes = self.nodes(self.config(supernode_churn_fraction=0.25, supernode_churn_leave_probability=1.0,
+                                       supernode_churn_rejoin_probability=1.0))
+        churny = [node for node in nodes if node["churny"]]
+        self.assertEqual(len(churny), 4)
+        self.assertTrue(all(node["supernode"] for node in churny))
+        # Leaving and rejoining with certainty: offline every other tick.
+        for node in churny:
+            self.assertTrue(all(end - start == 100 for start, end in node["offline_windows_ms"]))
+            self.assertIn(len(node["offline_windows_ms"]), (299, 300))
+
+    def test_other_churn_settings_change_only_what_they_name(self) -> None:
+        few = {node["node_id"]: node for node in self.nodes(self.config(regular_churn_fraction=0.2)) if node["churny"]}
+        more = {node["node_id"]: node for node in self.nodes(self.config(regular_churn_fraction=0.4)) if node["churny"]}
+        both = {node["node_id"]: node
+                for node in self.nodes(self.config(regular_churn_fraction=0.2, supernode_churn_fraction=0.5))
+                if node["churny"]}
+        self.assertEqual(len(more), 20)
+        self.assertTrue(set(few) < set(more), "a larger fraction adds hosts to those of a smaller one")
+        for node_id, node in few.items():
+            self.assertEqual(node["offline_windows_ms"], more[node_id]["offline_windows_ms"])
+            self.assertEqual(node["offline_windows_ms"], both[node_id]["offline_windows_ms"])
+        self.assertEqual({node_id for node_id, node in both.items() if not node["supernode"]}, set(few))
+
+    def test_assignment_is_seeded(self) -> None:
+        config = self.config(regular_churn_fraction=0.3, supernode_churn_fraction=0.3)
+        first = [(node["churny"], node.get("offline_windows_ms")) for node in self.nodes(config)]
+        self.assertEqual(first, [(node["churny"], node.get("offline_windows_ms")) for node in self.nodes(config)])
+        other = [(node["churny"], node.get("offline_windows_ms")) for node in self.nodes(dict(config, geo_seed=8))]
+        self.assertNotEqual(first, other)
+
+    def test_a_churny_host_knows_who_dials_it(self) -> None:
+        nodes = self.nodes(self.config(regular_churn_fraction=0.5))
+        dialers: dict[str, set[str]] = {node["listen_addr"]: set() for node in nodes}
+        for node in nodes:
+            for address in node["seed_addrs"]:
+                dialers[address].add(node["listen_addr"])
+        for node in nodes:
+            if not node["churny"]:
+                self.assertNotIn("inbound_peer_addrs", node)
+                continue
+            table = set(node["seed_addrs"]) | set(node["inbound_peer_addrs"])
+            self.assertEqual(table, set(node["seed_addrs"]) | dialers[node["listen_addr"]])
+            self.assertFalse(set(node["seed_addrs"]) & set(node["inbound_peer_addrs"]), "no peer is dialed twice")
+            self.assertNotIn(node["listen_addr"], table)
+        self.assertTrue(any(node.get("inbound_peer_addrs") for node in nodes))
+
+    def test_invalid_values_are_rejected(self) -> None:
+        for overrides in (
+            {"regular_churn_fraction": 1.5},
+            {"supernode_churn_fraction": -0.1},
+            {"regular_churn_leave_probability": 2},
+            {"supernode_churn_rejoin_probability": "often"},
+            {"churn_tick_ms": 0},
+            {"regular_churn_fraction": 0.2, "regular_churn_rejoin_probability": 0},
+            {"supernode_churn_fraction": 0.2, "supernode_churn_rejoin_probability": 0.0},
+            {"regular_churn_fraction": 0.2, "local_aggregators_per_subnet": 3, "gossipsub_explicit_aggregator_count": 1},
+        ):
+            with self.assertRaises(SystemExit, msg=str(overrides)), contextlib.redirect_stderr(io.StringIO()):
+                shadow_sim.validate_experiment(self.config(**overrides))
+        # A class that does not churn may have any probabilities.
+        shadow_sim.validate_experiment(self.config(regular_churn_fraction=0.2, supernode_churn_rejoin_probability=0))
+
+    def test_generate_run_writes_windows_for_churny_hosts_only(self) -> None:
+        config = self.config(regular_churn_fraction=0.25, supernode_churn_fraction=0.5)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                manifest = shadow_sim.generate_run(config, output, "/opt/leansim/leansim", 0, "docker")
+            self.assertIn("churn: 12 of 48 regular hosts and 8 of 16 supernode hosts churn;", printed.getvalue())
+            churny = [node for node in manifest["nodes"] if node["churny"]]
+            self.assertEqual(len(churny), 20)
+            for node in manifest["nodes"]:
+                written = tomllib.loads((output / "configs" / f"node_{node['node_id']}.toml").read_text(encoding="utf-8"))
+                self.assertNotIn("inbound_peer_addrs", node, "addresses stay out of the manifest")
+                if node["churny"]:
+                    self.assertEqual(written["offline_windows_ms"], node["offline_windows_ms"])
+                    self.assertIn("inbound_peer_addrs", written)
+                else:
+                    self.assertNotIn("offline_windows_ms", written)
+                    self.assertNotIn("inbound_peer_addrs", written)
+                self.assertEqual(written["experiment"]["regular_churn_fraction"], 0.25)
+
+    def test_summary_counts_hosts_offline_when_signing_starts(self) -> None:
+        nodes = [
+            {"supernode": False, "churny": True, "validator_ids": [1, 2], "offline_windows_ms": [[0, 4000]]},
+            {"supernode": False, "churny": True, "validator_ids": [3], "offline_windows_ms": [[3500, 3600]]},
+            {"supernode": True, "churny": False, "validator_ids": [4]},
+        ]
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            shadow_sim.log_churn_summary(nodes, {"mesh_warmup_ms": 1500, "burst_time_ms": 2000})
+        self.assertIn("2 of 2 regular hosts and 0 of 1 supernode hosts churn; 2 hosts with 3 validators are offline at 3500 ms",
+                      printed.getvalue())
+
+
+SWEEP_SPEC = importlib.util.spec_from_file_location("sweep", ROOT / "sweep.py")
+assert SWEEP_SPEC is not None and SWEEP_SPEC.loader is not None
+sweep = importlib.util.module_from_spec(SWEEP_SPEC)
+SWEEP_SPEC.loader.exec_module(sweep)
+
+
+class SweepChurnColumnTests(unittest.TestCase):
+    def test_churn_numbers_become_flat_columns(self) -> None:
+        snapshot = {"metrics": {"churn": {
+            "churny_hosts": 20, "online_at_signing": 97, "missed_signatures": 12, "counters": {"relearned_total": 300},
+            "catch_up": {"regular": {"rejoins": 40, "caught_up": 30, "p50": 800, "p95": None, "cdf": [[1, 2.5]]}},
+            "completion": {"stable": {"pairs": 80, "90pct": {"reached": 80, "p50": 300, "p95": 600},
+                                      "100pct": {"reached": 70, "p50": 400, "p95": None}},
+                           "churny": None},
+        }}}
+        columns = sweep.churn_columns(snapshot)
+        self.assertEqual(columns["churn_hosts"], 20)
+        self.assertEqual(columns["churn_online_at_signing"], 97)
+        self.assertEqual(columns["churn_relearned_signatures"], 300)
+        self.assertEqual((columns["churn_catch_up_regular_caught_up"], columns["churn_catch_up_regular_p50"]), (30, 800))
+        self.assertEqual((columns["churn_stable_90pct_reached"], columns["churn_stable_100pct_p95"]), (80, None))
+        self.assertIsNone(columns["churn_churny_pairs"])
+        self.assertNotIn("churn_catch_up_regular_cdf", columns)
+
+    def test_a_run_without_churn_adds_no_columns(self) -> None:
+        self.assertEqual(sweep.churn_columns({"metrics": {"churn": None}}), {})
+        self.assertEqual(sweep.churn_columns({}), {})

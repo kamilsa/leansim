@@ -83,6 +83,13 @@ impl NodeState {
         }
     }
 
+    /// Counts `elapsed_ms` from `start` instead of from now: a host that rejoins
+    /// after a crash keeps the clock of its run.
+    pub fn with_start(mut self, start: Instant) -> Self {
+        self.start = start;
+        self
+    }
+
     pub fn with_validator_ids(mut self, validator_ids: Vec<u32>) -> Self {
         self.validator_ids = validator_ids;
         self

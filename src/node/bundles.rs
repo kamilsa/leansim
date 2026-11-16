@@ -287,6 +287,38 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
             .map_or(0, |state| state.order.len())
     }
 
+    /// Drops everything known about `peer`, whose last connection closed: it may
+    /// come back as a restarted host holding nothing. Its delayed requests are
+    /// dropped too, and it counts as a new push target when it returns.
+    pub fn forget_peer(&mut self, peer: P) {
+        for (&subnet, state) in &mut self.subnets {
+            state.peers.remove(&peer);
+            if let Some((_, targets)) = &mut state.last_tick {
+                targets.remove(&peer);
+            }
+            let pending_due = &mut self.pending_due;
+            state.pending.retain(|&col, &mut (advertiser, due)| {
+                let keep = advertiser != peer;
+                if !keep {
+                    pending_due.remove(&(due, subnet, col));
+                }
+                keep
+            });
+        }
+    }
+
+    /// Whether `targets`, the subnet's push targets now, include a peer that was
+    /// not one at the previous tick, with signatures held to push it.
+    pub fn has_new_targets(&self, subnet: u32, targets: &[P]) -> bool {
+        self.subnets.get(&subnet).is_some_and(|state| {
+            !state.order.is_empty()
+                && match &state.last_tick {
+                    Some((_, previous)) => targets.iter().any(|peer| !previous.contains(peer)),
+                    None => !targets.is_empty(),
+                }
+        })
+    }
+
     /// A signature was signed here (`from` = None) or arrived from `from`. None
     /// when the subnet is not tracked or the validator is not in it.
     pub fn deliver(
@@ -978,6 +1010,62 @@ mod tests {
             .tick(Instant::now(), |_| vec![1])
             .iter()
             .all(|p| !p.backlog));
+    }
+
+    #[test]
+    fn a_forgotten_peer_is_pushed_everything_again() {
+        let mut sync: BundleSync<u8> = BundleSync::new(settings(), [0]);
+        sync.deliver(0, 1, 0, None, Instant::now());
+        sync.deliver(0, 2, 0, Some(7), Instant::now());
+        sync.tick(Instant::now(), |_| vec![7]);
+        assert!(
+            !sync.has_new_targets(0, &[7]),
+            "a target of the previous tick"
+        );
+        assert!(sync.tick(Instant::now(), |_| vec![7]).is_empty());
+
+        // Peer 7 crashed and is back holding nothing: all of it is backlog.
+        sync.forget_peer(7);
+        assert!(sync.has_new_targets(0, &[7]));
+        let pushes = sync.tick(Instant::now(), |_| vec![7]);
+        assert_eq!(validators(&pushes, 7), vec![1, 2]);
+        assert!(pushes.iter().all(|push| push.backlog));
+        assert!(!sync.has_new_targets(0, &[7]));
+
+        // It is advertised everything again as a gossip peer too.
+        sync.forget_peer(7);
+        assert_eq!(sync.advertise(0, &[7])[0].available, vec![1, 2]);
+
+        let empty: BundleSync<u8> = BundleSync::new(settings(), [0]);
+        assert!(!empty.has_new_targets(0, &[7]), "nothing held to push");
+        assert!(!sync.has_new_targets(1, &[7]), "untracked subnet");
+    }
+
+    #[test]
+    fn a_forgotten_peer_is_not_sent_its_delayed_requests() {
+        let t0 = Instant::now();
+        let delayed = BundleSettings {
+            request_delay: Duration::from_millis(100),
+            ..settings()
+        };
+        let mut sync: BundleSync<u8> = BundleSync::new(delayed, [0]);
+        sync.on_metadata(7, 0, &[1, 2], &[], t0);
+        sync.on_metadata(8, 0, &[3], &[], t0);
+        sync.forget_peer(7);
+        let requests = sync.due_requests(t0 + Duration::from_millis(100));
+        assert_eq!(
+            requests,
+            vec![Request {
+                peer: 8,
+                subnet: 0,
+                validators: vec![3]
+            }]
+        );
+        assert_eq!(sync.next_request_due(), None);
+        // What peer 7 advertised can be requested from the next advertiser.
+        let reply = sync.on_metadata(8, 0, &[1], &[], t0 + Duration::from_millis(100));
+        assert!(reply.requests.is_empty(), "waits out the request delay");
+        assert!(sync.next_request_due().is_some());
     }
 
     #[test]

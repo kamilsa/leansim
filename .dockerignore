@@ -6,6 +6,7 @@ docker-compose.yml
 docker-output/
 README.md
 output/
+output-*/
 .venv/
 __pycache__/
 *.pyc

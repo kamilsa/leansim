@@ -16,6 +16,7 @@ from report import generate_html
 
 EVENT_NAMES = {
     "NodePeerId",
+    "Churn",
     "MeshDegree",
     "SigSent",
     "SigReceived",
@@ -45,6 +46,7 @@ TRANSPORT_FIELDS = (
     "requested_sigs_served", "backlog_sigs_sent", "metadata_sent", "metadata_bytes_sent", "available_ids_sent",
     "request_ids_sent", "pushes_avoided", "lazy_sigs_sent", "announce_ids_sent", "requests_already_sent",
     "requests_suppressed", "requests_avoided", "invalid_partials",
+    "restart_notices_sent", "restart_reconnects",
 )
 SIG_VIAS = ("gossip", "pull", "coded", "bundle", "backlog", "requested")
 MESH_SAMPLES = ("signing", "exit")
@@ -85,6 +87,14 @@ MAX_CDF_POINTS = 400
 BOX_PERCENTILES = (5, 25, 50, 75, 95)
 # Host classes in display order; "unknown" covers manifests without a supernode flag.
 NODE_CLASSES = ("supernode", "regular", "unknown")
+# Classes split by churn: delivery charts show a class's churny hosts apart from its stable ones.
+NODE_GROUPS = ("supernode", "supernode_churny", "regular", "regular_churny", "unknown")
+# Host classes with churn settings of their own (<class>_churn_fraction and so on).
+CHURN_CLASSES = ("supernode", "regular")
+# How long a peer keeps its connection to a crashed host: libp2p-quic's max_idle_timeout.
+QUIC_IDLE_TIMEOUT_MS = 10_000
+# Points per line of the hosts-online chart.
+MAX_AVAILABILITY_POINTS = 600
 
 
 def frequency_percentiles(counts, percents=BOX_PERCENTILES):
@@ -137,6 +147,12 @@ def node_class(host):
     return "supernode" if host["supernode"] else "regular"
 
 
+def node_group(host):
+    """node_class, with "_churny" appended for a host the manifest marks as churny."""
+    kind = node_class(host)
+    return kind + "_churny" if kind != "unknown" and host.get("churny") else kind
+
+
 def proof_label(layer, final_layer):
     if layer == 0:
         return "Subnet proofs"
@@ -146,14 +162,14 @@ def proof_label(layer, final_layer):
 
 
 def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
-    """Box-plot rows: per message and host class, the spread of the times
-    (ms after t0) at which hosts first held it. Signatures count once per
-    (receiving host, validator); proofs once per (host, proof), whether the
-    host built the proof or fetched it."""
+    """Box-plot rows: per message and host class (churny hosts apart), the spread
+    of the times (ms after t0) at which hosts first held it. Signatures count
+    once per (receiving host, validator); proofs once per (host, proof), whether
+    the host built the proof or fetched it."""
     rows = []
 
     def add(message, counts_by_class):
-        for kind in NODE_CLASSES:
+        for kind in NODE_GROUPS:
             stats = frequency_percentiles(counts_by_class.get(kind, {}))
             if stats:
                 rows.append({"message": message, "class": kind, **stats})
@@ -163,7 +179,7 @@ def arrival_rows(signature_counts, proof_held, final_layer, t0, hosts):
         counts = defaultdict(Counter)
         for held in proof_held[layer].values():
             for node_id, time_ms in held.items():
-                counts[node_class(hosts.get(node_id))][time_ms - t0] += 1
+                counts[node_group(hosts.get(node_id))][time_ms - t0] += 1
         add(proof_label(layer, final_layer), counts)
     return rows
 
@@ -207,10 +223,11 @@ def subnet_host_summary(hosts):
 
 def subnet_proof_rows(local_proofs, t0, hosts):
     """Per subnet, when each of its aggregators finished a subnet proof (ms
-    after t0): min/p25/median/p75/max, and every proof as [ms, node, class]."""
+    after t0): min/p25/median/p75/max, and every proof as [ms, node, class],
+    the class with "_churny" for a churny host."""
     by_subnet = defaultdict(list)
     for node_id, subnet_id, time_ms in local_proofs:
-        by_subnet[subnet_id].append([time_ms - t0, node_id, node_class(hosts.get(node_id))])
+        by_subnet[subnet_id].append([time_ms - t0, node_id, node_group(hosts.get(node_id))])
     rows = []
     for subnet_id, proofs in sorted(by_subnet.items()):
         proofs.sort(key=lambda proof: (proof[0], -1 if proof[1] is None else proof[1]))
@@ -343,6 +360,8 @@ CONFIG_KEYS = (
     "gossipsub_flood_publish", "gossipsub_gossip", "gossipsub_idontwant", "gossipsub_idontwant_threshold_bytes",
     "signature_sync", "sync_interval_ms", "sync_grace_ms", "sync_pull_batch",
     "sync_coded_degree", "sync_coded_redundancy", "sync_coded_per_tick",
+    "churn_tick_ms", "regular_churn_fraction", "regular_churn_leave_probability", "regular_churn_rejoin_probability",
+    "supernode_churn_fraction", "supernode_churn_leave_probability", "supernode_churn_rejoin_probability",
 )
 
 
@@ -497,7 +516,15 @@ def build_snapshot(output_dir):
     # Per delivery path: unique and duplicate receptions, and the bytes they carried.
     via_counts = {via: {"unique": 0, "duplicate": 0, "bytes": 0} for via in SIG_VIAS}
     transport = {field: 0 for field in TRANSPORT_FIELDS}
-    transport_hosts = 0
+    transport_nodes = set()
+    # Churn: each host's (ts_ms, online) events in log order, the hosts that have
+    # crashed so far, and the signatures hosts got again after losing them in a crash.
+    churn_events = defaultdict(list)
+    crashed = set()
+    relearned = defaultdict(list)
+    relearned_via = {via: 0 for via in SIG_VIAS}
+    proofs_seen = set()
+    repeated_proofs = 0
     # Sample ("signing", "exit") -> (node, subnet) -> mesh peers.
     mesh_degrees = defaultdict(dict)
     parsed_events = 0
@@ -551,6 +578,13 @@ def build_snapshot(output_dir):
                 peer_id = event.get("peer_id")
                 if node_id is not None and isinstance(peer_id, str) and peer_id:
                     peer_ids[peer_id] = node_id
+            elif name == "Churn":
+                node_id = integer(event.get("node_id"))
+                timestamp = number(event.get("ts_ms"))
+                if node_id is not None and timestamp is not None and isinstance(event.get("online"), bool):
+                    churn_events[node_id].append((timestamp, event["online"]))
+                    if not event["online"] and timestamp > 0:
+                        crashed.add(node_id)
             elif name == "MeshDegree":
                 node_id = integer(event.get("node_id"))
                 subnet_id = integer(event.get("subnet_id"))
@@ -574,17 +608,24 @@ def build_snapshot(output_dir):
                 total_sig_received += 1
                 duplicate = event.get("duplicate") is True
                 via = event.get("via") if event.get("via") in SIG_VIAS else "gossip"
-                via_counts[via]["duplicate" if duplicate else "unique"] += 1
                 if byte_size is not None and byte_size >= 0:
                     via_counts[via]["bytes"] += byte_size
                 if duplicate:
+                    via_counts[via]["duplicate"] += 1
                     duplicate_sigs += 1
                     continue
-                unique_receive_events += 1
                 timestamp = number(event.get("ts_ms"))
                 node_id = integer(event.get("node_id"))
                 subnet_id = integer(event.get("subnet_id"))
                 key = validator_key(event, "from_id")
+                # A host that crashed lost every signature: one it held before and gets
+                # again is neither a first copy nor a duplicate.
+                if node_id in crashed and timestamp is not None and key in received_by_node_subnet.get((node_id, subnet_id), ()):
+                    relearned_via[via] += 1
+                    relearned[(node_id, subnet_id)].append(timestamp)
+                    continue
+                via_counts[via]["unique"] += 1
+                unique_receive_events += 1
                 if timestamp is not None and key is not None:
                     previous = validator_arrivals.get(key)
                     if previous is None or timestamp < previous:
@@ -599,6 +640,11 @@ def build_snapshot(output_dir):
                 node_id = integer(event.get("node_id"))
                 subnet_id = integer(event.get("subnet_id"))
                 if latency is not None and subnet_id is not None:
+                    # An aggregator back from a crash can prove its subnet again; the first proof counts.
+                    if node_id is not None and (node_id, subnet_id) in proofs_seen:
+                        repeated_proofs += 1
+                        continue
+                    proofs_seen.add((node_id, subnet_id))
                     local_latencies[subnet_id].append(latency)
                     local_proofs.append((node_id, subnet_id, latency))
                     hold(0, subnet_id, node_id, latency)
@@ -652,7 +698,8 @@ def build_snapshot(output_dir):
                     "outbound_msgs": integer(event.get("outbound_msgs")) or 0,
                 }
             elif name == "TransportStats":
-                transport_hosts += 1
+                # A churny host logs its stats once per session.
+                transport_nodes.add(event.get("node_id", ("anonymous", len(transport_nodes))))
                 for field in TRANSPORT_FIELDS:
                     value = integer(event.get(field))
                     if value is not None and value >= 0:
@@ -694,7 +741,7 @@ def build_snapshot(output_dir):
             # An aggregating host holds its own validators' signatures without gossip.
             for own_subnet, key, own_time in sent_by_node.get(node_id, ()):
                 if own_subnet == subnet_id:
-                    received.setdefault(key, own_time)
+                    received[key] = min(received.get(key, own_time), own_time)
             expected = len(sent_sources_by_subnet.get(subnet_id, set()))
             if not expected:
                 expected = len(received)
@@ -723,7 +770,7 @@ def build_snapshot(output_dir):
                 held = dict(received_by_node_subnet.get((node_id, subnet_id), {}))
                 for own_subnet, key, own_time in own_signatures:
                     if own_subnet == subnet_id:
-                        held.setdefault(key, own_time)
+                        held[key] = min(held.get(key, own_time), own_time)
                 needed = math.ceil(len(sent_sources_by_subnet[subnet_id]) * threshold_fraction - 1e-9)
                 if needed and len(held) >= needed:
                     reached.append(sorted(held.values())[needed - 1] - slot_start)
@@ -754,15 +801,19 @@ def build_snapshot(output_dir):
 
     manifest = read_json(output_dir / "run-manifest.json")
     hosts = manifest_hosts(manifest)
+    for node_id in churn_events:
+        if node_id in hosts:
+            hosts[node_id]["churny"] = True
+    transport_hosts = len(transport_nodes)
     # Every chart in summary.html measures time from the first signature sent.
     t0 = min(sent_times) if sent_times else 0
     signature_counts = defaultdict(Counter)
     for (node_id, _), seen in received_by_node_subnet.items():
-        counter = signature_counts[node_class(hosts.get(node_id))]
+        counter = signature_counts[node_group(hosts.get(node_id))]
         for time_ms in seen.values():
             counter[time_ms - t0] += 1
     signature_cdf = {"first_seen": frequency_cdf(Counter(time_ms - t0 for time_ms in arrival_times))}
-    for kind in NODE_CLASSES:
+    for kind in NODE_GROUPS:
         if signature_counts.get(kind):
             signature_cdf[kind] = frequency_cdf(signature_counts[kind])
     # Per subnet: first sighting of each of its validators anywhere, and every
@@ -770,7 +821,7 @@ def build_snapshot(output_dir):
     subnet_counts = defaultdict(lambda: defaultdict(Counter))
     subnet_first = defaultdict(dict)
     for (node_id, subnet_id), seen in received_by_node_subnet.items():
-        counter = subnet_counts[subnet_id][node_class(hosts.get(node_id))]
+        counter = subnet_counts[subnet_id][node_group(hosts.get(node_id))]
         firsts = subnet_first[subnet_id]
         for key, time_ms in seen.items():
             counter[time_ms - t0] += 1
@@ -780,7 +831,7 @@ def build_snapshot(output_dir):
     signature_cdf_by_subnet = {}
     for subnet_id, firsts in subnet_first.items():
         lines = {"first_seen": frequency_cdf(Counter(time_ms - t0 for time_ms in firsts.values()))}
-        for kind in NODE_CLASSES:
+        for kind in NODE_GROUPS:
             if subnet_counts[subnet_id].get(kind):
                 lines[kind] = frequency_cdf(subnet_counts[subnet_id][kind])
         signature_cdf_by_subnet[subnet_id] = lines
@@ -792,6 +843,33 @@ def build_snapshot(output_dir):
     top_layer = max(plan_layers, default=final_layer)
     for node_id, logged in traffic.items():
         logged["host"] = host_card(hosts.get(int(node_id)), top_layer)
+    subnet_hosts = subnet_host_summary(hosts)
+    churn = churn_summary(
+        hosts, experiment, churn_events, sent_times, sent_sources_by_subnet, sent_by_node,
+        received_by_node_subnet, relearned, threshold_fraction, t0,
+    )
+    if churn:
+        churn["counters"] = {
+            "relearned": relearned_via,
+            "relearned_total": sum(relearned_via.values()),
+            "repeated_proofs": repeated_proofs,
+            "restart_notices_sent": transport["restart_notices_sent"],
+            "restart_reconnects": transport["restart_reconnects"],
+            "sync_failures": transport["sync_failures"],
+            "failed_proof_pulls": proof_traffic["failed_pulls"],
+        }
+        # Pages about one host or one subnet get what they show of the churn.
+        offline = churn.pop("offline_ms")
+        for node_id, logged in traffic.items():
+            if int(node_id) in offline:
+                logged["offline_ms"] = offline[int(node_id)]
+                logged["host"]["churn"] = {"crashes": crashes_in(offline[int(node_id)])}
+        by_subnet = churn.pop("subnets")
+        for subnet_id, info in subnet_hosts.items():
+            info["churn"] = by_subnet.get(subnet_id, {"churny": 0, "online_at_signing": None, "missed_signatures": None})
+            for aggregator in info["aggregators"]:
+                if aggregator["node"] in offline:
+                    aggregator["crashes"] = crashes_in(offline[aggregator["node"]])
 
     return {
         "schema_version": 1,
@@ -827,11 +905,12 @@ def build_snapshot(output_dir):
             "signature_cdf": signature_cdf,
             "arrivals": arrival_rows(signature_counts, proof_held, final_layer, t0, hosts),
             "subnet_proofs": subnet_proof_rows(local_proofs, t0, hosts),
-            "subnet_hosts": subnet_host_summary(hosts),
+            "subnet_hosts": subnet_hosts,
             "signature_cdf_by_subnet": signature_cdf_by_subnet,
             "subnet_completion_ms": subnet_completion(hosts, received_by_node_subnet, sent_by_node, sent_sources_by_subnet, t0),
             "population": host_population(hosts, experiment),
             "aggregators": aggregator_population(hosts),
+            "churn": churn,
         },
         "cdf": cdf,
         "node_stats": nodes,
@@ -945,7 +1024,8 @@ def subnet_completion(hosts, received_by_node_subnet, sent_by_node, signers_by_s
         held = dict(received_by_node_subnet.get((node_id, subnet), {}))
         for own_subnet, key, own_time in sent_by_node.get(node_id, ()):
             if own_subnet == subnet:
-                held.setdefault(key, own_time)
+                # A host back from a crash can be sent its own signature; it held it from when it signed.
+                held[key] = min(held.get(key, own_time), own_time)
         times = sorted(held.values())
         signers = len(signers_by_subnet[subnet])
         for fraction in fractions:
@@ -969,6 +1049,214 @@ def subnet_completion(hosts, received_by_node_subnet, sent_by_node, signers_by_s
             "max": at(values, 100),
         }
     return summary
+
+
+def offline_windows(events, run_ms):
+    """A host's [from_ms, until_ms) offline windows, from its Churn events as
+    (ts_ms, online) in log order. A host still offline when the log ends stays
+    so until the end of the run."""
+    windows = []
+    since = None
+    for timestamp, online in events:
+        if online and since is not None:
+            windows.append([since, timestamp])
+            since = None
+        elif not online and since is None:
+            since = timestamp
+    if since is not None:
+        windows.append([since, max(since, run_ms or since)])
+    return windows
+
+
+def crashes_in(windows):
+    """Times a host went offline during the run; starting it offline is not one."""
+    return sum(1 for start, _ in windows if start > 0)
+
+
+def is_offline(windows, time_ms):
+    return any(start <= time_ms < end for start, end in windows)
+
+
+def availability_series(windows_by_host, hosts, run_ms, step_ms, t0):
+    """[[ms after t0, percent of `hosts` online], ...] every `step_ms` of the run."""
+    changes = Counter()
+    for windows in windows_by_host:
+        for start, end in windows:
+            changes[start] += 1
+            changes[end] -= 1
+    times = sorted(changes)
+    points = []
+    offline = 0
+    index = 0
+    for at in range(0, int(run_ms), step_ms):
+        while index < len(times) and times[index] <= at:
+            offline += changes[times[index]]
+            index += 1
+        points.append([at - t0, round((hosts - offline) * 100 / hosts, 3)])
+    return points
+
+
+def catch_up_summary(times, pairs):
+    """How long rejoined hosts took to hold a subnet's signatures again, over
+    `pairs` (rejoin, subnet) pairs of which `times` (ms after the rejoin) got
+    there. Percentiles and the CDF count the others as never."""
+    times = sorted(times)
+
+    def at(percent):
+        index = math.ceil(pairs * percent / 100) - 1
+        return times[index] if 0 <= index < len(times) else None
+
+    cdf = [[time_ms, round((index + 1) * 100 / pairs, 4)] for index, time_ms in enumerate(times)]
+    if len(cdf) > MAX_CDF_POINTS:
+        step = (len(cdf) - 1) / (MAX_CDF_POINTS - 1)
+        cdf = [cdf[round(index * step)] for index in range(MAX_CDF_POINTS)]
+    return {"rejoins": pairs, "caught_up": len(times), "p50": at(50), "p95": at(95), "cdf": cdf}
+
+
+def churn_summary(hosts, experiment, churn_events, sent_times, signers_by_subnet, sent_by_node,
+                  received_by_node_subnet, relearned, threshold_fraction, t0):
+    """What churn did to the run, or None for a run without churny hosts.
+
+    Offline windows come from the hosts' Churn events (the manifest's drawn
+    windows for a churny host that logged none). Reports each class's settings
+    and what they imply, its hosts online at the median signing time, crashes,
+    rejoins and signatures missed (validators that never signed), the share of
+    hosts online over the run, how long a host that rejoined after the last
+    signature was sent took to hold the local threshold of each of its subnets
+    again, and subnet completion for stable and churny hosts apart.
+    """
+    churny = {node_id for node_id, host in hosts.items() if host.get("churny")}
+    if not churny:
+        return None
+    run_ms = (number(experiment.get("run_timeout_secs")) or 0) * 1000
+    if not run_ms:
+        run_ms = max((timestamp for events in churn_events.values() for timestamp, _ in events), default=0)
+    offline = {
+        node_id: offline_windows(churn_events[node_id], run_ms) if node_id in churn_events
+        else [list(window) for window in hosts[node_id].get("offline_windows_ms") or []]
+        for node_id in sorted(churny)
+    }
+    tick_ms = integer(experiment.get("churn_tick_ms")) or 100
+    signing_ms = median(sent_times)
+    sent_validators = {int(key.split(":")[1]) for keys in signers_by_subnet.values() for key in keys if key.startswith("validator:")}
+    committee = None
+    if integer(experiment.get("validator_count")) and integer(experiment.get("subnet_count")):
+        committee = max(1, experiment["validator_count"] // experiment["subnet_count"])
+
+    def online_at_signing(node_ids):
+        if signing_ms is None:
+            return None
+        return sum(1 for node_id in node_ids if not is_offline(offline.get(node_id, ()), signing_ms))
+
+    def missed(node_ids):
+        return sum(1 for node_id in node_ids for validator in hosts[node_id].get("validator_ids") or [] if validator not in sent_validators)
+
+    settings = {}
+    classes = []
+    for kind in CHURN_CLASSES:
+        members = [node_id for node_id, host in hosts.items() if node_class(host) == kind]
+        leave = number(experiment.get(f"{kind}_churn_leave_probability"))
+        rejoin = number(experiment.get(f"{kind}_churn_rejoin_probability"))
+        fraction = number(experiment.get(f"{kind}_churn_fraction"))
+        if fraction is not None:
+            settings[kind] = {
+                "fraction": fraction, "leave_probability": leave, "rejoin_probability": rejoin,
+                "mean_session_ms": tick_ms / leave if leave else None,
+                "mean_gap_ms": tick_ms / rejoin if rejoin else None,
+                "availability": rejoin / (leave + rejoin) if leave is not None and rejoin else None,
+            }
+        if not members:
+            continue
+        own = [node_id for node_id in members if node_id in churny]
+        classes.append({
+            "class": kind,
+            "hosts": len(members),
+            "churny": len(own),
+            "online_at_signing": online_at_signing(members),
+            "crashes": sum(crashes_in(offline[node_id]) for node_id in own),
+            "rejoins": sum(1 for node_id in own for _, end in offline[node_id] if end < run_ms),
+            "validators": sum(len(hosts[node_id].get("validator_ids") or []) for node_id in members),
+            "churny_validators": sum(len(hosts[node_id].get("validator_ids") or []) for node_id in own),
+            "missed_signatures": missed(members),
+        })
+
+    step_ms = max(tick_ms, math.ceil(run_ms / MAX_AVAILABILITY_POINTS / tick_ms) * tick_ms) if run_ms else tick_ms
+    availability = {"all": availability_series(offline.values(), len(hosts), run_ms, step_ms, t0)}
+    for row in classes:
+        if row["churny"]:
+            windows = [offline[node_id] for node_id in churny if node_class(hosts[node_id]) == row["class"]]
+            availability[row["class"]] = availability_series(windows, row["hosts"], run_ms, step_ms, t0)
+
+    # Catch-up: every stretch online that began after the last signature was sent.
+    fraction = threshold_fraction or 0.9
+    signed_by = max(sent_times, default=None)
+    caught = defaultdict(list)
+    pairs = Counter()
+    for node_id in sorted(churny):
+        host = hosts[node_id]
+        subnets = sorted(set(host.get("subscribed_subnets") or host.get("signing_subnets") or ()) | set(host.get("aggregated_subnets") or ()))
+        windows = offline[node_id]
+        for index, (_, joined) in enumerate(windows):
+            if signed_by is None or joined < signed_by or joined >= run_ms:
+                continue
+            until = windows[index + 1][0] if index + 1 < len(windows) else run_ms
+            for subnet in subnets:
+                signers = len(signers_by_subnet.get(subnet, ()))
+                needed = math.ceil(signers * fraction - 1e-9)
+                if not needed:
+                    continue
+                held = sorted(
+                    time_ms
+                    for time_ms in list(received_by_node_subnet.get((node_id, subnet), {}).values()) + relearned.get((node_id, subnet), [])
+                    if joined <= time_ms < until
+                )
+                kind = node_class(host)
+                pairs[kind] += 1
+                if len(held) >= needed:
+                    caught[kind].append(held[needed - 1] - joined)
+    catch_up = {kind: catch_up_summary(caught[kind], pairs[kind]) for kind in NODE_CLASSES if pairs[kind]}
+
+    # Per subnet: its churny subscribers, those online at signing, and the signatures its committee missed.
+    subnets = {}
+    missed_by_subnet = Counter()
+    if committee:
+        last = integer(experiment.get("subnet_count")) - 1
+        for host in hosts.values():
+            for validator in host.get("validator_ids") or []:
+                if validator not in sent_validators:
+                    missed_by_subnet[min(validator // committee, last)] += 1
+    subscribers = defaultdict(list)
+    for node_id, host in hosts.items():
+        for subnet in host.get("subscribed_subnets") or []:
+            subscribers[subnet].append(node_id)
+    for subnet, node_ids in subscribers.items():
+        subnets[subnet] = {
+            "churny": sum(1 for node_id in node_ids if node_id in churny),
+            "online_at_signing": online_at_signing(node_ids),
+            "missed_signatures": missed_by_subnet[subnet] if committee else None,
+        }
+
+    def completion(node_ids):
+        return subnet_completion({node_id: hosts[node_id] for node_id in node_ids}, received_by_node_subnet,
+                                 sent_by_node, signers_by_subnet, t0)
+
+    return {
+        "tick_ms": tick_ms,
+        "idle_timeout_ms": QUIC_IDLE_TIMEOUT_MS,
+        "settings": settings,
+        "hosts": len(hosts),
+        "churny_hosts": len(churny),
+        "online_at_signing": online_at_signing(hosts),
+        "signing_ms": signing_ms,
+        "missed_signatures": missed(hosts),
+        "classes": classes,
+        "availability": availability,
+        "catch_up_fraction": fraction,
+        "catch_up": catch_up,
+        "completion": {"stable": completion(sorted(set(hosts) - churny)), "churny": completion(sorted(churny))},
+        "offline_ms": offline,
+        "subnets": subnets,
+    }
 
 
 def snapshot_identity(snapshot):
@@ -1096,6 +1384,49 @@ def self_test():
         assert wire["total"] == 87 + 72 + 6 + 7
         assert signature_transport["counters"]["pushes_avoided"] == 3
         assert signature_transport["hosts"] == 3
+
+        # Churn: host 1 crashes at 300 ms and is back at 500 ms with nothing. The
+        # signature it gets again is neither a first copy nor a duplicate, its
+        # second proof of the subnet is not counted, and its two sessions' stats
+        # are one host's. Host 2 starts offline and is back before signing.
+        churn_dir = root / "churn"
+        stdout = churn_dir / "shadow.data" / "hosts" / "host-1" / "stdout"
+        stdout.parent.mkdir(parents=True)
+        stdout.write_text("\n".join((
+            '{"event":"SigSent","node_id":0,"validator_id":0,"subnet_id":0,"seq":0,"ts_ms":100,"byte_size":10}',
+            '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":120,"byte_size":10}',
+            '{"event":"LocalProofGenerated","node_id":1,"subnet_id":0,"sig_count":1,"latency_ms":150}',
+            '{"event":"TransportStats","node_id":1}',
+            '{"event":"Churn","node_id":1,"online":false,"ts_ms":300}',
+            '{"event":"Churn","node_id":1,"online":true,"ts_ms":500}',
+            '{"event":"SigReceived","node_id":1,"from_id":0,"validator_id":0,"subnet_id":0,"duplicate":false,"ts_ms":560,"byte_size":10,"via":"pull"}',
+            '{"event":"LocalProofGenerated","node_id":1,"subnet_id":0,"sig_count":1,"latency_ms":600}',
+            '{"event":"TransportStats","node_id":1,"restart_notices_sent":1}',
+            '{"event":"Churn","node_id":2,"online":false,"ts_ms":0}',
+            '{"event":"Churn","node_id":2,"online":true,"ts_ms":50}',
+        )), encoding="utf-8")
+        (churn_dir / "run-manifest.json").write_text(json.dumps({
+            "experiment": {"local_threshold": 1.0, "run_timeout_secs": 1, "validator_count": 3, "subnet_count": 1,
+                           "regular_churn_fraction": 1.0, "regular_churn_leave_probability": 0.01,
+                           "regular_churn_rejoin_probability": 0.05},
+            "nodes": [
+                {"node_id": 0, "supernode": True, "validator_ids": [0], "subscribed_subnets": [0]},
+                {"node_id": 1, "supernode": False, "validator_ids": [1], "subscribed_subnets": [0], "aggregated_subnets": [0]},
+                {"node_id": 2, "supernode": False, "validator_ids": [2], "subscribed_subnets": [0]},
+            ],
+        }), encoding="utf-8")
+        churn_metrics = build_snapshot(churn_dir)["metrics"]
+        churn = churn_metrics["churn"]
+        assert churn_metrics["signature_transport"]["deliveries"]["pull"] == {"unique": 0, "duplicate": 0, "bytes": 10}
+        assert churn_metrics["signature_transport"]["hosts"] == 1
+        assert churn_metrics["unique_signature_events"] == 1
+        assert churn["counters"]["relearned"]["pull"] == 1 and churn["counters"]["repeated_proofs"] == 1
+        assert [proof[:2] for proof in churn_metrics["subnet_proofs"][0]["proofs"]] == [[50, 1]]
+        assert (churn["churny_hosts"], churn["online_at_signing"], churn["missed_signatures"]) == (2, 3, 2)
+        regular = churn["classes"][1]
+        assert (regular["class"], regular["crashes"], regular["rejoins"]) == ("regular", 1, 2)
+        assert churn["catch_up"]["regular"] == {"rejoins": 1, "caught_up": 1, "p50": 60, "p95": 60, "cdf": [[60, 100.0]]}
+        assert build_snapshot(transport_dir)["metrics"]["churn"] is None
 
         # Three hosts in a triangle mesh on one subnet, and host 9 publishing two
         # signatures into it from outside (fanout) to hosts 1 and 2. Each signature

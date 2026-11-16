@@ -43,8 +43,7 @@ enum Command {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -52,19 +51,152 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Node { config } => run_node(config).await,
+        Command::Node { config } => run_node(config),
     }
 }
 
-async fn run_node(config_path: PathBuf) -> Result<()> {
+/// What a host keeps across the sessions churn cuts its run into: its
+/// measurements, and whether its validators have had their turn to sign.
+struct Carry {
+    start: std::time::Instant,
+    /// How long after the warmup this host signs.
+    burst: Duration,
+    /// The host signed, or was offline when it should have.
+    signing_done: bool,
+    /// How far into the run the host's turn to sign came. A host that is online
+    /// at the end of the run stays that much longer, so every host has
+    /// `run_timeout_secs` after signing, as it has without churn.
+    signing_at: Duration,
+    sessions: u32,
+    meter: Option<TrafficMeter>,
+    bytes_sent: u64,
+    bytes_received: u64,
+    msgs_sent: u64,
+    msgs_received: u64,
+}
+
+/// One stretch online.
+struct Session {
+    until: tokio::time::Instant,
+    /// The host was offline when the run started or has been since.
+    late: bool,
+    /// The session lasts until the end of the run.
+    last: bool,
+}
+
+/// Runs the host for the length of the run: one session without churn, and
+/// with it one per stretch online. Each session has a runtime of its own, and
+/// going offline drops it with every socket and task of the session, so a crash
+/// sends nothing and leaves nothing behind.
+fn run_node(config_path: PathBuf) -> Result<()> {
     let content = std::fs::read_to_string(&config_path)?;
     let node_config: NodeConfig =
         toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid node config: {e}"))?;
-    node_config
-        .experiment
-        .validate()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let experiment = &node_config.experiment;
+    experiment.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let node_id = node_config.node_id;
+    let start = std::time::Instant::now();
+    let elapsed_ms = || start.elapsed().as_millis() as u64;
+    let sleep_until = |ms: u64| {
+        let at = start + Duration::from_millis(ms);
+        std::thread::sleep(at.saturating_duration_since(std::time::Instant::now()));
+    };
+    emit(&JsonlEvent::NodePeerId {
+        node_id,
+        peer_id: peer_id_for(node_id).to_base58(),
+    });
+
+    let mut carry = Carry {
+        start,
+        burst: leansim::node::validator::burst_delay(experiment),
+        signing_done: false,
+        signing_at: Duration::ZERO,
+        sessions: 0,
+        // Traffic logs only on the hosts the launcher flags, so the rest stay untouched.
+        meter: node_config
+            .traffic_log
+            .then(|| TrafficMeter::new(experiment.traffic_log_bucket_ms)),
+        bytes_sent: 0,
+        bytes_received: 0,
+        msgs_sent: 0,
+        msgs_received: 0,
+    };
+    let run_ms = experiment.run_timeout_secs * 1000;
+    let windows = node_config.online_windows(run_ms);
+    if !windows.first().is_some_and(|&(from_ms, _)| from_ms == 0) {
+        emit(&JsonlEvent::Churn {
+            node_id,
+            online: false,
+            ts_ms: 0,
+        });
+    }
+    for &(from_ms, until_ms) in &windows {
+        sleep_until(from_ms);
+        if from_ms > 0 {
+            emit(&JsonlEvent::Churn {
+                node_id,
+                online: true,
+                ts_ms: elapsed_ms(),
+            });
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let session = Session {
+            until: tokio::time::Instant::from_std(start + Duration::from_millis(until_ms)),
+            late: from_ms > 0,
+            last: until_ms >= run_ms,
+        };
+        runtime.block_on(run_session(&node_config, &mut carry, session))?;
+        drop(runtime);
+        if until_ms < run_ms {
+            emit(&JsonlEvent::Churn {
+                node_id,
+                online: false,
+                ts_ms: elapsed_ms(),
+            });
+        }
+    }
+    sleep_until(run_ms + carry.signing_at.as_millis() as u64);
+
+    if let Some(meter) = carry.meter.as_mut() {
+        for bucket in meter.finish() {
+            emit_bucket(node_id, bucket);
+        }
+        for (peer, totals) in meter.peers() {
+            emit(&JsonlEvent::TrafficPeer {
+                node_id,
+                peer: peer.clone(),
+                inbound_bytes: totals.inbound_bytes,
+                outbound_bytes: totals.outbound_bytes,
+                inbound_msgs: totals.inbound_msgs,
+                outbound_msgs: totals.outbound_msgs,
+            });
+        }
+    }
+    emit(&JsonlEvent::NodeStats {
+        node_id,
+        bytes_sent: carry.bytes_sent,
+        bytes_received: carry.bytes_received,
+        msgs_sent: carry.msgs_sent,
+        msgs_received: carry.msgs_received,
+    });
+
+    let writes = zero_copy_write::stats();
+    eprintln!(
+        "QUIC send buffers: {} bytes shared with gossipsub, {} bytes copied",
+        writes.shared_bytes, writes.copied_bytes
+    );
+
+    tracing::info!("node {node_id} exiting");
+    Ok(())
+}
+
+/// One session: the host from joining the network, with no state but its
+/// config, until it crashes or the run ends.
+async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Session) -> Result<()> {
+    let joined = std::time::SystemTime::now();
     let state = Arc::new(
         NodeState::new(
             node_config.node_id,
@@ -72,6 +204,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             node_config.subnet_id,
             node_config.experiment.clone(),
         )
+        .with_start(carry.start)
         .with_validator_ids(node_config.signing_validator_ids())
         .with_subscribed_subnets(node_config.subscribed_subnets.clone())
         .with_aggregated_subnets(node_config.aggregated_subnets()),
@@ -114,11 +247,6 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         &node_config.experiment.run_id,
     )?;
 
-    emit(&JsonlEvent::NodePeerId {
-        node_id: state.node_id,
-        peer_id: swarm.local_peer_id().to_base58(),
-    });
-
     // Proof duties from the launcher's plan. The hosts this one announces to are
     // dialed with the seeds, so their connections are up before the first proof.
     let plan = node_config
@@ -140,6 +268,15 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             dial_addrs.push(addr.clone());
         }
     }
+    // A host that joins after the run started was not there for its peers'
+    // dials, so it dials its whole peer table. One back from a crash also tells
+    // every peer, which may still hold a connection to its previous session.
+    if session.late {
+        dial_addrs.extend(node_config.inbound_peer_addrs.iter().cloned());
+    }
+    if carry.sessions > 0 {
+        explicit_peers.announce_restart(joined);
+    }
     let experiment = &node_config.experiment;
     let mut exchange = ProofExchange::new(
         duties,
@@ -153,6 +290,9 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         subscribed_subnets.union(&state.aggregated_subnets).copied(),
         u64::from(state.node_id),
     );
+    if session.late {
+        sync = sync.advertising_empty();
+    }
     let mut sync_io = SyncIo::new(experiment.signature_payload_bytes);
     let sync_interval = Duration::from_millis(experiment.sync_interval_ms.max(1));
     let mut bundles: BundleSync<libp2p::PeerId> = BundleSync::new(
@@ -174,20 +314,18 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         );
     let bundle_tick = Duration::from_millis(experiment.bundle_tick_ms);
     // Each host's tick clock has its own phase, as real hosts' would.
+    let run_start = tokio::time::Instant::from_std(carry.start);
     let bundle_anchor = {
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(u64::from(state.node_id));
         let offset_ms = rng.gen_range(0..experiment.bundle_tick_ms.max(1));
-        tokio::time::Instant::now() + Duration::from_millis(offset_ms)
+        run_start + Duration::from_millis(offset_ms)
     };
     // The next tick with signatures to push; None while there are none.
     let mut next_bundle_tick: Option<tokio::time::Instant> = None;
     // Signatures received and bytes they took, for NodeStats in bundled mode.
     let (mut bundle_recv_bytes, mut bundle_recv_msgs) = (0u64, 0u64);
-    // Traffic logs only on the hosts the launcher flags, so the rest stay untouched.
-    let mut meter = node_config
-        .traffic_log
-        .then(|| TrafficMeter::new(experiment.traffic_log_bucket_ms));
+    let mut meter = carry.meter.take();
 
     let selected_aggregator_topics: Vec<_> = signing_subnets
         .iter()
@@ -198,39 +336,97 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             ))
         })
         .collect();
-    leansim::network::swarm::dial_seeds(
-        &mut swarm,
-        &dial_addrs,
-        &mut explicit_peers,
-        &selected_aggregator_topics,
-        node_config.experiment.mesh_warmup_ms,
-    )
-    .await?;
+    let dialed = leansim::network::swarm::dial_peers(&mut swarm, &dial_addrs, &explicit_peers)?;
+    let warmup = Duration::from_millis(leansim::network::swarm::warmup_ms(
+        dialed,
+        experiment.mesh_warmup_ms,
+    ));
+    // The warmup is a stretch of the run, not of the session: a host that joins
+    // during it warms up for what is left, and one that joins later not at all.
+    let warmup_end = run_start + warmup;
+    let warmed = tokio::time::Instant::now() < warmup_end;
+    if warmed {
+        leansim::network::swarm::poll_warmup(
+            &mut swarm,
+            &mut explicit_peers,
+            warmup_end.min(session.until),
+        )
+        .await;
+        if tokio::time::Instant::now() < session.until {
+            leansim::network::swarm::await_selected_aggregators(
+                &mut swarm,
+                &mut explicit_peers,
+                &selected_aggregator_topics,
+                warmup,
+            )
+            .await?;
+            tracing::info!("mesh warmup complete");
+        }
+    }
 
-    if !state.validator_ids.is_empty() {
-        leansim::node::validator::validator_init(&state, &mut swarm, !bundled).await?;
-        let now = tokio::time::Instant::now();
-        for &validator_id in &state.validator_ids {
-            let subnet = state.config.subnet_for_validator(validator_id);
-            sync.deliver(subnet, validator_id, state.node_id, now);
-            if bundled {
-                bundles.deliver(subnet, u64::from(validator_id), state.node_id, None, now);
+    // The host's turn to sign comes `burst` after the warmup, or at its end for
+    // a host without validators. A host that is offline then misses the slot.
+    let now = tokio::time::Instant::now();
+    if !carry.signing_done && now < session.until {
+        let signs = !state.validator_ids.is_empty();
+        let after_warmup = if warmed { now } else { warmup_end };
+        let sign_at = if signs {
+            after_warmup + carry.burst
+        } else {
+            after_warmup
+        };
+        if now > sign_at {
+            carry.signing_done = true;
+            carry.signing_at = sign_at.saturating_duration_since(run_start);
+        } else {
+            if signs {
+                tokio::time::sleep_until(sign_at.min(session.until)).await;
+            }
+            if tokio::time::Instant::now() < session.until {
+                carry.signing_done = true;
+                if signs {
+                    leansim::node::validator::publish_signatures(&state, &mut swarm, !bundled)?;
+                    let now = tokio::time::Instant::now();
+                    for &validator_id in &state.validator_ids {
+                        let subnet = state.config.subnet_for_validator(validator_id);
+                        sync.deliver(subnet, validator_id, state.node_id, now);
+                        if bundled {
+                            bundles.deliver(
+                                subnet,
+                                u64::from(validator_id),
+                                state.node_id,
+                                None,
+                                now,
+                            );
+                        }
+                    }
+                    // Own signatures go out at the next tick, like any other.
+                    if bundled {
+                        next_bundle_tick = Some(next_tick(bundle_anchor, bundle_tick, now));
+                    }
+                }
+                if node_config.role == NodeRole::LocalAggregator {
+                    leansim::node::local_aggregator::record_own_signatures(&state);
+                }
+                emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Signing);
+                carry.signing_at = tokio::time::Instant::now().saturating_duration_since(run_start);
             }
         }
-        // Own signatures go out at the next tick, like any other.
-        if bundled {
-            next_bundle_tick = Some(next_tick(bundle_anchor, bundle_tick, now));
-        }
     }
-    if node_config.role == NodeRole::LocalAggregator {
-        leansim::node::local_aggregator::record_own_signatures(&state);
-    }
-    emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Signing);
 
-    let timeout = Duration::from_secs(node_config.experiment.run_timeout_secs);
-    let end = tokio::time::Instant::now() + timeout;
+    let end = if session.last {
+        session.until + carry.signing_at
+    } else {
+        session.until
+    };
     let mut next_sync =
         (sync.mode() != SignatureSync::None).then(|| tokio::time::Instant::now() + sync_interval);
+    // With churn a peer can become a push target long after the signatures have
+    // stopped moving, and bundles only tick when there is something new: so
+    // every heartbeat the host checks for new targets and ticks for them.
+    let heartbeat = Duration::from_millis(experiment.gossipsub_heartbeat_interval_ms.max(1));
+    let mut next_target_check =
+        (bundled && experiment.churn_enabled()).then(|| tokio::time::Instant::now() + heartbeat);
 
     loop {
         if tokio::time::Instant::now() >= end {
@@ -242,6 +438,7 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
             exchange.next_due(),
             next_sync,
             next_bundle_tick,
+            next_target_check,
             bundles.next_request_due(),
         ]
         .into_iter()
@@ -352,6 +549,10 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 request_id,
                 state.elapsed_ms(),
             ),
+            Ok(Some(NetEvent::PeerDisconnected { peer })) => {
+                sync.forget_peer(peer);
+                bundles.forget_peer(peer);
+            }
             Ok(None) => break,
             // A proof came due or the run ended; handled below / at the loop top.
             Err(_elapsed) => {}
@@ -366,6 +567,28 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
                 now,
                 state.elapsed_ms(),
             );
+        }
+        if let Some(due) = next_target_check.filter(|due| *due <= now) {
+            let run_id = &state.config.run_id;
+            let new_targets = bundle_subnets.iter().any(|&subnet| {
+                if bundles.held_count(subnet) == 0 {
+                    return false;
+                }
+                let topic = libp2p::gossipsub::IdentTopic::new(
+                    leansim::network::topics::subnet_topic(run_id, subnet),
+                );
+                let targets = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .partial_targets(&topic.hash());
+                bundles.has_new_targets(subnet, &targets)
+            });
+            if new_targets {
+                let tick_at = next_tick(bundle_anchor, bundle_tick, now);
+                next_bundle_tick =
+                    Some(next_bundle_tick.map_or(tick_at, |planned| planned.min(tick_at)));
+            }
+            next_target_check = Some((due + heartbeat).max(now));
         }
         if next_bundle_tick.is_some_and(|due| due <= now) {
             bundle_io.flush(
@@ -411,62 +634,37 @@ async fn run_node(config_path: PathBuf) -> Result<()> {
         }
         if let Some(meter) = meter.as_mut() {
             for bucket in meter.drain_due(state.elapsed_ms()) {
-                emit_bucket(&state, bucket);
+                emit_bucket(state.node_id, bucket);
             }
         }
     }
 
-    if let Some(meter) = meter.as_mut() {
-        for bucket in meter.finish() {
-            emit_bucket(&state, bucket);
-        }
-        for (peer, totals) in meter.peers() {
-            emit(&JsonlEvent::TrafficPeer {
-                node_id: state.node_id,
-                peer: peer.clone(),
-                inbound_bytes: totals.inbound_bytes,
-                outbound_bytes: totals.outbound_bytes,
-                inbound_msgs: totals.inbound_msgs,
-                outbound_msgs: totals.outbound_msgs,
-            });
-        }
+    // What the session measured stays with the host; everything else goes with it.
+    if session.last {
+        emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Exit);
     }
-
-    emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Exit);
     let bundle_stats = bundle_io.final_stats(&bundles);
     emit(&sync_io.transport_stats(
         state.node_id,
         swarm.behaviour().gossipsub.control_stats(),
         sync.pending_rows(),
         bundle_stats,
+        explicit_peers.link_stats(),
     ));
     // Bundles are counted as sent, not estimated like gossip forwards.
-    let node_stats = if bundled {
-        JsonlEvent::NodeStats {
-            node_id: state.node_id,
-            bytes_sent: bundle_stats.bundle_bytes_sent,
-            bytes_received: bundle_recv_bytes,
-            msgs_sent: bundle_stats.bundle_sigs_sent,
-            msgs_received: bundle_recv_msgs,
-        }
+    if bundled {
+        carry.bytes_sent += bundle_stats.bundle_bytes_sent;
+        carry.bytes_received += bundle_recv_bytes;
+        carry.msgs_sent += bundle_stats.bundle_sigs_sent;
+        carry.msgs_received += bundle_recv_msgs;
     } else {
-        JsonlEvent::NodeStats {
-            node_id: state.node_id,
-            bytes_sent: state.bytes_sent_sig.load(Ordering::Relaxed),
-            bytes_received: state.bytes_recv_sig.load(Ordering::Relaxed),
-            msgs_sent: state.msgs_sent_sig.load(Ordering::Relaxed),
-            msgs_received: state.msgs_recv_sig.load(Ordering::Relaxed),
-        }
-    };
-    emit(&node_stats);
-
-    let writes = zero_copy_write::stats();
-    eprintln!(
-        "QUIC send buffers: {} bytes shared with gossipsub, {} bytes copied",
-        writes.shared_bytes, writes.copied_bytes
-    );
-
-    tracing::info!("node {} exiting", state.node_id);
+        carry.bytes_sent += state.bytes_sent_sig.load(Ordering::Relaxed);
+        carry.bytes_received += state.bytes_recv_sig.load(Ordering::Relaxed);
+        carry.msgs_sent += state.msgs_sent_sig.load(Ordering::Relaxed);
+        carry.msgs_received += state.msgs_recv_sig.load(Ordering::Relaxed);
+    }
+    carry.meter = meter;
+    carry.sessions += 1;
     Ok(())
 }
 
@@ -645,9 +843,9 @@ fn forwarding_peers(
         .collect()
 }
 
-fn emit_bucket(state: &NodeState, bucket: Bucket) {
+fn emit_bucket(node_id: u32, bucket: Bucket) {
     emit(&JsonlEvent::TrafficBucket {
-        node_id: state.node_id,
+        node_id,
         start_ms: bucket.start_ms,
         width_ms: bucket.width_ms,
         inbound: bucket

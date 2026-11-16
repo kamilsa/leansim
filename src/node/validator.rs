@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::experiment::ExperimentConfig;
 use crate::messages::wire::WireMessage;
 use crate::metrics::events::{emit, JsonlEvent};
 use crate::network::swarm::{self, SimBehaviour};
@@ -12,23 +13,22 @@ use crate::network::topics;
 use crate::node::state::NodeState;
 use libp2p::Swarm;
 
-/// Validator init: sleep burst_time + random jitter, then sign one synthetic signature
-/// per validator on this host. Co-located validators share the host's clock, so they sign
-/// back to back after a single delay. With `gossip`, each signature is published as a
-/// gossipsub message; otherwise the caller propagates them (EIP-8334 bundles).
-pub async fn validator_init(
+/// How long after the warmup a host signs: the burst time plus a random jitter.
+pub fn burst_delay(config: &ExperimentConfig) -> Duration {
+    let jitter = rand::thread_rng().gen_range(0..=config.burst_jitter_ms);
+    Duration::from_millis(config.burst_time_ms + jitter)
+}
+
+/// Signs one synthetic signature per validator on this host. Co-located validators
+/// share the host's clock, so they sign back to back after its single burst delay.
+/// With `gossip`, each signature is published as a gossipsub message; otherwise the
+/// caller propagates them (EIP-8334 bundles).
+pub fn publish_signatures(
     state: &Arc<NodeState>,
     swarm: &mut Swarm<SimBehaviour>,
     gossip: bool,
 ) -> Result<()> {
     let config = &state.config;
-
-    let jitter = {
-        let mut rng = rand::thread_rng();
-        rng.gen_range(0..=config.burst_jitter_ms)
-    };
-    let delay = Duration::from_millis(config.burst_time_ms + jitter);
-    tokio::time::sleep(delay).await;
 
     for &validator_id in &state.validator_ids {
         let subnet_id = config.subnet_for_validator(validator_id);

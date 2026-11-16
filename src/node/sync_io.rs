@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use crate::messages::sync::{SyncRequest, SyncResponse, SyncSignature};
 use crate::metrics::events::{JsonlEvent, SigVia};
 use crate::metrics::traffic::{Direction, Kind, TrafficMeter};
-use crate::network::swarm::SimBehaviour;
+use crate::network::swarm::{LinkStats, SimBehaviour};
 use crate::node::bundle_io::BundleStats;
 use crate::node::sigsync::{Action, SigSync};
 
@@ -109,6 +109,7 @@ impl SyncIo {
                     self.stats.coded_bytes_sent += bytes;
                     Kind::SyncPayload
                 }
+                SyncRequest::Restarted { .. } => Kind::SyncControl,
             };
             let pull = match &request {
                 SyncRequest::Want { subnet, validators } => Some((*subnet, validators.clone())),
@@ -185,6 +186,8 @@ impl SyncIo {
                 }));
                 SyncResponse::Ack
             }
+            // The event loop handles restart notices before they get here.
+            SyncRequest::Restarted { .. } => SyncResponse::Ack,
         };
         let bytes = response.wire_bytes();
         let out_kind = match &response {
@@ -283,6 +286,7 @@ impl SyncIo {
         control: libp2p::gossipsub::ControlStats,
         pending_rows: usize,
         bundles: BundleStats,
+        links: LinkStats,
     ) -> JsonlEvent {
         let s = self.stats;
         let b = bundles;
@@ -335,6 +339,8 @@ impl SyncIo {
             requests_suppressed: b.requests_suppressed,
             requests_avoided: b.requests_avoided,
             invalid_partials: b.invalid_partials,
+            restart_notices_sent: links.restart_notices_sent,
+            restart_reconnects: links.restart_reconnects,
         }
     }
 }

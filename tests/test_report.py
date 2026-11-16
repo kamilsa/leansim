@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import analyze  # noqa: E402
 import report  # noqa: E402
-from run_fixture import write_fixture_run  # noqa: E402
+from run_fixture import write_churn_run, write_fixture_run  # noqa: E402
 
 HAS_PLOTLY = importlib.util.find_spec("plotly") is not None
 HAS_NODE = shutil.which("node") is not None
@@ -193,6 +193,117 @@ class FigureTests(unittest.TestCase):
         self.assertEqual(figure["data"][-1]["xaxis"], "x2")
 
 
+class ChurnFigureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory(prefix="leansim-report-")
+        cls.snapshot = analyze.build_snapshot(write_churn_run(Path(cls.temporary.name) / "run"))
+        cls.metrics = cls.snapshot["metrics"]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def test_config_names_each_class_churn(self) -> None:
+        groups = dict(report.config_groups(self.snapshot["metadata"]["config"], self.metrics))
+        self.assertEqual(groups["Churn"], [
+            ("Supernodes", "stable", "never offline"),
+            ("Regular nodes", "50% churny", "a churny host crashes with probability 0.01 a tick and rejoins with 0.05: "
+                                            "10.0 s sessions, 2.0 s gaps, online 83% of the time"),
+            ("Tick", "100 ms", ""),
+            ("Crash", "silent", "all state lost but the peer table; peers hold the dead connection up to 10 s"),
+        ])
+
+    def test_config_without_churny_hosts_has_no_churn_card(self) -> None:
+        config = {"churn_tick_ms": 100, "regular_churn_fraction": 0.0, "regular_churn_leave_probability": 0.01,
+                  "regular_churn_rejoin_probability": 0.05, "supernode_churn_fraction": 0.0}
+        self.assertEqual(report.config_groups(config, {}), [])
+        config["supernode_churn_fraction"] = 0.125
+        rows = dict(report.config_groups(config, {}))["Churn"]
+        self.assertEqual(rows[0][:2], ("Supernodes", "12.5% churny"))
+        self.assertEqual(rows[1], ("Regular nodes", "stable", "never offline"))
+
+    def test_churny_hosts_get_delivery_lines_of_their_own(self) -> None:
+        figure = report.cdf_figure(self.metrics)
+        self.assertEqual([(trace["name"], trace["line"]["dash"]) for trace in figure["data"]], [
+            ("First seen by any host", "dot"), ("Delivered to supernodes", "solid"),
+            ("Delivered to regular nodes (stable)", "solid"), ("Delivered to regular nodes (churny)", "dash"),
+        ])
+        self.assertEqual(figure["layout"]["legend"]["yanchor"], "bottom", "a wrapped legend must not cover the plot")
+
+    def test_churny_hosts_get_hollow_arrival_boxes(self) -> None:
+        figure = report.arrival_figure(self.metrics)
+        self.assertEqual([(trace["name"], trace["fillcolor"]) for trace in figure["data"]], [
+            ("Supernodes", "#2a78d640"), ("Regular nodes (stable)", "#e3494840"), ("Regular nodes (churny)", "#ffffff"),
+        ])
+        table = report.arrival_table(self.metrics)
+        self.assertIn('<span class="swatch" style="background:#ffffff;border:2px solid #e34948"></span>Regular nodes (churny)', table)
+
+    def test_churny_aggregators_are_hollow_dots(self) -> None:
+        metrics = {"subnet_proofs": [{"subnet": 2, "count": 2, "min": 0, "p25": 0, "p50": 0, "p75": 700, "max": 700,
+                                      "proofs": [[0, 1, "supernode"], [700, 4, "supernode_churny"]]}]}
+        _, stable, churny = report.subnet_proofs_figure(metrics)["data"]
+        self.assertEqual((stable["name"], churny["name"]), ("Supernodes (stable)", "Supernodes (churny)"))
+        self.assertEqual(churny["marker"]["symbol"], "circle-open")
+        self.assertEqual(churny["text"], ["node 4"])
+
+    def test_availability_lines_and_milestones(self) -> None:
+        milestones = [{"label": "Signature burst", "time_ms": 1000}, {"label": "First subnet proof", "time_ms": 1100}]
+        figure = report.availability_figure(self.metrics["churn"], milestones, 1000)
+        self.assertEqual([trace["name"] for trace in figure["data"]], ["All hosts", "Regular nodes"])
+        everyone = figure["data"][0]
+        self.assertEqual((everyone["x"][0], everyone["y"][0]), (-1.0, 75.0))
+        self.assertEqual(everyone["line"]["shape"], "hv", "hosts go offline in steps")
+        self.assertEqual(figure["layout"]["yaxis"]["range"], [64, 100.5])
+        self.assertEqual([shape["x0"] for shape in figure["layout"]["shapes"]], [0.0, 0.1])
+        self.assertIn("First subnet proof · 0.10 s", figure["layout"]["annotations"][1]["text"])
+
+    def test_catch_up_is_a_cdf_over_every_rejoin(self) -> None:
+        figure = report.catch_up_figure(self.metrics["churn"])
+        (regular,) = figure["data"]
+        self.assertEqual(regular["name"], "Regular nodes")
+        self.assertEqual(regular["x"], [0, 0.3, 0.7])
+        self.assertEqual(regular["y"], [0, 50.0, 100.0])
+
+    def test_churn_tables(self) -> None:
+        churn = self.metrics["churn"]
+        classes = report.churn_class_table(churn)
+        self.assertIn("<td>3</td><td>2 <span class=\"note\">66.7%</span></td><td>2 <span class=\"note\">66.7%</span></td>"
+                      "<td>1</td><td>2</td><td>2 <span class=\"note\">of 2</span></td>"
+                      "<td>1 <span class=\"note\">50.0%</span></td>", classes)
+        self.assertIn("<td>2</td><td>2 <span class=\"note\">100.0%</span></td><td>0.30 s</td><td>0.70 s</td>",
+                      report.catch_up_table(churn))
+        completion = report.completion_table(churn)
+        self.assertLess(completion.index("Stable hosts"), completion.index("Churny hosts"))
+        self.assertIn("<td>0.15 s</td><td>0.90 s</td>", completion)
+        self.assertEqual(report.completion_table({"completion": {"stable": None, "churny": None}}), "")
+
+    def test_churn_facts_name_what_the_crashes_cost(self) -> None:
+        self.assertEqual(report.churn_facts(self.metrics["churn"]), [
+            "2 signatures were received again by hosts that had lost them in a crash",
+            "rejoining hosts told 2 peers they had restarted, and 1 of those still held a dead connection and reconnected",
+            "1 sync request failed",
+        ])
+        self.assertEqual(report.churn_facts({"counters": {"repeated_proofs": 2, "sync_failures": 3, "failed_proof_pulls": 1}}), [
+            "3 sync requests and 1 proof pull failed",
+            "2 subnet proofs built again by an aggregator back from a crash are not counted",
+        ])
+
+    def test_a_churny_host_says_so(self) -> None:
+        card = self.metrics["traffic"]["1"]["host"]
+        self.assertEqual(report.host_facts(card), "Germany · regular node · ↑ 50 / ↓ 100 Mbps · 1 validator · validator · churny, 1 crash")
+
+    def test_aggregator_table_says_which_aggregators_churn(self) -> None:
+        info = {"churn": {"churny": 1}, "aggregators": [
+            {"node": 4, "country": "japan", "class": "regular", "uplink_mbps": 50, "downlink_mbps": 100, "validators": 1, "crashes": 3},
+            {"node": 7, "country": "germany", "class": "supernode", "uplink_mbps": 1000, "downlink_mbps": 1000, "validators": 12},
+        ]}
+        table = report.aggregator_table(info, {"proofs": [[1500, 7, "supernode"]]}, logged=set())
+        self.assertIn("<th>Validators</th><th>Churn</th><th>Subnet proof</th>", table)
+        self.assertIn("<td>12</td><td>stable</td><td>1.50 s</td>", table)
+        self.assertIn("<td>1</td><td>3 crashes</td><td>–</td>", table)
+
+
 TRAFFIC_FIXTURE = {
     "node": "7", "run": "test", "warmup_ms": 800,
     "milestones": [{"label": "Signature burst", "time_ms": 1100}, {"label": "First subnet proof", "time_ms": 1200},
@@ -279,6 +390,21 @@ assert.deepEqual(sent.y, [10, 0, 10, 0], 'switching views must not alter measure
         self.run_node({"traffic-data": dict(TRAFFIC_FIXTURE, warmup_ms=None)}, report.TRAFFIC_JS, r"""
 assert.equal(plots.get('timeline').layout.xaxis.range[0], 0);
 assert.ok(plots.get('timeline').layout.shapes.every(shape => shape.type !== 'rect'));
+""")
+
+    def test_offline_windows_are_shaded_and_carry_no_traffic(self) -> None:
+        traffic = dict(TRAFFIC_FIXTURE["traffic"], offline_ms=[[1250, 1350]])
+        self.run_node({"traffic-data": dict(TRAFFIC_FIXTURE, traffic=traffic)}, report.TRAFFIC_JS, r"""
+const timeline = plots.get('timeline');
+const bands = timeline.layout.shapes.filter(shape => shape.type === 'rect' && shape.fillcolor === '#e34948');
+assert.deepEqual(bands.map(band => [band.x0, band.x1]), [[1.25, 1.35]]);
+const sent = timeline.traces.find(trace => trace.legendgroup === 'signature' && trace.stackgroup === 'sent');
+assert.deepEqual(sent.x, [1, 1.2, 1.35, 1.4, 1.5], 'the window starts inside an idle frame and ends in the open');
+assert.deepEqual(sent.y, [10, 0, 0, 10, 0], 'no curve rises before the host is back');
+assert.equal(elements.get('peak').textContent, '10.00 MB/s');
+""")
+        self.run_node({"report-data": {"figures": {}, "previews": {"7": traffic}}}, report.SUMMARY_JS, r"""
+assert.deepEqual(plots.get('preview-7').layout.shapes.map(band => [band.x0, band.x1]), [[1.25, 1.35]]);
 """)
 
     def test_summary_plots_figures_and_previews_on_one_time_axis(self) -> None:
@@ -394,6 +520,13 @@ class PageTests(unittest.TestCase):
         self.assertTrue("1 host aggregates subnets: 1 supernode, 0 regular nodes, over 1 subnet, in 1 country." in self.summary,
                         "the network section describes the aggregator population")
 
+    def test_a_run_without_churn_shows_none(self) -> None:
+        for marker in ('id="churn"', "kpis five", "Online at signing", "Got again after a crash", "(churny)", "(stable)"):
+            self.assertNotIn(marker, self.summary)
+        self.assertNotIn("Red bands: the host was offline", self.traffic)
+        page = (Path(self.temporary.name) / "report" / "subnet-0.html").read_text(encoding="utf-8")
+        self.assertNotIn("<th>Churn</th>", page)
+
     def test_summary_is_white(self) -> None:
         self.assertIn("background: #ffffff", self.summary)
         self.assertNotIn("color-scheme: dark", self.summary + self.traffic)
@@ -416,6 +549,67 @@ class PageTests(unittest.TestCase):
             {"label": "First subnet proof", "time_ms": 2000},
             {"label": "Final proof", "time_ms": 3000},
         ])
+
+
+@unittest.skipUnless(HAS_PLOTLY, "needs the analyze dependency group (plotly)")
+class ChurnPageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory(prefix="leansim-report-")
+        root = Path(cls.temporary.name)
+        output = root / "report" / "summary.html"
+        output.parent.mkdir()
+        report.generate_html(analyze.build_snapshot(write_churn_run(root / "run")), output)
+        cls.summary = output.read_text(encoding="utf-8")
+        cls.traffic = (output.parent / "traffic-1.html").read_text(encoding="utf-8")
+        cls.subnet = (output.parent / "subnet-0.html").read_text(encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def test_summary_has_a_churn_section_after_the_network(self) -> None:
+        self.assertLess(self.summary.index('id="network"'), self.summary.index('id="churn"'))
+        self.assertLess(self.summary.index('id="churn"'), self.summary.index('id="propagation"'))
+        section = self.summary.split('id="churn"', 1)[1].split("</section>", 1)[0]
+        for text in ("2 of 4 hosts churn", "QUIC's idle timeout (10 s)", 'id="churn-availability"', 'id="churn-catch-up"',
+                     "Catching up after a rejoin", "how long until it held 75%", "Subnet completion",
+                     "2 signatures were received again"):
+            self.assertIn(text, section)
+        data = embedded(self.summary, "report-data")
+        self.assertTrue({"churn-availability", "churn-catch-up"} <= set(data["figures"]))
+        self.assertEqual(data["previews"]["1"]["offline_ms"], [[1500, 2500]])
+
+    def test_kpis_say_how_many_hosts_were_online_at_signing(self) -> None:
+        kpis = self.summary.split('<div class="kpis five">', 1)[1].split("</div></div>", 1)[0]
+        self.assertIn('<span class="label">Online at signing</span><b>75.0%</b>'
+                      '<span class="note">1 of 4 hosts offline · 1 signatures missed</span>', kpis)
+        self.assertIn("stable regular nodes", kpis)
+
+    def test_config_and_transport_show_churn(self) -> None:
+        config = self.summary.split('id="config"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("<h3>Churn</h3>", config)
+        self.assertIn("50% churny", config)
+        transport = self.summary.split('id="transport"', 1)[1].split("</section>", 1)[0]
+        self.assertIn("<th>Got again after a crash</th>", transport)
+        self.assertIn("<tr><td>Bundle backlog</td><td>1</td><td>1</td><td>2</td></tr>", transport)
+
+    def test_subnet_proofs_caption_counts_aggregators_without_a_proof(self) -> None:
+        caption = self.summary.split('id="subnet-proofs-heading"', 1)[1].split("</p>", 1)[0]
+        self.assertIn("Hollow dots are churny hosts.", caption)
+        self.assertNotIn("never finished", caption, "the only aggregator proved")
+
+    def test_traffic_page_marks_the_offline_windows(self) -> None:
+        self.assertIn("churny, 1 crash", self.traffic)
+        self.assertIn("Red bands: the host was offline, 1 time for 1.0 s in all.", self.traffic)
+        self.assertEqual(embedded(self.traffic, "traffic-data")["traffic"]["offline_ms"], [[1500, 2500]])
+
+    def test_subnet_page_counts_its_churny_hosts(self) -> None:
+        self.assertIn("4 subscribed hosts · 4 validators on them · 1 subnet aggregator · 2 churny · "
+                      "3 online at signing · 1 signatures missed", self.subnet)
+        self.assertIn("<th>Churn</th>", self.subnet)
+        self.assertIn("<td>2</td><td>stable</td><td>0.10 s</td>", self.subnet)
+        self.assertEqual(len(embedded(self.subnet, "subnet-data")["figures"]["subnet-cdf"]["data"]), 4)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,8 @@ MAX_PROOF_BYTES = 8 * 1024 * 1024
 # Per-hop signature sync modes (config::experiment::SignatureSync).
 SIGNATURE_SYNC_MODES = ("none", "bitmap_pull", "coded_repair")
 SIGNATURE_PROPAGATION_MODES = ("gossipsub", "bundled")
+# Host classes with churn settings of their own (<class>_churn_fraction and so on).
+CHURN_CLASSES = ("regular", "supernode")
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
 _GLOBAL_AGGREGATION_REMOVED = "dedicated global aggregators were replaced by recursive_aggregation (attesters in recursive groups)"
 REMOVED_KEYS = {
@@ -173,6 +175,15 @@ def validate_experiment(config: dict) -> None:
         die("bundle_announce requires bundle_stagger_ms > 0")
     if propagation == "bundled" and sync_mode != "none":
         die('signature_propagation = "bundled" requires signature_sync = "none"')
+    as_int(setting(config, "churn_tick_ms", 100), "churn_tick_ms", minimum=1)
+    for kind in CHURN_CLASSES:
+        fraction = as_number(setting(config, f"{kind}_churn_fraction", 0.0), f"{kind}_churn_fraction", minimum=0, maximum=1)
+        as_number(setting(config, f"{kind}_churn_leave_probability", 0.01), f"{kind}_churn_leave_probability", minimum=0, maximum=1)
+        rejoin = as_number(setting(config, f"{kind}_churn_rejoin_probability", 0.05), f"{kind}_churn_rejoin_probability", minimum=0, maximum=1)
+        if fraction and not rejoin:
+            die(f"{kind}_churn_rejoin_probability must be greater than zero when {kind}_churn_fraction is: churny hosts must be able to return")
+    if churn_enabled(config) and explicit_aggregators:
+        die("churn does not support gossipsub_explicit_aggregator_count: an offline explicit aggregator fails the warmup")
     node_map = config.get("node_map")
     if node_map is not None:
         if not isinstance(node_map, str) or not node_map.strip():
@@ -325,6 +336,13 @@ def experiment_defaults(experiment: dict) -> dict:
         "bundle_request_delay_ms": 0,
         "bundle_stagger_ms": 0,
         "bundle_announce": False,
+        "churn_tick_ms": 100,
+        "regular_churn_fraction": 0.0,
+        "regular_churn_leave_probability": 0.01,
+        "regular_churn_rejoin_probability": 0.05,
+        "supernode_churn_fraction": 0.0,
+        "supernode_churn_leave_probability": 0.01,
+        "supernode_churn_rejoin_probability": 0.05,
         "use_geo_latency": False,
         "geo_seed": 42,
         "geo_jitter": 0.0,
@@ -1126,6 +1144,94 @@ def supernode_ids(nodes: list[dict], experiment: dict) -> set[int]:
     return sample_supernodes(nodes, experiment)
 
 
+def churn_enabled(experiment: dict) -> bool:
+    return any(experiment.get(f"{kind}_churn_fraction") for kind in CHURN_CLASSES)
+
+
+def churn_schedule(rng: random.Random, run_ms: int, tick_ms: int, leave: float, rejoin: float) -> list[list[int]]:
+    """The [from_ms, until_ms) windows of a run during which a churny host is offline.
+
+    A two-state chain stepped every tick: an online host crashes with
+    probability `leave`, an offline one rejoins with probability `rejoin`, so
+    sessions last 1 / leave ticks and gaps 1 / rejoin ticks on average. The host
+    starts in the chain's stationary state (online with probability
+    rejoin / (leave + rejoin)), so the run has the same share of churny hosts
+    offline from its first tick to its last.
+    """
+    online = rng.random() < rejoin / (leave + rejoin)
+    windows = []
+    since = 0
+    for at in range(tick_ms, run_ms, tick_ms):
+        if online:
+            if rng.random() < leave:
+                online, since = False, at
+        elif rng.random() < rejoin:
+            online = True
+            windows.append([since, at])
+    if not online:
+        windows.append([since, run_ms])
+    return windows
+
+
+def assign_churn(nodes: list[dict], experiment: dict) -> None:
+    """Pick each host class's churny hosts and draw their offline windows.
+
+    Each class has settings of its own (<class>_churn_fraction, _leave_probability,
+    _rejoin_probability) and takes its fraction of that class's hosts, rounded up.
+    The hosts come first in a seeded order of the class, so a larger fraction adds
+    churny hosts to those of a smaller one, and each host's windows are seeded by
+    its node id alone: a run with other churn settings differs only where they do.
+
+    A churny host also gets inbound_peer_addrs, the hosts that dial it. With its
+    own seeds they are its peer table, which it dials whenever it comes online.
+    """
+    for node in nodes:
+        node["churny"] = False
+    if not churn_enabled(experiment):
+        return
+    run_ms = experiment["run_timeout_secs"] * 1000
+    for offset, kind in enumerate(CHURN_CLASSES):
+        hosts = [node for node in nodes if node["supernode"] == (kind == "supernode")]
+        random.Random(experiment["geo_seed"] + 17 + offset).shuffle(hosts)
+        count = math.ceil(len(hosts) * experiment[f"{kind}_churn_fraction"] - 1e-9)
+        for node in hosts[:count]:
+            seed = int.from_bytes(_seeded_hash(b"leansim-churn", node["node_id"], experiment)[:8], "little")
+            node["churny"] = True
+            node["offline_windows_ms"] = churn_schedule(
+                random.Random(seed),
+                run_ms,
+                experiment["churn_tick_ms"],
+                experiment[f"{kind}_churn_leave_probability"],
+                experiment[f"{kind}_churn_rejoin_probability"],
+            )
+    dialers: defaultdict[str, list[str]] = defaultdict(list)
+    for node in nodes:
+        for address in node["seed_addrs"]:
+            dialers[address].append(node["listen_addr"])
+    for node in nodes:
+        if node["churny"]:
+            node["inbound_peer_addrs"] = sorted(set(dialers[node["listen_addr"]]) - set(node["seed_addrs"]))
+
+
+def offline_at(node: dict, time_ms: int) -> bool:
+    return any(start <= time_ms < end for start, end in node.get("offline_windows_ms", ()))
+
+
+def log_churn_summary(nodes: list[dict], experiment: dict) -> None:
+    parts = []
+    for kind in CHURN_CLASSES:
+        hosts = [node for node in nodes if node["supernode"] == (kind == "supernode")]
+        churny = sum(1 for node in hosts if node["churny"])
+        parts.append(f"{churny} of {len(hosts)} {kind} hosts")
+    # Hosts sign burst_time_ms (plus their jitter) after the warmup.
+    signing_ms = experiment["mesh_warmup_ms"] + experiment["burst_time_ms"]
+    offline = [node for node in nodes if offline_at(node, signing_ms)]
+    log(
+        f"churn: {' and '.join(parts)} churn; {len(offline)} hosts with "
+        f"{sum(len(node['validator_ids']) for node in offline)} validators are offline at {signing_ms} ms, when signing starts"
+    )
+
+
 def gml_edges(count: int, degree: int, rng: random.Random):
     if 0 < degree < count - 1:
         edges: set[tuple[int, int]] = set()
@@ -1249,6 +1355,10 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
         node["supernode"] = node["node_id"] in supernodes
         node["uplink_mbps"] = experiment["supernode_uplink_mbps"] if node["supernode"] else experiment["network_defaults"]["uplink_mbps"]
         node["downlink_mbps"] = experiment["supernode_downlink_mbps"] if node["supernode"] else experiment["network_defaults"]["downlink_mbps"]
+    assign_churn(nodes, experiment)
+    if churn_enabled(experiment):
+        log_churn_summary(nodes, experiment)
+    for node in nodes:
         config_path = (configs_dir / f"node_{node['node_id']}.toml").resolve()
         node["config_path"] = str(config_path)
         node_toml = {
@@ -1268,6 +1378,9 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
             node_toml["aggregation_plan"] = str(plan_path)
         if node["node_id"] in traffic_nodes:
             node_toml["traffic_log"] = True
+        if node["churny"]:
+            node_toml["offline_windows_ms"] = node["offline_windows_ms"]
+            node_toml["inbound_peer_addrs"] = node["inbound_peer_addrs"]
         write_toml(config_path, node_toml)
     write_topology(output_dir / "topology.gml", nodes, experiment, countries, latency)
     write_shadow_yaml(output_dir / "shadow.yaml", nodes, experiment, binary)
@@ -1277,7 +1390,7 @@ def generate_run(experiment: dict, output_dir: Path, binary: str, run_index: int
         "run_index": run_index,
         "runner": runner,
         "experiment": experiment,
-        "nodes": [{key: value for key, value in node.items() if key not in {"listen_addr", "seed_addrs", "config_path", "ip"}} for node in nodes],
+        "nodes": [{key: value for key, value in node.items() if key not in {"listen_addr", "seed_addrs", "inbound_peer_addrs", "config_path", "ip"}} for node in nodes],
     }
     (output_dir / "run-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest

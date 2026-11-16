@@ -1,0 +1,75 @@
+# Churn on the network and signature transport of
+# experiments/nodemap-small-65k-allhosts-sync-gossip-sub64.toml: 20% of the
+# regular hosts crash and rejoin, as the churny peers of Lean Gossip (DEBS '26).
+# Siblings:
+# nodemap-small-65k-allhosts-sync-{gossip,pull,coded,bundled}-churn20-sub64.toml.
+run_id = "nodemap-small-65k-allhosts-sync-gossip-churn20-sub64"
+run_timeout_secs = 120
+
+validator_count = 65536
+node_map = "nodes_small.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in.
+random_peer_count = 0
+subnet_count = 64
+local_aggregators_per_subnet = 16
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+# Gossipsub v1.2 IDONTWANT for messages over 1 KB (every signature).
+gossipsub_idontwant_threshold_bytes = 1000
+signature_sync = "none"
+
+# Churn: 20% of the regular hosts crash and rejoin. Every 100 ms tick an online
+# churny host crashes with probability 0.01 and an offline one rejoins with
+# 0.05: 10 s sessions and 2 s gaps on average. A host crashes without a word and
+# comes back with no state but its peer table.
+churn_tick_ms = 100
+regular_churn_fraction = 0.2
+regular_churn_leave_probability = 0.01
+regular_churn_rejoin_probability = 0.05
+# Supernodes have churn settings of their own and stay online here.
+supernode_churn_fraction = 0.0
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+# A tag of its own: an image built before churn would ignore the churn
+# settings and silently run every host for the whole run.
+image_name = "leansim-shadow:churn"
+rebuild = false
+
+[output]
+dir = "output-nodemap-small-65k-allhosts-sync-gossip-churn20-sub64"

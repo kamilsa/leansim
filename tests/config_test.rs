@@ -46,6 +46,13 @@ fn base_config() -> ExperimentConfig {
         bundle_request_delay_ms: 0,
         bundle_stagger_ms: 0,
         bundle_announce: false,
+        churn_tick_ms: 100,
+        regular_churn_fraction: 0.0,
+        regular_churn_leave_probability: 0.01,
+        regular_churn_rejoin_probability: 0.05,
+        supernode_churn_fraction: 0.0,
+        supernode_churn_leave_probability: 0.01,
+        supernode_churn_rejoin_probability: 0.05,
         network_defaults: NetworkDefaults::default(),
         use_geo_latency: false,
         geo_seed: 0,
@@ -222,6 +229,8 @@ fn node_config(role: NodeRole, validator_ids: Vec<u32>) -> NodeConfig {
         aggregated_subnets: vec![],
         aggregation_plan: None,
         traffic_log: false,
+        offline_windows_ms: vec![],
+        inbound_peer_addrs: vec![],
         experiment: base_config(),
     }
 }
@@ -550,4 +559,129 @@ fn bundled_propagation_rejects_bad_settings() {
     // Gossipsub ignores the bundle settings.
     exp.signature_propagation = SignaturePropagation::Gossipsub;
     exp.validate().unwrap();
+}
+
+#[test]
+fn churn_is_off_by_default() {
+    let exp: ExperimentConfig =
+        toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    assert!(!exp.churn_enabled());
+    assert_eq!(exp.churn_tick_ms, 100);
+    for (fraction, leave, rejoin) in [
+        (
+            exp.regular_churn_fraction,
+            exp.regular_churn_leave_probability,
+            exp.regular_churn_rejoin_probability,
+        ),
+        (
+            exp.supernode_churn_fraction,
+            exp.supernode_churn_leave_probability,
+            exp.supernode_churn_rejoin_probability,
+        ),
+    ] {
+        assert_eq!((fraction, leave, rejoin), (0.0, 0.01, 0.05));
+    }
+    exp.validate().unwrap();
+}
+
+#[test]
+fn each_host_class_has_churn_settings_of_its_own() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+regular_churn_fraction = 0.2
+supernode_churn_leave_probability = 0.5
+"#,
+    )
+    .unwrap();
+    assert!(exp.churn_enabled());
+    assert_eq!(exp.regular_churn_fraction, 0.2);
+    assert_eq!(exp.regular_churn_leave_probability, 0.01);
+    assert_eq!(exp.supernode_churn_fraction, 0.0, "nothing is inherited");
+    assert_eq!(exp.supernode_churn_leave_probability, 0.5);
+    exp.validate().unwrap();
+
+    let mut supernodes_only = base_config();
+    supernodes_only.supernode_churn_fraction = 1.0;
+    assert!(supernodes_only.churn_enabled());
+    supernodes_only.validate().unwrap();
+}
+
+#[test]
+fn churn_rejects_bad_settings() {
+    let mut exp = base_config();
+    exp.regular_churn_fraction = 1.5;
+    assert!(exp.validate().is_err());
+    exp.regular_churn_fraction = 0.2;
+    exp.validate().unwrap();
+    exp.regular_churn_leave_probability = -0.1;
+    assert!(exp.validate().is_err());
+    exp.regular_churn_leave_probability = 0.01;
+    exp.regular_churn_rejoin_probability = 0.0;
+    assert!(
+        exp.validate().is_err(),
+        "churny hosts must be able to return"
+    );
+    exp.regular_churn_rejoin_probability = 0.05;
+    exp.supernode_churn_rejoin_probability = 0.0;
+    exp.validate().unwrap();
+    exp.supernode_churn_fraction = 0.1;
+    assert!(exp.validate().is_err());
+    exp.supernode_churn_rejoin_probability = 2.0;
+    assert!(exp.validate().is_err());
+    exp.supernode_churn_rejoin_probability = 0.05;
+    exp.churn_tick_ms = 0;
+    assert!(exp.validate().is_err());
+    exp.churn_tick_ms = 100;
+    exp.gossipsub_explicit_aggregator_count = 1;
+    assert!(
+        exp.validate().is_err(),
+        "an offline explicit aggregator fails the warmup"
+    );
+}
+
+#[test]
+fn online_windows_are_what_the_offline_ones_leave() {
+    let mut node = node_config(NodeRole::Validator, vec![]);
+    assert_eq!(node.online_windows(60_000), vec![(0, 60_000)]);
+    node.offline_windows_ms = vec![[1_000, 3_000], [10_000, 10_100]];
+    assert_eq!(
+        node.online_windows(60_000),
+        vec![(0, 1_000), (3_000, 10_000), (10_100, 60_000)]
+    );
+    // Offline at the start and at the end of the run.
+    node.offline_windows_ms = vec![[0, 500], [59_000, 60_000]];
+    assert_eq!(node.online_windows(60_000), vec![(500, 59_000)]);
+    node.offline_windows_ms = vec![[0, 60_000]];
+    assert!(node.online_windows(60_000).is_empty());
+    // Windows past the end of the run are cut off.
+    node.offline_windows_ms = vec![[50_000, 70_000], [80_000, 90_000]];
+    assert_eq!(node.online_windows(60_000), vec![(0, 50_000)]);
+}
+
+#[test]
+fn churn_fields_default_to_empty_in_node_toml() {
+    let node: NodeConfig = toml::from_str(
+        r#"
+node_id = 2
+role = "validator"
+subnet_id = 0
+listen_addr = "/ip4/10.0.0.3/udp/9090/quic-v1"
+seed_addrs = []
+offline_windows_ms = [[0, 300], [1200, 3400]]
+inbound_peer_addrs = ["/ip4/10.0.0.4/udp/9090/quic-v1"]
+
+[experiment]
+run_id = "test"
+validator_count = 4
+subnet_count = 1
+"#,
+    )
+    .unwrap();
+    assert_eq!(node.offline_windows_ms, vec![[0, 300], [1200, 3400]]);
+    assert_eq!(node.inbound_peer_addrs.len(), 1);
+    let plain = node_config(NodeRole::Validator, vec![]);
+    assert!(plain.offline_windows_ms.is_empty() && plain.inbound_peer_addrs.is_empty());
 }

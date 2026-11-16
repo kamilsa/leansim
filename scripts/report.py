@@ -7,6 +7,7 @@ is inlined and the data is embedded as JSON, so nothing loads from the network.
 
 import html
 import json
+import math
 from collections import Counter
 from pathlib import Path
 from string import Template
@@ -19,6 +20,9 @@ CLASS_STYLE = {
     "unknown": ("Unclassified", "unclassified", "#898781"),
 }
 SINGULAR_LABEL = {kind: singular.capitalize() for kind, (_, singular, _) in CLASS_STYLE.items()}
+# A class's churny hosts are reported apart from its stable ones, as "<class>_churny".
+CHURNY = "_churny"
+GROUPS = tuple(group for kind in CLASS_STYLE for group in (kind, kind + CHURNY))
 # Peers listed in a traffic page's peer table.
 PEER_ROWS = 15
 
@@ -54,6 +58,8 @@ def host_facts(card):
     ]
     if card.get("role"):
         parts.append(card["role"].replace("_", " "))
+    if card.get("churn"):
+        parts.append(f'churny, {plural(card["churn"]["crashes"], "crash", "crashes")}')
     return " · ".join(parts)
 
 
@@ -82,6 +88,32 @@ def duty_line(card):
     return f'<p class="duties">{html.escape(text)}</p>' if text else ""
 
 
+def group_styles(present):
+    """{group: (label, colour, churny)} for the host groups in `present`, in
+    display order. A class's churny hosts keep its colour; when a class has
+    both, its other hosts are labelled stable."""
+    present = set(present)
+    styles = {}
+    for group in GROUPS:
+        if group not in present:
+            continue
+        kind = group.removesuffix(CHURNY)
+        label, _, color = CLASS_STYLE[kind]
+        churny = group.endswith(CHURNY)
+        if churny:
+            label += " (churny)"
+        elif kind + CHURNY in present:
+            label += " (stable)"
+        styles[group] = (label, color, churny)
+    return styles
+
+
+def swatch(color, churny=False):
+    """A colour key for a table cell; hollow for churny hosts."""
+    style = f"background:#ffffff;border:2px solid {color}" if churny else f"background:{color}"
+    return f'<span class="swatch" style="{style}"></span>'
+
+
 def cdf_figure(metrics):
     """Signature propagation: first sighting anywhere, and delivery to each host class."""
     return cdf_figure_for(metrics.get("signature_cdf") or {})
@@ -90,7 +122,8 @@ def cdf_figure(metrics):
 def cdf_figure_for(lines):
     """The CDF plot used by the run summary and every subnet page."""
     series = [("first_seen", "First seen by any host", "#0b0b0b", "dot")]
-    series += [(kind, "Delivered to " + label.lower(), color, "solid") for kind, (label, _, color) in CLASS_STYLE.items()]
+    series += [(group, "Delivered to " + label[0].lower() + label[1:], color, "dash" if churny else "solid")
+               for group, (label, color, churny) in group_styles(lines).items()]
     data = []
     for key, name, color, dash in series:
         points = lines.get(key) or []
@@ -101,27 +134,32 @@ def cdf_figure_for(lines):
                 "line": {"color": color, "width": 2.5, "dash": dash},
                 "hovertemplate": "%{y:.1f}% by %{x:.3f} s<extra>" + name + "</extra>",
             })
-    return {"data": data, "layout": {
+    layout = {
         "xaxis": {"title": {"text": "time after the first signature was sent (s)"}, "rangemode": "tozero"},
         "yaxis": {"title": {"text": "signatures"}, "range": [0, 101], "ticksuffix": "%"},
         "legend": {"orientation": "h", "x": 0, "y": 1.12},
-    }}
+    }
+    if len(data) > 3:
+        # Churny hosts add lines: the legend wraps, so it grows upwards into a taller margin.
+        layout["legend"] = {"orientation": "h", "x": 0, "y": 1.02, "yanchor": "bottom"}
+        layout["margin"] = {"t": 64}
+    return {"data": data, "layout": layout}
 
 
 def arrival_figure(metrics):
     """Slide-8 style boxes: p5–p95 whiskers, p25–p75 box, median line, per message and host class."""
     rows = metrics.get("arrivals") or []
     data = []
-    for kind, (label, _, color) in CLASS_STYLE.items():
-        own = [row for row in rows if row["class"] == kind]
-        if not own:
-            continue
+    for group, (label, color, churny) in group_styles(row["class"] for row in rows).items():
+        own = [row for row in rows if row["class"] == group]
         data.append({
             "type": "box", "orientation": "h", "name": label, "y": [row["message"] for row in own],
             "lowerfence": [row["p5"] / 1000 for row in own], "q1": [row["p25"] / 1000 for row in own],
             "median": [row["p50"] / 1000 for row in own], "q3": [row["p75"] / 1000 for row in own],
             "upperfence": [row["p95"] / 1000 for row in own],
-            "marker": {"color": color}, "line": {"color": color, "width": 1.5}, "fillcolor": color + "40",
+            "marker": {"color": color}, "line": {"color": color, "width": 1.5},
+            # Churny hosts get a hollow box.
+            "fillcolor": "#ffffff" if churny else color + "40",
             "hoverinfo": "skip",
         })
     messages = list(dict.fromkeys(row["message"] for row in rows))
@@ -150,21 +188,22 @@ def subnet_proofs_figure(metrics):
     }]
     # Alternate dots across the row so aggregators that finished together stay visible.
     offsets = (0, -0.2, 0.2)
-    dots = {kind: {"x": [], "y": [], "text": [], "customdata": []} for kind in CLASS_STYLE}
+    dots = {group: {"x": [], "y": [], "text": [], "customdata": []} for group in GROUPS}
     for row in rows:
-        for rank, (time_ms, node_id, kind) in enumerate(row["proofs"]):
-            dot = dots[kind if kind in dots else "unknown"]
+        for rank, (time_ms, node_id, group) in enumerate(row["proofs"]):
+            dot = dots[group if group in dots else "unknown"]
             dot["x"].append(time_ms / 1000)
             dot["y"].append(round(row["subnet"] + offsets[rank % len(offsets)], 3))
             dot["text"].append("unknown node" if node_id is None else f"node {node_id}")
             dot["customdata"].append(row["subnet"])
-    for kind, (label, _, color) in CLASS_STYLE.items():
-        if dots[kind]["x"]:
-            data.append({
-                "type": "scatter", "mode": "markers", "name": label, **dots[kind],
-                "marker": {"color": color, "size": 6, "opacity": 0.8, "line": {"color": "#ffffff", "width": 0.5}},
-                "hovertemplate": "%{text} · subnet %{customdata} · %{x:.3f} s<extra>" + label + "</extra>",
-            })
+    for group, (label, color, churny) in group_styles(group for group in GROUPS if dots[group]["x"]).items():
+        # Churny aggregators are hollow dots.
+        marker = ({"color": color, "size": 7, "symbol": "circle-open", "line": {"color": color, "width": 1.5}} if churny
+                  else {"color": color, "size": 6, "opacity": 0.8, "line": {"color": "#ffffff", "width": 0.5}})
+        data.append({
+            "type": "scatter", "mode": "markers", "name": label, **dots[group], "marker": marker,
+            "hovertemplate": "%{text} · subnet %{customdata} · %{x:.3f} s<extra>" + label + "</extra>",
+        })
     subnets = [row["subnet"] for row in rows]
     return {"data": data, "layout": {
         "height": subnet_proofs_height(rows),
@@ -250,21 +289,26 @@ def aggregator_table(info, row, logged):
         return ""
     proof_ms = {node_id: time_ms for time_ms, node_id, _ in (row or {}).get("proofs") or []}
     ordered = sorted(aggregators, key=lambda host: (host["node"] not in proof_ms, proof_ms.get(host["node"], 0), host["node"]))
+    # Runs with churn say which aggregators churn and how often they crashed.
+    churn = info.get("churn") is not None
     rows = []
     for host in ordered:
         _, _, color = CLASS_STYLE.get(host["class"], CLASS_STYLE["unknown"])
         node = str(host["node"])
         cell = f'<a href="traffic-{node}.html">{node}</a>' if node in logged else node
         finished = f'{proof_ms[host["node"]] / 1000:.2f} s' if host["node"] in proof_ms else "–"
+        churned = ""
+        if churn:
+            churned = f'<td>{plural(host["crashes"], "crash", "crashes") if "crashes" in host else "stable"}</td>'
         rows.append(
             f'<tr><td>{cell}</td><td>{html.escape((host.get("country") or "unknown").title())}</td>'
             f'<td><span class="swatch" style="background:{color}"></span>{SINGULAR_LABEL[host["class"]]}</td>'
             f'<td>{count(host.get("uplink_mbps"))} Mbps</td><td>{count(host.get("downlink_mbps"))} Mbps</td>'
-            f'<td>{count(host["validators"])}</td><td>{finished}</td></tr>'
+            f'<td>{count(host["validators"])}</td>{churned}<td>{finished}</td></tr>'
         )
     return ('<div class="table-scroll"><table class="aggregators"><thead><tr><th>Node</th><th>Country</th><th>Class</th>'
-            '<th>Uplink</th><th>Downlink</th><th>Validators</th><th>Subnet proof</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></div>")
+            '<th>Uplink</th><th>Downlink</th><th>Validators</th>' + ("<th>Churn</th>" if churn else "")
+            + '<th>Subnet proof</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>")
 
 
 def aggregator_section(info, row, logged, height):
@@ -325,6 +369,7 @@ section { margin: 0 0 44px; }
 .caption { color: var(--ink-2); font-size: 14px; margin: 0 0 12px; max-width: 860px; }
 .caption-list { padding-left: 20px; } .caption-list li { margin: 2px 0; } .caption-list b { color: var(--ink); font-weight: 600; }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 44px; }
+.kpis.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .kpi { border: 1px solid var(--grid); border-radius: 10px; padding: 14px 16px; }
 .kpi .label, .kpi .note { display: block; color: var(--ink-2); font-size: 13px; } .kpi .note { color: var(--muted); }
 .kpi b { display: block; font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
@@ -342,6 +387,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-nu
 th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .arrivals td:nth-child(2), .arrivals th:nth-child(2) { text-align: left; }
 .aggregators td:nth-child(-n+3), .aggregators th:nth-child(-n+3) { text-align: left; }
+.churn .note { color: var(--muted); font-size: 12px; margin-left: 4px; }
 .transport td.note { text-align: left; color: var(--muted); font-size: 12px; white-space: normal; }
 .table-scroll { overflow-x: auto; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
@@ -361,7 +407,7 @@ th { color: var(--ink-2); font-weight: 600; } th:first-child, td:first-child, .a
 .mix .out { background: #52514e; } .mix .in { background: #c3c2b7; }
 details summary { cursor: pointer; font-weight: 600; } details p { color: var(--ink-2); max-width: 860px; }
 footer.page { border-top: 1px solid var(--grid); padding-top: 14px; color: var(--muted); font-size: 13px; }
-@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis { grid-template-columns: 1fr 1fr; } .two, .config-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { main { padding: 24px 16px 40px; } .kpis, .kpis.five { grid-template-columns: 1fr 1fr; } .two, .config-grid { grid-template-columns: 1fr; } }
 """
 
 COMMON_JS = r"""
@@ -398,6 +444,16 @@ function trafficSeries(traffic) {
     previousEnd = bucket.start_ms + bucket.width_ms;
   }
   if (previousEnd !== null) frames.push({start_ms: previousEnd, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+  // A churny host exchanged nothing while offline: pin the areas to zero at both
+  // edges of each offline window, so no curve spans it.
+  for (const [start, end] of traffic.offline_ms || []) {
+    for (const at of [start, end]) {
+      if (!frames.some(frame => frame.start_ms <= at && at < frame.start_ms + frame.width_ms)) {
+        frames.push({start_ms: at, inbound: {}, outbound: {}, width_ms: traffic.bucket_ms});
+      }
+    }
+  }
+  frames.sort((a, b) => a.start_ms - b.start_ms);
   const x = frames.map(bucket => bucket.start_ms / 1000);
   const rate = (bytes, bucket) => mb(bytes) * 1000 / bucket.width_ms;
   const traces = [];
@@ -415,6 +471,11 @@ function trafficSeries(traffic) {
     rate(Object.values(bucket.inbound).reduce((a, b) => a + b, 0), bucket),
     rate(Object.values(bucket.outbound).reduce((a, b) => a + b, 0), bucket)), 0);
   return {traces, peak, end: (previousEnd || 0) / 1000};
+}
+// Red bands over the stretches a churny host was offline.
+function offlineShapes(traffic) {
+  return (traffic.offline_ms || []).map(([start, end]) => ({type: 'rect', xref: 'x', yref: 'paper',
+    x0: start / 1000, x1: end / 1000, y0: 0, y1: 1, fillcolor: '#e34948', opacity: 0.1, line: {width: 0}, layer: 'below'}));
 }
 function mirroredAxis(peak) {
   const extent = peak > 0 ? peak * 1.12 : 1;
@@ -447,11 +508,11 @@ if (subnetPlot) {
   });
 }
 // Previews share one time axis so hosts can be compared at a glance.
-const previews = Object.entries(report.previews).map(([node, traffic]) => [node, trafficSeries(traffic)]);
+const previews = Object.entries(report.previews).map(([node, traffic]) => [node, trafficSeries(traffic), traffic]);
 const previewEnd = Math.max(1, ...previews.map(([, series]) => series.end));
-for (const [node, series] of previews) {
+for (const [node, series, traffic] of previews) {
   Plotly.newPlot('preview-' + node, series.traces, plotLayout({
-    showlegend: false, margin: {t: 4, r: 8, b: 26, l: 40},
+    showlegend: false, margin: {t: 4, r: 8, b: 26, l: 40}, shapes: offlineShapes(traffic),
     xaxis: {range: [0, previewEnd], ticksuffix: ' s'},
     yaxis: mirroredAxis(series.peak),
   }), {staticPlot: true, responsive: true});
@@ -477,6 +538,7 @@ for (const [index, point] of milestones.entries()) {
     text: point.label + ' · ' + at.toFixed(2) + ' s', xanchor: index === milestones.length - 1 ? 'right' : 'center',
     showarrow: false, font: {color: '#52514e', size: 12}, align: 'center'});
 }
+shapes.push(...offlineShapes(traffic));
 Plotly.newPlot('timeline', series.traces, plotLayout({
   xaxis: {title: {text: 'time from run start (s)'}, range: [0, endSeconds], autorange: false},
   yaxis: Object.assign({title: {text: 'MB/s · sent above, received below'}}, mirroredAxis(series.peak)),
@@ -524,12 +586,14 @@ def class_table(population):
 
 def arrival_table(metrics):
     """The numbers behind the arrival boxes."""
+    arrivals = metrics.get("arrivals") or []
+    styles = group_styles(row["class"] for row in arrivals)
     rows = "".join(
         f'<tr><td>{html.escape(row["message"])}</td>'
-        f'<td><span class="swatch" style="background:{CLASS_STYLE[row["class"]][2]}"></span>{CLASS_STYLE[row["class"]][0]}</td>'
+        f'<td>{swatch(styles[row["class"]][1], styles[row["class"]][2])}{styles[row["class"]][0]}</td>'
         f'<td>{count(row["count"])}</td>' + "".join(f"<td>{seconds(row[key])}</td>" for key in ("p5", "p25", "p50", "p75", "p95"))
         + "</tr>"
-        for row in metrics.get("arrivals") or []
+        for row in arrivals
     )
     return (
         '<table class="arrivals"><thead><tr><th>Message</th><th>Host class</th><th>Samples</th><th>p5</th><th>p25</th>'
@@ -626,7 +690,31 @@ def config_groups(config, metrics):
         gossip.append(("Propagation", "bundled", note))
     elif "signature_propagation" in config:
         gossip.append(("Propagation", "gossipsub", "one message per signature"))
-    return [(title, rows) for title, rows in (("Signatures", signatures), ("Aggregation", aggregation), ("Gossip", gossip)) if rows]
+    churn = []
+    tick = config.get("churn_tick_ms") or 100
+    for kind in ("supernode", "regular"):
+        fraction = config.get(f"{kind}_churn_fraction")
+        if fraction is None:
+            continue
+        label = CLASS_STYLE[kind][0]
+        if not fraction:
+            churn.append((label, "stable", "never offline"))
+            continue
+        leave = config.get(f"{kind}_churn_leave_probability") or 0
+        rejoin = config.get(f"{kind}_churn_rejoin_probability") or 0
+        note = f"a churny host crashes with probability {leave:g} a tick and rejoins with {rejoin:g}"
+        if leave and rejoin:
+            note += (f": {tick / leave / 1000:.1f} s sessions, {tick / rejoin / 1000:.1f} s gaps, "
+                     f"online {rejoin / (leave + rejoin):.0%} of the time")
+        churn.append((label, f"{fraction * 100:g}% churny", note))
+    if any(value != "stable" for _, value, _ in churn):
+        idle = ((metrics.get("churn") or {}).get("idle_timeout_ms") or 10_000) / 1000
+        churn.append(("Tick", f"{tick:,} ms", ""))
+        churn.append(("Crash", "silent", f"all state lost but the peer table; peers hold the dead connection up to {idle:g} s"))
+    else:
+        churn = []
+    groups = (("Signatures", signatures), ("Aggregation", aggregation), ("Gossip", gossip), ("Churn", churn))
+    return [(title, rows) for title, rows in groups if rows]
 
 
 def config_section(config, metrics):
@@ -693,12 +781,15 @@ def transport_section(metrics):
     rows += (f'<tr><th scope="row">Total</th><td><b>{total / 1e6:,.1f} MB</b></td><td></td>'
              f'<td><b>{total / hosts / 1e3:,.0f} kB</b></td><td></td></tr>')
     deliveries = transport["deliveries"]
+    # With churn: signatures a host got again after losing them in a crash, by path.
+    relearned = ((metrics.get("churn") or {}).get("counters") or {}).get("relearned")
     delivery_rows = "".join(
-        f'<tr><td>{name}</td><td>{count(deliveries[via]["unique"])}</td><td>{count(deliveries[via]["duplicate"])}</td></tr>'
+        f'<tr><td>{name}</td><td>{count(deliveries[via]["unique"])}</td><td>{count(deliveries[via]["duplicate"])}</td>'
+        + (f"<td>{count(relearned.get(via, 0))}</td>" if relearned is not None else "") + "</tr>"
         for via, name in (("gossip", "Gossip"), ("pull", "Pull"), ("coded", "Coded repair"),
                           ("bundle", "Bundle push"), ("backlog", "Bundle backlog"),
                           ("requested", "Bundle request"))
-        if via in deliveries and (deliveries[via]["unique"] or deliveries[via]["duplicate"])
+        if via in deliveries and (deliveries[via]["unique"] or deliveries[via]["duplicate"] or (relearned or {}).get(via))
     )
     c = transport["counters"]
     facts = [f'{count(c["idontwant_ids_sent"])} IDONTWANT sent, {count(c["forwards_suppressed"] + c.get("queued_forwards_dropped", 0))} forwards avoided']
@@ -731,7 +822,8 @@ def transport_section(metrics):
         'Per host divides by the hosts that logged transport stats.</p>'
         '<div class="table-scroll"><table class="transport"><thead><tr><th>Traffic</th><th>Bytes</th><th>Share</th><th>Per host</th><th></th></tr></thead>'
         f'<tbody>{rows}</tbody></table></div>'
-        '<div class="table-scroll"><table class="deliveries"><thead><tr><th>Delivered by</th><th>First copies</th><th>Duplicates</th></tr></thead>'
+        '<div class="table-scroll"><table class="deliveries"><thead><tr><th>Delivered by</th><th>First copies</th><th>Duplicates</th>'
+        + ("<th>Got again after a crash</th>" if relearned is not None else "") + '</tr></thead>'
         f'<tbody>{delivery_rows}</tbody></table></div>'
         f'<p class="caption">{html.escape("; ".join(facts))}.</p></section>'
     )
@@ -742,17 +834,183 @@ def kpis(metrics):
     supernodes = sum(item["hosts"] for item in population.get("classes", []) if item["class"] == "supernode")
     signature_p95 = {row["class"]: row["p95"] for row in metrics.get("arrivals") or [] if row["message"] == "Signatures"}
     final = (metrics.get("recursive_aggregation") or {}).get("final_proof_ms")
+    churn = metrics.get("churn")
+    # With churn the class rows are the hosts that never go offline.
+    stable = "stable " if churn else ""
     cells = [
         ("Hosts", count(population.get("hosts")), f"{supernodes:,} supernodes" if population else ""),
         ("Validators", count(population.get("validators") or metrics.get("unique_validators")), f'{count(metrics.get("signing_hosts"))} signing hosts'),
         ("Signature delivery p95", seconds(signature_p95.get("regular", signature_p95.get("unknown"))),
-         f'regular nodes · supernodes {seconds(signature_p95.get("supernode"))}'),
+         f'{stable}regular nodes · {stable}supernodes {seconds(signature_p95.get("supernode"))}'),
         ("Final proof", seconds(final - metrics["t0_ms"]) if final is not None else "–", "first host to hold it"),
     ]
-    return '<div class="kpis">' + "".join(
+    if churn and churn.get("online_at_signing") is not None:
+        offline = churn["hosts"] - churn["online_at_signing"]
+        cells.insert(2, ("Online at signing", share(churn["online_at_signing"], churn["hosts"]),
+                         f'{offline:,} of {churn["hosts"]:,} hosts offline · {churn["missed_signatures"]:,} signatures missed'))
+    return f'<div class="kpis{" five" if len(cells) == 5 else ""}">' + "".join(
         f'<div class="kpi"><span class="label">{label}</span><b>{value}</b><span class="note">{html.escape(note)}</span></div>'
         for label, value, note in cells
     ) + "</div>"
+
+
+def availability_figure(churn, milestones, t0):
+    """Share of hosts online over the run, all hosts and each class with churny ones."""
+    series = [("all", "All hosts", "#0b0b0b", "dot")]
+    series += [(kind, label, color, "solid") for kind, (label, _, color) in CLASS_STYLE.items()]
+    data = []
+    lowest = 100
+    for key, name, color, dash in series:
+        points = churn["availability"].get(key) or []
+        if not points:
+            continue
+        lowest = min(lowest, min(point[1] for point in points))
+        data.append({
+            "type": "scatter", "mode": "lines", "name": name,
+            "x": [point[0] / 1000 for point in points], "y": [point[1] for point in points],
+            "line": {"color": color, "width": 2, "dash": dash, "shape": "hv"},
+            "hovertemplate": "%{y:.1f}% online at %{x:.1f} s<extra>" + name + "</extra>",
+        })
+    shapes, annotations = [], []
+    for index, point in enumerate(milestones):
+        at = (point["time_ms"] - t0) / 1000
+        shapes.append({"type": "line", "xref": "x", "yref": "paper", "x0": at, "x1": at, "y0": 0, "y1": 1,
+                       "line": {"color": "#898781", "width": 1, "dash": "dot"}, "layer": "below"})
+        annotations.append({"xref": "x", "yref": "paper", "x": at, "y": 1.14 if index % 2 else 1.01, "yanchor": "bottom",
+                            "text": f'{point["label"]} · {at:.2f} s', "showarrow": False, "xanchor": "left",
+                            "font": {"color": "#52514e", "size": 12}})
+    return {"data": data, "layout": {
+        "xaxis": {"title": {"text": "time after the first signature was sent (s)"}},
+        "yaxis": {"title": {"text": "hosts online"}, "range": [max(0, math.floor(lowest - 2)), 100.5], "ticksuffix": "%"},
+        "legend": {"orientation": "h", "x": 0, "y": -0.22},
+        "shapes": shapes, "annotations": annotations, "margin": {"t": 64, "b": 84},
+    }}
+
+
+def catch_up_figure(churn):
+    """Share of rejoins that held their subnet's signatures again, by time since the rejoin."""
+    data = []
+    for kind, (label, _, color) in CLASS_STYLE.items():
+        points = (churn["catch_up"].get(kind) or {}).get("cdf") or []
+        if points:
+            data.append({
+                "type": "scatter", "mode": "lines", "name": label,
+                "x": [0] + [point[0] / 1000 for point in points], "y": [0] + [point[1] for point in points],
+                "line": {"color": color, "width": 2.5, "shape": "hv"},
+                "hovertemplate": "%{y:.1f}% within %{x:.2f} s<extra>" + label + "</extra>",
+            })
+    return {"data": data, "layout": {
+        "xaxis": {"title": {"text": "time after the host rejoined (s)"}, "rangemode": "tozero"},
+        "yaxis": {"title": {"text": "rejoins caught up"}, "range": [0, 101], "ticksuffix": "%"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.12},
+    }}
+
+
+def churn_class_table(churn):
+    rows = []
+    for item in churn["classes"]:
+        label, _, color = CLASS_STYLE[item["class"]]
+        online = item["online_at_signing"]
+        rows.append(
+            f'<tr><td>{swatch(color)}{label}</td><td>{count(item["hosts"])}</td>'
+            f'<td>{count(item["churny"])} <span class="note">{share(item["churny"], item["hosts"])}</span></td>'
+            f'<td>{count(online)}' + (f' <span class="note">{share(online, item["hosts"])}</span>' if online is not None else "") + '</td>'
+            f'<td>{count(item["crashes"])}</td><td>{count(item["rejoins"])}</td>'
+            f'<td>{count(item["churny_validators"])} <span class="note">of {count(item["validators"])}</span></td>'
+            f'<td>{count(item["missed_signatures"])} <span class="note">{share(item["missed_signatures"], item["validators"])}</span></td></tr>'
+        )
+    return ('<div class="table-scroll"><table class="churn"><thead><tr><th>Class</th><th>Hosts</th><th>Churny</th>'
+            '<th>Online at signing</th><th>Crashes</th><th>Rejoins</th><th>Validators on churny hosts</th>'
+            '<th>Signatures missed</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>")
+
+
+def catch_up_table(churn):
+    rows = "".join(
+        f'<tr><td>{swatch(color)}{label}</td><td>{count(row["rejoins"])}</td>'
+        f'<td>{count(row["caught_up"])} <span class="note">{share(row["caught_up"], row["rejoins"])}</span></td>'
+        f'<td>{seconds(row["p50"])}</td><td>{seconds(row["p95"])}</td></tr>'
+        for kind, (label, _, color) in CLASS_STYLE.items()
+        for row in [churn["catch_up"].get(kind)] if row
+    )
+    return ('<div class="table-scroll"><table class="churn"><thead><tr><th>Class</th><th>Rejoins × subnets</th><th>Caught up</th>'
+            '<th>Median</th><th>p95</th></tr></thead><tbody>' + rows + "</tbody></table></div>")
+
+
+def completion_table(churn):
+    """Subnet completion of the hosts that never go offline beside the churny ones."""
+    rows = []
+    for key, label in (("stable", "Stable hosts"), ("churny", "Churny hosts")):
+        row = (churn.get("completion") or {}).get(key)
+        if not row:
+            continue
+        cells = "".join(
+            f'<td>{count(row[level]["reached"])} <span class="note">{share(row[level]["reached"], row["pairs"])}</span></td>'
+            f'<td>{seconds(row[level]["p50"])}</td><td>{seconds(row[level]["p95"])}</td>'
+            for level in ("90pct", "100pct")
+        )
+        rows.append(f'<tr><td>{label}</td><td>{count(row["pairs"])}</td>{cells}</tr>')
+    if not rows:
+        return ""
+    return ('<h3>Subnet completion</h3>'
+            '<p class="caption">Per host and subscribed subnet: when the host first held 90% and all of the subnet\'s signatures that '
+            'were sent, after the first signature. A churny host counts from its first copy of each signature, even if a crash '
+            'took it away later. Percentiles count pairs that never got there as never.</p>'
+            '<div class="table-scroll"><table class="churn"><thead><tr><th>Hosts</th><th>Host × subnet pairs</th>'
+            '<th>Held 90%</th><th>Median</th><th>p95</th><th>Held 100%</th><th>Median</th><th>p95</th></tr></thead><tbody>'
+            + "".join(rows) + "</tbody></table></div>")
+
+
+def churn_facts(churn):
+    """Caption sentences about what the crashes cost."""
+    counters = churn.get("counters") or {}
+    facts = []
+    if counters.get("relearned_total"):
+        facts.append(f'{counters["relearned_total"]:,} signatures were received again by hosts that had lost them in a crash')
+    if counters.get("restart_notices_sent"):
+        facts.append(f'rejoining hosts told {counters["restart_notices_sent"]:,} peers they had restarted, and '
+                     f'{counters.get("restart_reconnects", 0):,} of those still held a dead connection and reconnected')
+    failed = [plural(counters[key], noun) for key, noun in (("sync_failures", "sync request"), ("failed_proof_pulls", "proof pull"))
+              if counters.get(key)]
+    if failed:
+        facts.append(" and ".join(failed) + " failed")
+    if counters.get("repeated_proofs"):
+        facts.append(f'{plural(counters["repeated_proofs"], "subnet proof")} built again by an aggregator back from a crash '
+                     'are not counted')
+    return facts
+
+
+def churn_section(metrics, milestones):
+    """The Churn section and its figures; ("", {}) for a run without churn."""
+    churn = metrics.get("churn")
+    if not churn:
+        return "", {}
+    figures = {"churn-availability": availability_figure(churn, milestones, metrics.get("t0_ms") or 0)}
+    idle = churn["idle_timeout_ms"] / 1000
+    facts = "; ".join(churn_facts(churn))
+    catch_up = ""
+    if churn.get("catch_up"):
+        figures["churn-catch-up"] = catch_up_figure(churn)
+        catch_up = (
+            '<h3>Catching up after a rejoin</h3>'
+            f'<p class="caption">For every host that came online after the last signature was sent, and each subnet it subscribes '
+            f'to: how long until it held {churn["catch_up_fraction"]:.0%} of the subnet\'s signatures, starting from none. '
+            'A rejoin that crashed again or ran into the end of the run first never caught up.</p>'
+            '<div class="chart" id="churn-catch-up"></div>' + catch_up_table(churn)
+        )
+    return (
+        '<section aria-labelledby="churn"><h2 id="churn">Churn</h2>'
+        f'<p class="caption">{churn["churny_hosts"]:,} of {churn["hosts"]:,} hosts churn. A churny host crashes without a word, '
+        f'loses all state but its peer table, and dials its peers again when it rejoins. Its peers keep sending to it until '
+        f'QUIC\'s idle timeout ({idle:g} s) closes the connection, unless the host is back sooner. A host that is offline '
+        'when its validators should sign misses the slot.</p>'
+        + churn_class_table(churn)
+        + (f'<p class="caption">{html.escape(facts[0].upper() + facts[1:])}.</p>' if facts else "")
+        + '<h3>Hosts online</h3>'
+        '<p class="caption">Share of hosts online over the run, from the hosts\' own logs. Stable hosts are always online, '
+        'so a class dips by its churny hosts that are offline.</p>'
+        '<div class="chart" id="churn-availability"></div>'
+        + catch_up + completion_table(churn) + '</section>'
+    ), figures
 
 
 def preview_cards(traffic):
@@ -777,6 +1035,7 @@ SUMMARY_TEMPLATE = Template("""<!doctype html>
 $kpis
 $config
 $network
+$churn
 <section aria-labelledby="propagation"><h2 id="propagation">Signature propagation</h2>
 <p class="caption">Share of signatures received by time t. The dotted line counts each validator's signature once, when the first host saw it. The solid lines count every delivery to a host of that class. Hosts receive only the subnets they subscribe to.</p>
 <div class="chart" id="cdf"></div></section>
@@ -806,7 +1065,7 @@ TRAFFIC_TEMPLATE = Template("""<!doctype html>
 <div class="stage-head"><h2 id="traffic-heading">Sent and received traffic</h2><label class="toggle"><input type="checkbox" id="raw-buckets" aria-describedby="curve-note">Raw buckets</label></div>
 <p class="readouts">↑ Sent <b id="sent"></b> · ↓ Received <b id="received"></b> · Peak bucket rate <b id="peak"></b></p>
 <div class="chart tall" id="timeline" role="img" aria-label="Traffic timeline. Sent traffic above zero, received traffic below. Warmup is unmeasured."></div>
-<p class="caption" id="curve-note">Curved display: interpolation only; totals, peak and hover values use raw buckets.</p></section>
+<p class="caption" id="curve-note">Curved display: interpolation only; totals, peak and hover values use raw buckets.</p>$offline_note</section>
 <section aria-labelledby="peers-heading"><h2 id="peers-heading">Peer exchanges</h2><p class="caption">$peer_caption</p>
 <div class="table-scroll"><table class="peer-ledger"><thead><tr><th>Peer</th><th>Sent ↑</th><th>Received ↓</th><th>Traffic mix</th></tr></thead><tbody>$peer_rows</tbody></table></div></section>
 <section><details><summary>Measurement notes</summary>
@@ -906,8 +1165,14 @@ def generate_traffic_html(snapshot, directory, plotly_js):
                 f'<td><span class="mix" aria-hidden="true"><i class="out" style="width:{peer["outbound"] / largest * 100:.3f}%"></i>'
                 f'<i class="in" style="width:{peer["inbound"] / largest * 100:.3f}%"></i></span></td></tr>'
             )
+        offline = logged.get("offline_ms") or []
+        offline_note = ""
+        if offline:
+            offline_note = (f'<p class="caption">Red bands: the host was offline, {plural(len(offline), "time")} for '
+                            f'{sum(end - start for start, end in offline) / 1000:,.1f} s in all. It lost all state each time.</p>')
         document = TRAFFIC_TEMPLATE.substitute(
             node=html.escape(node_id),
+            offline_note=offline_note,
             css=PAGE_CSS,
             facts=html.escape(host_facts(logged.get("host"))),
             duties=duty_line(logged.get("host")),
@@ -941,6 +1206,13 @@ def generate_subnet_html(snapshot, directory, plotly_js):
             f"{count(validators)} validators on them",
             f"{count(row['count'])} subnet aggregator" + ("s" if row["count"] != 1 else ""),
         ]
+        churn = info.get("churn")
+        if churn:
+            facts.append(f"{count(churn['churny'])} churny")
+            if churn.get("online_at_signing") is not None:
+                facts.append(f"{count(churn['online_at_signing'])} online at signing")
+            if churn.get("missed_signatures") is not None:
+                facts.append(f"{count(churn['missed_signatures'])} signatures missed")
         figures = subnet_page_figures(metrics, subnet_id)
         document = SUBNET_TEMPLATE.substitute(
             subnet=subnet_id,
@@ -971,16 +1243,25 @@ def generate_html(snapshot, output):
     traffic = metrics.get("traffic") or {}
     run = metadata.get("run_id") or Path(snapshot["output_dir"]).name
     figures = {"cdf": cdf_figure(metrics), "arrival": arrival_figure(metrics)}
+    churn_html, churn_figures = churn_section(metrics, milestones_for(snapshot))
+    figures.update(churn_figures)
     subnet_proofs = subnet_proofs_figure(metrics)
     subnet_section = ""
     if subnet_proofs:
         figures["subnet-proofs"] = subnet_proofs
         rows = metrics["subnet_proofs"]
+        churn_note = ""
+        if metrics.get("churn"):
+            duties = sum(len(info.get("aggregators") or []) for info in (metrics.get("subnet_hosts") or {}).values())
+            proofs = sum(row["count"] for row in rows)
+            churn_note = " Hollow dots are churny hosts."
+            if duties > proofs:
+                churn_note += f" {duties - proofs:,} of {duties:,} aggregators never finished a subnet proof."
         subnet_section = (
             '<section aria-labelledby="subnet-proofs-heading"><h2 id="subnet-proofs-heading">Subnet proof times</h2>'
             f'<p class="caption">When each aggregator of a subnet finished its subnet proof: {sum(row["count"] for row in rows):,} proofs '
             f'over {len(rows)} subnets. Whiskers span the first to the last aggregator, the box p25 to p75, and the line is the median. '
-            'Each dot is one aggregator, coloured by host class; hover a dot for its node. '
+            f'Each dot is one aggregator, coloured by host class; hover a dot for its node.{churn_note} '
             'Click a subnet label to open its page.</p>'
             f'<div class="chart" id="subnet-proofs" style="height:{subnet_proofs_height(rows)}px"></div></section>'
         )
@@ -1007,6 +1288,7 @@ def generate_html(snapshot, output):
         kpis=kpis(metrics),
         config=config_section(metadata.get("config"), metrics),
         network=network_section(population, aggregators),
+        churn=churn_html,
         arrival_height=max(260, 70 * messages + 110),
         arrival_table=arrival_table(metrics),
         subnet_proofs=subnet_section,

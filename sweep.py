@@ -101,6 +101,28 @@ def latest_snapshot(output_dir: Path) -> dict:
     return snapshots[-1] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[-1], dict) else {}
 
 
+def churn_columns(snapshot: dict) -> dict:
+    """The run's churn numbers as flat results.csv columns; none for a run without churn."""
+    churn = (snapshot.get("metrics") or {}).get("churn")
+    if not churn:
+        return {}
+    columns = {
+        "churn_hosts": churn.get("churny_hosts"),
+        "churn_online_at_signing": churn.get("online_at_signing"),
+        "churn_missed_signatures": churn.get("missed_signatures"),
+        "churn_relearned_signatures": (churn.get("counters") or {}).get("relearned_total"),
+    }
+    for kind, row in (churn.get("catch_up") or {}).items():
+        for key in ("rejoins", "caught_up", "p50", "p95"):
+            columns[f"churn_catch_up_{kind}_{key}"] = row.get(key)
+    for hosts, row in (churn.get("completion") or {}).items():
+        for level in ("90pct", "100pct"):
+            for key in ("reached", "p50", "p95"):
+                columns[f"churn_{hosts}_{level}_{key}"] = ((row or {}).get(level) or {}).get(key)
+        columns[f"churn_{hosts}_pairs"] = (row or {}).get("pairs")
+    return columns
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a leansim parameter sweep.")
     parser.add_argument("config", help="template experiment TOML")
@@ -142,6 +164,7 @@ def main() -> None:
         finally:
             config_path.unlink(missing_ok=True)
         row = latest_snapshot(Path(config["output"]["dir"]))
+        row.update(churn_columns(row))
         row.update({f"param_{key}": value for (key, _), value in zip(params, values)})
         rows.append(row)
     columns = sorted({key for row in rows for key in row})

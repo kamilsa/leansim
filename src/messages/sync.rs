@@ -40,6 +40,10 @@ pub enum SyncRequest {
     Want { subnet: u32, validators: Vec<u32> },
     /// A coded repair packet; answered with [`SyncResponse::Ack`].
     Coded { subnet: u32, packet: CodedPacket },
+    /// Churn: the sender crashed and came back at `since_unix_us` with no state,
+    /// so a connection the receiver holds from before then leads nowhere. Hosts
+    /// share a clock, as under Shadow.
+    Restarted { since_unix_us: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +74,7 @@ impl SyncRequest {
                         + 1
                         + packet.payload.len() as u64
                 }
+                SyncRequest::Restarted { .. } => 8,
             }
     }
 }

@@ -219,6 +219,34 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub bundle_announce: bool,
 
+    /// Churn: how often a churny host may flip between online and offline.
+    #[serde(default = "defaults::default_churn_tick_ms")]
+    pub churn_tick_ms: u64,
+
+    /// Churn: share of regular hosts that churn; 0 = none. The launcher draws each
+    /// churny host's offline windows; a host only follows its own.
+    #[serde(default)]
+    pub regular_churn_fraction: f64,
+
+    /// Churn: chance per tick that an online churny regular host crashes.
+    #[serde(default = "defaults::default_churn_leave_probability")]
+    pub regular_churn_leave_probability: f64,
+
+    /// Churn: chance per tick that an offline churny regular host rejoins.
+    #[serde(default = "defaults::default_churn_rejoin_probability")]
+    pub regular_churn_rejoin_probability: f64,
+
+    /// Churn: share of supernodes that churn; 0 = none. Independent of the
+    /// regular hosts' settings.
+    #[serde(default)]
+    pub supernode_churn_fraction: f64,
+
+    #[serde(default = "defaults::default_churn_leave_probability")]
+    pub supernode_churn_leave_probability: f64,
+
+    #[serde(default = "defaults::default_churn_rejoin_probability")]
+    pub supernode_churn_rejoin_probability: f64,
+
     #[serde(default)]
     pub network_defaults: NetworkDefaults,
 
@@ -332,7 +360,47 @@ impl ExperimentConfig {
                 return Err("bundle_announce requires bundle_stagger_ms > 0".into());
             }
         }
+        if self.churn_tick_ms == 0 {
+            return Err("churn_tick_ms must be > 0".into());
+        }
+        for (class, fraction, leave, rejoin) in [
+            (
+                "regular",
+                self.regular_churn_fraction,
+                self.regular_churn_leave_probability,
+                self.regular_churn_rejoin_probability,
+            ),
+            (
+                "supernode",
+                self.supernode_churn_fraction,
+                self.supernode_churn_leave_probability,
+                self.supernode_churn_rejoin_probability,
+            ),
+        ] {
+            for (key, value) in [
+                ("fraction", fraction),
+                ("leave_probability", leave),
+                ("rejoin_probability", rejoin),
+            ] {
+                if !(0.0..=1.0).contains(&value) {
+                    return Err(format!("{class}_churn_{key} must be in [0.0, 1.0]"));
+                }
+            }
+            if fraction > 0.0 && rejoin == 0.0 {
+                return Err(format!(
+                    "{class}_churn_rejoin_probability must be > 0 when {class}_churn_fraction is"
+                ));
+            }
+        }
+        if self.churn_enabled() && self.gossipsub_explicit_aggregator_count > 0 {
+            return Err("churn does not support gossipsub_explicit_aggregator_count".into());
+        }
         Ok(())
+    }
+
+    /// Whether any host of the run churns.
+    pub fn churn_enabled(&self) -> bool {
+        self.regular_churn_fraction > 0.0 || self.supernode_churn_fraction > 0.0
     }
 
     pub fn heartbeat_initial_delay_ms(&self) -> u64 {
@@ -398,6 +466,14 @@ pub struct NodeConfig {
     /// it only for the experiment's `traffic_log_nodes`).
     #[serde(default)]
     pub traffic_log: bool,
+    /// Churn: `[from_ms, until_ms)` windows since process start during which this
+    /// host is offline, as the launcher drew them. Empty on a host that never churns.
+    #[serde(default)]
+    pub offline_windows_ms: Vec<[u64; 2]>,
+    /// Churn: hosts that dial this one. With `seed_addrs` they are its peer table,
+    /// all of which it dials when it comes back online.
+    #[serde(default)]
+    pub inbound_peer_addrs: Vec<String>,
     pub experiment: ExperimentConfig,
 }
 
@@ -425,6 +501,27 @@ impl NodeConfig {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The `[from_ms, until_ms)` windows of a run of `run_ms` during which this
+    /// host is online: what its offline windows leave. The last one ends at `run_ms`
+    /// unless the host is offline then.
+    pub fn online_windows(&self, run_ms: u64) -> Vec<(u64, u64)> {
+        let mut offline = self.offline_windows_ms.clone();
+        offline.sort_unstable();
+        let mut online = Vec::new();
+        let mut from = 0;
+        for [start, end] in offline {
+            let start = start.min(run_ms);
+            if start > from {
+                online.push((from, start));
+            }
+            from = from.max(end);
+        }
+        if from < run_ms {
+            online.push((from, run_ms));
+        }
+        online
     }
 }
 

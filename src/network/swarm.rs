@@ -7,7 +7,7 @@ use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -48,12 +48,57 @@ pub fn peer_id_for(node_id: u32) -> PeerId {
     node_keypair(node_id).public().to_peer_id()
 }
 
-/// Tracks address-based explicit peers because generated configs do not know PeerIds in advance.
+/// Churn counters of one host's connections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkStats {
+    /// Peers told that this host restarted.
+    pub restart_notices_sent: u64,
+    /// Peers dropped and redialed because they restarted.
+    pub restart_reconnects: u64,
+}
+
+/// This host's connections to one peer, from the first to come up until the last closes.
+struct Link {
+    since_unix_us: u64,
+    /// Where the peer listens: the remote address of its latest connection.
+    addr: Multiaddr,
+}
+
+/// What [`ExplicitPeerManager::intercept`] made of a swarm event.
+enum Intercepted {
+    Handled,
+    /// The last connection to this peer closed.
+    PeerGone(PeerId),
+    Other(SwarmEvent<SimBehaviourEvent>),
+}
+
+fn unix_us(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_micros() as u64)
+}
+
+/// Tracks address-based explicit peers because generated configs do not know PeerIds in advance,
+/// and every peer's connections, to reconnect cleanly to one that crashed and came back.
+///
+/// A crashed host sends nothing, so its peers keep their connections to it until QUIC's
+/// idle timeout. If it rejoins sooner, a peer ends up with an old and a new connection, and
+/// gossipsub, which only greets the first connection to a peer, never sends the newcomer its
+/// subscriptions. So a rejoined host tells every peer when it came back
+/// ([`SyncRequest::Restarted`]); a peer whose connections to it started before then drops
+/// them all and dials it again.
 pub struct ExplicitPeerManager {
     explicit_addrs: HashSet<Multiaddr>,
     selected_aggregator_addrs: HashSet<Multiaddr>,
     peers_by_addr: HashMap<Multiaddr, PeerId>,
     addrs_by_peer: HashMap<PeerId, Multiaddr>,
+    links: HashMap<PeerId, Link>,
+    /// Peers dropped as restarted, to dial once their last connection has closed.
+    redial: HashMap<PeerId, Multiaddr>,
+    /// On a host that crashed and came back: when it came back.
+    rejoined_at: Option<u64>,
+    notified: HashSet<PeerId>,
+    notices: HashSet<request_response::OutboundRequestId>,
+    stats: LinkStats,
 }
 
 impl ExplicitPeerManager {
@@ -71,11 +116,144 @@ impl ExplicitPeerManager {
             selected_aggregator_addrs,
             peers_by_addr: HashMap::new(),
             addrs_by_peer: HashMap::new(),
+            links: HashMap::new(),
+            redial: HashMap::new(),
+            rejoined_at: None,
+            notified: HashSet::new(),
+            notices: HashSet::new(),
+            stats: LinkStats::default(),
         })
     }
 
     pub fn all_addrs(&self) -> impl Iterator<Item = &Multiaddr> {
         self.explicit_addrs.iter()
+    }
+
+    /// Marks this host as back from a crash since `since`: it tells every peer it
+    /// connects to.
+    pub fn announce_restart(&mut self, since: SystemTime) {
+        self.rejoined_at = Some(unix_us(since));
+    }
+
+    pub fn link_stats(&self) -> LinkStats {
+        self.stats
+    }
+
+    /// Handles connection events and restart notices; hands back any other event.
+    fn intercept(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        event: SwarmEvent<SimBehaviourEvent>,
+    ) -> Intercepted {
+        match event {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                self.on_established(swarm, peer_id, endpoint.get_remote_address());
+                Intercepted::Handled
+            }
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                if self.on_closed(swarm, peer_id, num_established) {
+                    Intercepted::PeerGone(peer_id)
+                } else {
+                    Intercepted::Handled
+                }
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Sync(request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request: SyncRequest::Restarted { since_unix_us },
+                        channel,
+                        ..
+                    },
+            })) => {
+                let _ = swarm
+                    .behaviour_mut()
+                    .sync
+                    .send_response(channel, SyncResponse::Ack);
+                self.on_restart_notice(swarm, peer, since_unix_us);
+                Intercepted::Handled
+            }
+            // The answer to a restart notice, or its loss when the peer dropped this host.
+            SwarmEvent::Behaviour(SimBehaviourEvent::Sync(request_response::Event::Message {
+                message: request_response::Message::Response { request_id, .. },
+                ..
+            })) if self.notices.remove(&request_id) => Intercepted::Handled,
+            SwarmEvent::Behaviour(SimBehaviourEvent::Sync(
+                request_response::Event::OutboundFailure { request_id, .. },
+            )) if self.notices.remove(&request_id) => Intercepted::Handled,
+            other => Intercepted::Other(other),
+        }
+    }
+
+    fn on_established(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        peer_id: PeerId,
+        remote_addr: &Multiaddr,
+    ) {
+        self.register_connection(swarm, peer_id, remote_addr);
+        self.links
+            .entry(peer_id)
+            .and_modify(|link| link.addr = remote_addr.clone())
+            .or_insert_with(|| Link {
+                since_unix_us: unix_us(SystemTime::now()),
+                addr: remote_addr.clone(),
+            });
+        if let Some(since_unix_us) = self.rejoined_at {
+            if self.notified.insert(peer_id) {
+                let request_id = swarm
+                    .behaviour_mut()
+                    .sync
+                    .send_request(&peer_id, SyncRequest::Restarted { since_unix_us });
+                self.notices.insert(request_id);
+                self.stats.restart_notices_sent += 1;
+            }
+        }
+    }
+
+    /// Returns whether that was the last connection to the peer.
+    fn on_closed(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        peer_id: PeerId,
+        num_established: u32,
+    ) -> bool {
+        self.handle_disconnection(swarm, peer_id, num_established);
+        if num_established != 0 {
+            return false;
+        }
+        self.links.remove(&peer_id);
+        if let Some(addr) = self.redial.remove(&peer_id) {
+            self.stats.restart_reconnects += 1;
+            if let Err(error) = swarm.dial(addr.clone()) {
+                tracing::warn!(peer = %peer_id, address = %addr, "redial restarted peer failed: {error}");
+            }
+        }
+        true
+    }
+
+    /// `peer` came back from a crash at `since_unix_us`. Connections that started
+    /// before then include one to its previous session, and gossipsub's view of
+    /// the peer dates from it: drop them all, and dial again once they are closed.
+    fn on_restart_notice(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        peer: PeerId,
+        since_unix_us: u64,
+    ) {
+        let Some(link) = self.links.get(&peer) else {
+            return;
+        };
+        if link.since_unix_us < since_unix_us && !self.redial.contains_key(&peer) {
+            self.redial.insert(peer, link.addr.clone());
+            let _ = swarm.disconnect_peer_id(peer);
+        }
     }
 
     fn dial_missing_selected_aggregators(&self, swarm: &mut Swarm<SimBehaviour>) {
@@ -335,6 +513,11 @@ pub enum NetEvent {
         topic: gossipsub::TopicHash,
         peers: Vec<PeerId>,
     },
+    /// The last connection to a peer closed. If it connects again it may be a
+    /// restarted host with no state, so nothing known about it holds any more.
+    PeerDisconnected {
+        peer: PeerId,
+    },
 }
 
 /// Runs the swarm until the next gossip message or proof-protocol event.
@@ -346,6 +529,11 @@ pub async fn next_event(
 ) -> Option<NetEvent> {
     loop {
         let event = swarm.next().await?;
+        let event = match explicit_peers.intercept(swarm, event) {
+            Intercepted::Handled => continue,
+            Intercepted::PeerGone(peer) => return Some(NetEvent::PeerDisconnected { peer }),
+            Intercepted::Other(event) => event,
+        };
         match event {
             SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 propagation_source: peer_id,
@@ -474,14 +662,6 @@ pub async fn next_event(
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!("listening on {address}");
             }
-            SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
-            } => explicit_peers.register_connection(swarm, peer_id, endpoint.get_remote_address()),
-            SwarmEvent::ConnectionClosed {
-                peer_id,
-                num_established,
-                ..
-            } => explicit_peers.handle_disconnection(swarm, peer_id, num_established),
             _ => {}
         }
     }
@@ -502,6 +682,20 @@ pub async fn dial_seeds(
     selected_aggregator_topics: &[IdentTopic],
     configured_warmup_ms: Option<u64>,
 ) -> Result<()> {
+    let dialed = dial_peers(swarm, seeds, explicit_peers)?;
+    let warmup = Duration::from_millis(warmup_ms(dialed, configured_warmup_ms));
+    poll_warmup(swarm, explicit_peers, tokio::time::Instant::now() + warmup).await;
+    await_selected_aggregators(swarm, explicit_peers, selected_aggregator_topics, warmup).await?;
+    tracing::info!("mesh warmup complete");
+    Ok(())
+}
+
+/// Dials `seeds` and every explicit peer; returns how many addresses that was.
+pub fn dial_peers(
+    swarm: &mut Swarm<SimBehaviour>,
+    seeds: &[String],
+    explicit_peers: &ExplicitPeerManager,
+) -> Result<usize> {
     let mut dial_addrs = parse_addrs(seeds)?;
     dial_addrs.extend(explicit_peers.all_addrs().cloned());
     for ma in dial_addrs.iter().cloned() {
@@ -517,59 +711,57 @@ pub async fn dial_seeds(
     if dial_addrs.is_empty() {
         tracing::info!("no seeds to dial; waiting for inbound peers");
     }
+    Ok(dial_addrs.len())
+}
 
-    // Poll for connection events and mesh formation.
-    let warmup_ms = warmup_ms(dial_addrs.len(), configured_warmup_ms);
-    poll_warmup(swarm, explicit_peers, warmup_ms).await;
-
-    if !selected_aggregator_topics.is_empty() {
-        let topics = selected_aggregator_topics;
-        if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
-            explicit_peers.dial_missing_selected_aggregators(swarm);
-            poll_warmup(swarm, explicit_peers, warmup_ms).await;
-        }
-        if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
-            anyhow::bail!(
-                "selected explicit aggregators were not connected and subscribed during warmup"
-            );
-        }
+/// After the warmup: every selected explicit aggregator must be connected and
+/// subscribed. Missing ones are dialed again and given `retry` more.
+pub async fn await_selected_aggregators(
+    swarm: &mut Swarm<SimBehaviour>,
+    explicit_peers: &mut ExplicitPeerManager,
+    topics: &[IdentTopic],
+    retry: Duration,
+) -> Result<()> {
+    if topics.is_empty() {
+        return Ok(());
     }
-
-    tracing::info!("mesh warmup complete");
+    if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
+        explicit_peers.dial_missing_selected_aggregators(swarm);
+        poll_warmup(swarm, explicit_peers, tokio::time::Instant::now() + retry).await;
+    }
+    if !explicit_peers.selected_aggregators_ready(&swarm.behaviour().gossipsub, topics) {
+        anyhow::bail!(
+            "selected explicit aggregators were not connected and subscribed during warmup"
+        );
+    }
     Ok(())
 }
 
-async fn poll_warmup(
+/// Polls for connections and mesh formation until `until`. Gossip that arrives
+/// meanwhile is dropped, so every host of a run warms up over the same time.
+pub async fn poll_warmup(
     swarm: &mut Swarm<SimBehaviour>,
     explicit_peers: &mut ExplicitPeerManager,
-    warmup_ms: u64,
+    until: tokio::time::Instant,
 ) {
-    let warmup = tokio::time::Instant::now() + std::time::Duration::from_millis(warmup_ms);
     loop {
-        let remaining = warmup.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
         match tokio::time::timeout(remaining, swarm.next()).await {
-            Ok(Some(SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
-            })) => {
-                tracing::info!("connected to peer {peer_id}");
-                explicit_peers.register_connection(swarm, peer_id, endpoint.get_remote_address());
-            }
-            Ok(Some(SwarmEvent::ConnectionClosed {
-                peer_id,
-                num_established,
-                ..
-            })) => {
-                explicit_peers.handle_disconnection(swarm, peer_id, num_established);
-            }
-            Ok(Some(SwarmEvent::OutgoingConnectionError { error, .. })) => {
-                tracing::warn!("outgoing connection error: {error}");
+            Ok(Some(event)) => {
+                if let SwarmEvent::ConnectionEstablished { peer_id, .. } = &event {
+                    tracing::info!("connected to peer {peer_id}");
+                }
+                if let Intercepted::Other(SwarmEvent::OutgoingConnectionError { error, .. }) =
+                    explicit_peers.intercept(swarm, event)
+                {
+                    tracing::warn!("outgoing connection error: {error}");
+                }
             }
             Ok(None) => break,
             Err(_) => break, // timeout
-            _ => {}
         }
     }
 }

@@ -122,3 +122,17 @@ pub const fn default_bundle_stagger_ms() -> u64 {
 pub const fn default_bundle_request_delay_ms() -> u64 {
     0
 }
+
+pub const fn default_churn_tick_ms() -> u64 {
+    100
+}
+
+/// Lean Gossip's churny peers: 10 s mean sessions at 100 ms ticks.
+pub const fn default_churn_leave_probability() -> f64 {
+    0.01
+}
+
+/// Lean Gossip's churny peers: 2 s mean gaps at 100 ms ticks.
+pub const fn default_churn_rejoin_probability() -> f64 {
+    0.05
+}

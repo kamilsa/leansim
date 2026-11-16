@@ -69,3 +69,79 @@ def write_fixture_run(directory: Path) -> Path:
         encoding="utf-8",
     )
     return directory
+
+
+# A four-host run with churn. Host 0 is a stable supernode with validators 0-1
+# that aggregates subnet 0; host 1 is a churny regular node with validator 2 and
+# a traffic log, which crashes at 1500 ms and is back at 2500 ms; host 2 is a
+# churny regular node with validator 3 that starts the run offline and joins at
+# 1200 ms, after the signatures were sent at 1000-1010 ms, so it never signs;
+# host 3 is a stable relay.
+CHURN_NODES = [
+    {"node_id": 0, "role": "local_aggregator", "validator_ids": [0, 1], "country": "finland", "supernode": True,
+     "uplink_mbps": 1000, "downlink_mbps": 1000, "subscribed_subnets": [0], "aggregated_subnets": [0], "churny": False},
+    {"node_id": 1, "role": "validator", "validator_ids": [2], "country": "germany", "supernode": False,
+     "uplink_mbps": 50, "downlink_mbps": 100, "subscribed_subnets": [0], "churny": True, "offline_windows_ms": [[1500, 2500]]},
+    {"node_id": 2, "role": "validator", "validator_ids": [3], "country": "germany", "supernode": False,
+     "uplink_mbps": 50, "downlink_mbps": 100, "subscribed_subnets": [0], "churny": True, "offline_windows_ms": [[0, 1200]]},
+    {"node_id": 3, "role": "relay", "validator_ids": [], "country": "germany", "supernode": False,
+     "uplink_mbps": 50, "downlink_mbps": 100, "subscribed_subnets": [0], "churny": False},
+]
+
+CHURN_EVENTS = {
+    0: [
+        {"event": "SigSent", "node_id": 0, "validator_id": 0, "subnet_id": 0, "ts_ms": 1000},
+        {"event": "SigSent", "node_id": 0, "validator_id": 1, "subnet_id": 0, "ts_ms": 1000},
+        {"event": "SigReceived", "node_id": 0, "from_id": 1, "validator_id": 2, "subnet_id": 0, "duplicate": False, "ts_ms": 1050},
+        {"event": "LocalProofGenerated", "node_id": 0, "subnet_id": 0, "sig_count": 3, "latency_ms": 1100},
+        {"event": "TransportStats", "node_id": 0, "restart_reconnects": 1, "sync_failures": 1},
+    ],
+    1: [
+        {"event": "SigSent", "node_id": 1, "validator_id": 2, "subnet_id": 0, "ts_ms": 1010},
+        {"event": "SigReceived", "node_id": 1, "from_id": 0, "validator_id": 0, "subnet_id": 0, "duplicate": False, "ts_ms": 1100, "via": "bundle"},
+        {"event": "SigReceived", "node_id": 1, "from_id": 0, "validator_id": 1, "subnet_id": 0, "duplicate": False, "ts_ms": 1150, "via": "bundle"},
+        {"event": "TrafficBucket", "node_id": 1, "start_ms": 1100, "width_ms": 100, "inbound": {"signature": 2400}, "outbound": {}},
+        {"event": "TransportStats", "node_id": 1},
+        {"event": "Churn", "node_id": 1, "online": False, "ts_ms": 1500},
+        {"event": "Churn", "node_id": 1, "online": True, "ts_ms": 2500},
+        # Back with nothing: it gets what it held before again, and its own signature for the first time.
+        {"event": "SigReceived", "node_id": 1, "from_id": 0, "validator_id": 0, "subnet_id": 0, "duplicate": False, "ts_ms": 2600, "via": "backlog"},
+        {"event": "SigReceived", "node_id": 1, "from_id": 0, "validator_id": 1, "subnet_id": 0, "duplicate": False, "ts_ms": 2700, "via": "backlog"},
+        {"event": "SigReceived", "node_id": 1, "from_id": 0, "validator_id": 1, "subnet_id": 0, "duplicate": True, "ts_ms": 2750, "via": "backlog"},
+        {"event": "SigReceived", "node_id": 1, "from_id": 1, "validator_id": 2, "subnet_id": 0, "duplicate": False, "ts_ms": 2800, "via": "backlog"},
+        {"event": "TrafficBucket", "node_id": 1, "start_ms": 2600, "width_ms": 100, "inbound": {"signature": 2400}, "outbound": {}},
+        {"event": "TransportStats", "node_id": 1, "restart_notices_sent": 2},
+    ],
+    2: [
+        {"event": "Churn", "node_id": 2, "online": False, "ts_ms": 0},
+        {"event": "Churn", "node_id": 2, "online": True, "ts_ms": 1200},
+        {"event": "SigReceived", "node_id": 2, "from_id": 0, "validator_id": 0, "subnet_id": 0, "duplicate": False, "ts_ms": 1300, "via": "requested"},
+        {"event": "SigReceived", "node_id": 2, "from_id": 0, "validator_id": 1, "subnet_id": 0, "duplicate": False, "ts_ms": 1400, "via": "requested"},
+        {"event": "SigReceived", "node_id": 2, "from_id": 1, "validator_id": 2, "subnet_id": 0, "duplicate": False, "ts_ms": 1900, "via": "requested"},
+        {"event": "TransportStats", "node_id": 2},
+    ],
+    3: [
+        {"event": "SigReceived", "node_id": 3, "from_id": 0, "validator_id": 0, "subnet_id": 0, "duplicate": False, "ts_ms": 1020},
+        {"event": "SigReceived", "node_id": 3, "from_id": 0, "validator_id": 1, "subnet_id": 0, "duplicate": False, "ts_ms": 1030},
+        {"event": "SigReceived", "node_id": 3, "from_id": 1, "validator_id": 2, "subnet_id": 0, "duplicate": False, "ts_ms": 1060},
+    ],
+}
+
+CHURN_EXPERIMENT = {
+    "local_threshold": 0.75, "mesh_warmup_ms": 900, "run_timeout_secs": 5, "validator_count": 4, "subnet_count": 1,
+    "supernode_by_validator_count": 2, "signature_propagation": "bundled",
+    "churn_tick_ms": 100, "regular_churn_fraction": 0.5, "regular_churn_leave_probability": 0.01,
+    "regular_churn_rejoin_probability": 0.05, "supernode_churn_fraction": 0.0,
+    "supernode_churn_leave_probability": 0.01, "supernode_churn_rejoin_probability": 0.05,
+}
+
+
+def write_churn_run(directory: Path) -> Path:
+    """Write the churn fixture run into `directory`, one log per host, and return it."""
+    for node_id, events in CHURN_EVENTS.items():
+        stdout = directory / "shadow.data" / "hosts" / f"node-{node_id}" / "leansim.1000.stdout"
+        stdout.parent.mkdir(parents=True)
+        stdout.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+    manifest = {"run_id": "churn-fixture", "experiment": CHURN_EXPERIMENT, "nodes": CHURN_NODES}
+    (directory / "run-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return directory

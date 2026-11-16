@@ -240,6 +240,8 @@ pub struct SigSync<P> {
     settings: SyncSettings,
     subnets: BTreeMap<u32, SubnetSync<P>>,
     rng: StdRng,
+    /// Whether a mesh neighbour hears this host's bitmap while it is still empty.
+    advertise_empty: bool,
 }
 
 impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
@@ -255,7 +257,17 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
                 .map(|subnet| (subnet, SubnetSync::new(subnet * size as u32, size, coded)))
                 .collect(),
             rng: StdRng::seed_from_u64(seed),
+            advertise_empty: false,
         }
+    }
+
+    /// For a host that joins a network already holding signatures (churn): it
+    /// sends each mesh neighbour its bitmap even while it holds nothing, so they
+    /// can repair it. A host that starts with the run waits for its first
+    /// signature, as nobody has anything to send it before.
+    pub fn advertising_empty(mut self) -> Self {
+        self.advertise_empty = true;
+        self
     }
 
     pub fn mode(&self) -> SignatureSync {
@@ -286,6 +298,15 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
                 .map(|word| word.count_ones() as usize)
                 .sum()
         })
+    }
+
+    /// Drops everything known about `peer`, whose last connection closed: it may
+    /// come back as a restarted host holding nothing, and must hear this host's
+    /// bitmap again.
+    pub fn forget_peer(&mut self, peer: P) {
+        for sync in self.subnets.values_mut() {
+            sync.peers.remove(&peer);
+        }
     }
 
     /// Pending coded equations across subnets.
@@ -432,7 +453,7 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
             // neighbours that got signatures after its last one learn it lacks them.
             let held: usize = sync.held.0.iter().map(|w| w.count_ones() as usize).sum();
             let incomplete = held < size;
-            if sync.version > 0 {
+            if sync.version > 0 || self.advertise_empty {
                 let bitmap = sync.held.to_bytes(size);
                 for &peer in &peers {
                     let view = sync.peers.entry(peer).or_insert_with(PeerView::new);
@@ -440,7 +461,8 @@ impl<P: Copy + Eq + Hash + Ord> SigSync<P> {
                         && view.advertised_at.is_some_and(|at| {
                             now.saturating_duration_since(at) >= settings.refresh
                         });
-                    if view.advertised_version != sync.version || due {
+                    let unheard = self.advertise_empty && view.advertised_at.is_none();
+                    if view.advertised_version != sync.version || due || unheard {
                         view.advertised_version = sync.version;
                         view.advertised_at = Some(now);
                         actions.push(Action::Have {
@@ -690,6 +712,50 @@ mod tests {
             .count();
         assert_eq!(haves, 2);
         assert!(sync.tick(now, |_| vec![1, 2]).is_empty());
+    }
+
+    #[test]
+    fn a_forgotten_peer_hears_the_bitmap_again_and_is_not_pulled_from() {
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_millis(100);
+        let mut sync: SigSync<u8> = SigSync::new(settings(SignatureSync::BitmapPull), [0], 0);
+        sync.deliver(0, 2, 0, t0);
+        sync.on_have(1, 0, &bitmap(&[5]), t0);
+        let haves = |actions: Vec<Action<u8>>| {
+            actions
+                .into_iter()
+                .filter(|a| matches!(a, Action::Have { .. }))
+                .count()
+        };
+        assert_eq!(haves(sync.tick(t0, |_| vec![1])), 1);
+        assert_eq!(haves(sync.tick(t0, |_| vec![1])), 0, "bitmap unchanged");
+
+        // Peer 1 crashed and is back holding nothing: what it advertised is gone
+        // with it, and it has not heard this host's bitmap.
+        sync.forget_peer(1);
+        let actions = sync.tick(later, |_| vec![1]);
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::Want { .. })),
+            "nothing to pull from a peer that holds nothing"
+        );
+        assert_eq!(haves(actions), 1);
+    }
+
+    #[test]
+    fn a_host_that_joins_late_advertises_its_empty_bitmap() {
+        let now = Instant::now();
+        let mut sync: SigSync<u8> =
+            SigSync::new(settings(SignatureSync::CodedRepair), [0], 0).advertising_empty();
+        let empty = Action::Have {
+            peer: 1,
+            subnet: 0,
+            bitmap: bitmap(&[]),
+        };
+        assert_eq!(sync.tick(now, |_| vec![1]), vec![empty.clone()]);
+        assert!(sync.tick(now, |_| vec![1]).is_empty(), "once per neighbour");
+        // Still incomplete after the refresh: the neighbour hears it again.
+        let later = now + Duration::from_millis(1000);
+        assert_eq!(sync.tick(later, |_| vec![1]), vec![empty]);
     }
 
     #[test]
