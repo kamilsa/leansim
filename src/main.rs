@@ -41,6 +41,13 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Run a node in the proof-only dissemination benchmark.
+    SubnetProof {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        settings: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -52,6 +59,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Node { config } => run_node(config),
+        Command::SubnetProof { config, settings } => {
+            let cfg: NodeConfig = toml::from_str(&std::fs::read_to_string(config)?)?;
+            cfg.experiment.validate().map_err(anyhow::Error::msg)?;
+            let settings = serde_json::from_reader(std::fs::File::open(settings)?)?;
+            leansim::node::subnet_proof_run::run(&cfg, &settings)
+        }
     }
 }
 

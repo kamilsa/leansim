@@ -392,11 +392,19 @@ fn build_gossipsub(
     key: &identity::Keypair,
     config: &ExperimentConfig,
 ) -> Result<gossipsub::Behaviour> {
+    gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(key.clone()),
+        gossipsub_config(config)?,
+    )
+    .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
+}
+
+pub(crate) fn gossipsub_config(config: &ExperimentConfig) -> Result<gossipsub::Config> {
     let mut builder = gossipsub::ConfigBuilder::default();
     if !config.gossipsub_gossip {
         builder.gossip_lazy(0).gossip_factor(0.0);
     }
-    let gossipsub_config = builder
+    builder
         .mesh_n_low(config.gossipsub_mesh_n_low)
         .mesh_n(config.gossipsub_mesh_n)
         .mesh_n_high(config.gossipsub_mesh_n_high)
@@ -410,13 +418,7 @@ fn build_gossipsub(
         .max_transmit_size(2 * 1024 * 1024) // 2 MiB for large proof messages
         .validate_messages()
         .build()
-        .map_err(|e| anyhow::anyhow!("gossipsub config error: {e}"))?;
-
-    gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(key.clone()),
-        gossipsub_config,
-    )
-    .map_err(|e| anyhow::anyhow!("gossipsub behaviour error: {e}"))
+        .map_err(|e| anyhow::anyhow!("gossipsub config error: {e}"))
 }
 
 /// Marks `subnets`' topics as partial-message topics (EIP-8334 bundles). Call it

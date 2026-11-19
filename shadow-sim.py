@@ -1327,7 +1327,7 @@ def yaml_quote(value: str) -> str:
     return json.dumps(value)
 
 
-def write_shadow_yaml(path: Path, nodes: list[dict], experiment: dict, binary: str) -> None:
+def write_shadow_yaml(path: Path, nodes: list[dict], experiment: dict, binary: str, *, command: str = "node") -> None:
     lines = [
         "general:",
         f'  stop_time: "{experiment["run_timeout_secs"] + 10}s"',
@@ -1339,7 +1339,7 @@ def write_shadow_yaml(path: Path, nodes: list[dict], experiment: dict, binary: s
         "hosts:",
     ]
     for node in sorted(nodes, key=lambda item: f"node-{item['node_id']}"):
-        process_args = f"node --config {node['config_path']}"
+        process_args = f"{command} --config {node['config_path']}"
         lines.extend(
             [
                 f"  node-{node['node_id']}:",

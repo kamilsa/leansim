@@ -238,6 +238,75 @@ On the 65k network (`experiments/nodemap-small-65k-recursive-sub64.toml`):
 | 4 | 21 (16/4/1) | 269 (92) | 8-18 | 16 |
 | 8 | 9 (8/1) | 115 (57) | 7-18 | 8 |
 
+### Subnet-proof broadcast comparison (PQ-CL)
+
+`scripts/subnet-proof-campaign.py` runs the same single-round workload in Shadow
+with four strategies on the same connections and producer roster:
+
+- `announce_pull`: a holder announces each complete proof to its connected
+  peers. A receiver fetches one copy from the first advertiser, retries another
+  on failure, and reannounces only after the full response arrives.
+- `gossipsub`: the producer publishes each proof whole on a global proof topic.
+- `eip8411`: the producer gossips its authenticated Merkle commitment before
+  release and publishes independent pieces on one global proof topic. A receiver
+  checks each piece against the commitment before forwarding and needs every
+  index from the same producer to count a proof as available. This adapts the
+  draft's chunked GossipSub path, not Lighthouse's Waggle implementation. It
+  uses leanSim's signed pubsub transport, with no block, BAL or erasure coding.
+- `waggle`: the same signed GossipSub commitment and authenticated chunks as
+  `eip8411`, but chunk data travels on one Waggle topic over mutually subscribed
+  connections. The proof policy follows ec-sim's Lighthouse-inspired defaults:
+  push to up to two peers per chunk, favor shorter queues, coalesce inventories
+  over 50 ms, and pull rare chunks with one outstanding request per peer per
+  proof. Receivers eager-push for 250 ms after their first chunk; producers are
+  exempt. This uses leanSim's vendored Waggle library and proof-specific encoding,
+  not Lighthouse block messages or ec-sim's optional turn-taking policy.
+
+Run all four arms for two seeds and one or two producers per subnet:
+
+```sh
+python3 scripts/subnet-proof-campaign.py output-subnet-proofs \
+  --build --nodes 256 --seeds 42 43 --copies 1 2 --seconds 25
+```
+
+On a machine with a working local leanSim Shadow image, use
+`--base-image leansim-shadow:waggle` with `--build` to reuse its Shadow runtime.
+Default proof size is 200,000 bytes, with 16 subnets, 64 chunks, 500 ms commitment
+lead, and IDONTWANT enabled above 1,000 bytes for GossipSub. Mesh settings apply
+to the Waggle arm's commitment topic, not its chunk transport. Regular
+hosts have 25/50 Mbit/s up/down; 5% have 1 Gbit/s each way. Every host is a
+candidate proposer. The synthetic proof bytes are released together by default;
+pass `--stagger-ms` to spread release times across producers.
+
+To reuse an existing mixed network, pass `--network-config` with its experiment
+TOML and keep the referenced node map relative to that file. This preserves the
+host and validator placement, bandwidth, geographic latency, and peer overlay
+for each seed. Producers are distinct validator hosts with duties in the
+corresponding subnet. The one-producer roster is a subset of the two-producer
+roster. Every host, including relays, is measured for proof readiness.
+
+On a Linux host with Shadow installed, build with `cargo build --release --locked`
+and use `--native-binary target/release/leansim` instead of `--build`. For example:
+
+```sh
+python3 scripts/subnet-proof-campaign.py output-subnet-proofs-mixed \
+  --network-config mixed-network.toml --native-binary target/release/leansim \
+  --seeds 42 43 --copies 1 2 --seconds 25 --parallelism 24
+```
+
+`comparison.json` and each arm's `receivers.csv` record coverage and time from
+first release until a host has at least one full proof for every subnet (its own
+proof counts). The denominator for traffic overhead is one full transfer per
+non-origin host for every produced proof, not just the first proof per subnet.
+Traffic counts bytes written to QUIC streams, including duplicate data, framing
+and control from first commitment time to run end. It excludes UDP/IP, packet
+overhead and retransmissions. Missing receivers are counted separately and not
+included in latency percentiles.
+
+This benchmark does not send signatures, perform real proof verification or
+recursion, model churn, or include parallel block traffic. Arrival latency is
+not time from the start of a slot and does not validate a slot schedule by itself.
+
 #### Traffic logs
 
 Logging every host's traffic would dominate the run's output, so logging is

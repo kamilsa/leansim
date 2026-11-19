@@ -7,5 +7,8 @@ pub mod proof_io;
 pub mod recursive;
 pub mod sigsync;
 pub mod state;
+pub mod subnet_proof_run;
+mod subnet_proof_waggle;
+pub mod subnet_proofs;
 pub mod sync_io;
 pub mod validator;
