@@ -675,8 +675,7 @@ def config_groups(config, metrics):
                 degree = config["sync_coded_degree"] or "log2(gaps)+2"
                 note += f', degree {degree}, redundancy {config["sync_coded_redundancy"]}'
         gossip.append(("Signature sync", names.get(mode, str(mode)), note))
-    if config.get("signature_propagation") == "bundled":
-        note = "EIP-8334 over gossipsub partial messages"
+    def bundle_note(note):
         if has("bundle_tick_ms", "bundle_max_signatures"):
             tick = config["bundle_tick_ms"]
             note = (f'{"every arrival" if tick == 0 else f"every {tick:,} ms"}, '
@@ -687,7 +686,28 @@ def config_groups(config, metrics):
                 note += " and announces"
         if config.get("bundle_request_delay_ms"):
             note += f'; requests wait {config["bundle_request_delay_ms"]:,} ms'
-        gossip.append(("Propagation", "bundled", note))
+        return note
+
+    if config.get("signature_transport") == "waggle":
+        push = config.get("waggle_push_peers")
+        if config.get("waggle_push_selection") == "hashed":
+            note = ("a hash of each signature and the two peer ids names the end of a link that sends it; "
+                    + ("pushed to every subscriber it names this host for" if not push
+                       else f"pushed to at most {push:,} of the subscribers it names this host for"))
+        else:
+            note = "" if push is None else ("pushes to every subscriber of a subnet" if push == 0
+                                            else f"pushes to {push:,} subscribers of a subnet")
+        if config.get("waggle_gossip_peers"):
+            interval = config.get("waggle_gossip_interval_ms") or config.get("gossipsub_heartbeat_interval_ms")
+            note += (f'{"; " if note else ""}advertises to {config["waggle_gossip_peers"]:,} others'
+                     + (f" every {interval:,} ms" if interval else ""))
+        gossip.append(("Transport", "waggle", note))
+        if config.get("waggle_bundled", True):
+            gossip.append(("Propagation", "bundled", bundle_note("EIP-8334 over waggle")))
+        else:
+            gossip.append(("Propagation", "single", "one waggle message per signature, forwarded on receipt"))
+    elif config.get("signature_propagation") == "bundled":
+        gossip.append(("Propagation", "bundled", bundle_note("EIP-8334 over gossipsub partial messages")))
     elif "signature_propagation" in config:
         gossip.append(("Propagation", "gossipsub", "one message per signature"))
     churn = []
@@ -808,6 +828,8 @@ def transport_section(metrics):
                      + (f', {count(c["requests_avoided"])} arrived during the request delay' if c.get("requests_avoided") else ""))
     if c.get("invalid_partials"):
         facts.append(f'{count(c["invalid_partials"])} malformed bundles or metadata dropped')
+    if c.get("frames_unsent"):
+        facts.append(f'{count(c["frames_unsent"])} bundles or metadata turned away by a full send queue and sent again')
     facts.extend(mesh_facts(metrics.get("mesh")))
     if c["have_sent"]:
         facts.append(f'{count(c["have_sent"])} bitmaps')

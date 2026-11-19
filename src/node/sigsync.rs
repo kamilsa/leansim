@@ -124,6 +124,12 @@ impl Bits {
         }
     }
 
+    pub(crate) fn unset(&mut self, i: usize) {
+        if let Some(word) = self.0.get_mut(i / 64) {
+            *word &= !(1 << (i % 64));
+        }
+    }
+
     fn to_bytes(&self, len: usize) -> Vec<u8> {
         let mut bytes: Vec<u8> = self.0.iter().flat_map(|word| word.to_le_bytes()).collect();
         bytes.truncate(len.div_ceil(8));

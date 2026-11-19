@@ -43,6 +43,10 @@ MAX_PROOF_BYTES = 8 * 1024 * 1024
 # Per-hop signature sync modes (config::experiment::SignatureSync).
 SIGNATURE_SYNC_MODES = ("none", "bitmap_pull", "coded_repair")
 SIGNATURE_PROPAGATION_MODES = ("gossipsub", "bundled")
+# Protocols that carry subnet signatures (config::experiment::SignatureTransport).
+SIGNATURE_TRANSPORTS = ("gossipsub", "waggle")
+# How waggle picks push peers (config::experiment::WagglePushSelection).
+WAGGLE_PUSH_SELECTIONS = ("fixed", "hashed")
 # Host classes with churn settings of their own (<class>_churn_fraction and so on).
 CHURN_CLASSES = ("regular", "supernode")
 # Removed config keys and why; the launcher rejects them instead of ignoring them.
@@ -171,10 +175,13 @@ def validate_experiment(config: dict) -> None:
         as_int(setting(config, key, default), key, minimum=minimum)
     if not isinstance(setting(config, "bundle_announce", False), bool):
         die("bundle_announce must be a boolean")
-    if config.get("bundle_announce") and not config.get("bundle_stagger_ms"):
+    hashed = (setting(config, "signature_transport", "gossipsub") == "waggle"
+              and setting(config, "waggle_push_selection", "fixed") == "hashed")
+    if config.get("bundle_announce") and not config.get("bundle_stagger_ms") and not hashed:
         die("bundle_announce requires bundle_stagger_ms > 0")
     if propagation == "bundled" and sync_mode != "none":
         die('signature_propagation = "bundled" requires signature_sync = "none"')
+    validate_waggle(config, validators // subnets)
     as_int(setting(config, "churn_tick_ms", 100), "churn_tick_ms", minimum=1)
     for kind in CHURN_CLASSES:
         fraction = as_number(setting(config, f"{kind}_churn_fraction", 0.0), f"{kind}_churn_fraction", minimum=0, maximum=1)
@@ -275,6 +282,48 @@ def validate_experiment(config: dict) -> None:
         as_int(setting(network, key, default), f"network_defaults.{key}", minimum=1)
 
 
+def waggle_needed_message_bytes(config: dict, validators_per_subnet: int) -> int:
+    """Mirrors ExperimentConfig::waggle_needed_message_bytes: the largest bundle or
+    parts metadata of the run, with room for framing."""
+    bundle_signatures = setting(config, "bundle_max_signatures", 50) if setting(config, "waggle_bundled", True) else 1
+    bundle = bundle_signatures * (setting(config, "signature_payload_bytes", 3072) + 12)
+    return max(bundle, validators_per_subnet * 8) + 128
+
+
+def validate_waggle(config: dict, validators_per_subnet: int) -> None:
+    transport = setting(config, "signature_transport", "gossipsub")
+    if transport not in SIGNATURE_TRANSPORTS:
+        die(f"signature_transport must be one of {', '.join(SIGNATURE_TRANSPORTS)}")
+    if not isinstance(setting(config, "waggle_bundled", True), bool):
+        die("waggle_bundled must be a boolean")
+    selection = setting(config, "waggle_push_selection", "fixed")
+    if selection not in WAGGLE_PUSH_SELECTIONS:
+        die(f"waggle_push_selection must be one of {', '.join(WAGGLE_PUSH_SELECTIONS)}")
+    for key, default, minimum in (
+        ("waggle_push_peers", 8, 0),
+        ("waggle_gossip_peers", 6, 0),
+        ("waggle_max_send_queue", 100, 1),
+        ("waggle_max_receive_queue", 100, 1),
+    ):
+        as_int(setting(config, key, default), key, minimum=minimum)
+    for key in ("waggle_gossip_interval_ms", "waggle_max_message_bytes", "waggle_max_topic_subscription"):
+        if key in config:
+            as_int(config[key], key, minimum=1)
+    if transport != "waggle":
+        return
+    if setting(config, "signature_propagation", "gossipsub") == "bundled":
+        die('signature_transport = "waggle" takes waggle_bundled, not signature_propagation = "bundled"')
+    if setting(config, "signature_sync", "none") != "none":
+        die('signature_transport = "waggle" requires signature_sync = "none"')
+    if setting(config, "gossipsub_explicit_aggregator_count", 0):
+        die('signature_transport = "waggle" does not support gossipsub_explicit_aggregator_count')
+    if selection == "hashed" and setting(config, "bundle_stagger_ms", 0):
+        die('waggle_push_selection = "hashed" has no stagger: the end of a link the hash does not pick never pushes; set bundle_stagger_ms = 0')
+    needed = waggle_needed_message_bytes(config, validators_per_subnet)
+    if config.get("waggle_max_message_bytes", needed) < needed:
+        die(f"waggle_max_message_bytes must be at least {needed} to carry this run's bundles and parts metadata")
+
+
 def scalar_toml(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -336,6 +385,13 @@ def experiment_defaults(experiment: dict) -> dict:
         "bundle_request_delay_ms": 0,
         "bundle_stagger_ms": 0,
         "bundle_announce": False,
+        "signature_transport": "gossipsub",
+        "waggle_bundled": True,
+        "waggle_push_peers": 8,
+        "waggle_push_selection": "fixed",
+        "waggle_gossip_peers": 6,
+        "waggle_max_send_queue": 100,
+        "waggle_max_receive_queue": 100,
         "churn_tick_ms": 100,
         "regular_churn_fraction": 0.0,
         "regular_churn_leave_probability": 0.01,

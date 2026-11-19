@@ -3,7 +3,7 @@ use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAcceptance},
     identity, request_response,
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -11,19 +11,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use crate::config::experiment::ExperimentConfig;
+use crate::config::experiment::{ExperimentConfig, SignatureTransport};
 use crate::messages::proof::{ProofRequest, ProofResponse};
 use crate::messages::sync::{SyncRequest, SyncResponse};
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
+use crate::network::waggle_net::{SigWaggle, SigWaggleEvent};
 
-/// Gossipsub carries signatures; request-response carries proof announcements and
-/// pulls, and per-hop signature sync between mesh neighbours.
+/// Gossipsub, or waggle with `signature_transport = "waggle"`, carries signatures;
+/// request-response carries proof announcements and pulls, and per-hop signature
+/// sync between mesh neighbours.
 #[derive(NetworkBehaviour)]
 pub struct SimBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub proofs: request_response::cbor::Behaviour<ProofRequest, ProofResponse>,
     pub sync: request_response::cbor::Behaviour<SyncRequest, SyncResponse>,
+    /// Off, with no protocol on the wire, unless signatures travel over waggle.
+    pub waggle: Toggle<SigWaggle>,
 }
 
 /// Protocol id of the proof announce-and-pull exchange.
@@ -347,6 +351,8 @@ pub fn build_swarm(
     let id_keys = node_keypair(node_id);
 
     let gossipsub = build_gossipsub(&id_keys, config)?;
+    let waggle = (config.signature_transport == SignatureTransport::Waggle)
+        .then(|| SigWaggle::new(config, u64::from(node_id)));
     let proofs = request_response::cbor::Behaviour::new(
         [(
             StreamProtocol::new(PROOF_PROTOCOL),
@@ -370,6 +376,7 @@ pub fn build_swarm(
             gossipsub,
             proofs,
             sync,
+            waggle: waggle.into(),
         })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
@@ -428,9 +435,21 @@ pub fn enable_partial_topics(
     }
 }
 
+/// With waggle: accepts peers' subscriptions to `subnets`, the ones whose
+/// signatures this host holds. Call it before the swarm is first polled.
+pub fn track_waggle_subnets(
+    swarm: &mut Swarm<SimBehaviour>,
+    subnets: impl IntoIterator<Item = u32>,
+) {
+    if let Some(waggle) = swarm.behaviour_mut().waggle.as_mut() {
+        waggle.track(subnets);
+    }
+}
+
 /// Subscribes to the host's subnet topics: every subnet in `subscribed_subnets`
 /// (its gossip membership, independent of what it publishes) plus every subnet
 /// it aggregates, which an aggregator must hear whether subscribed or not.
+/// The topics are waggle's when waggle carries signatures, else gossipsub's.
 pub fn subscribe_to_topics(
     swarm: &mut Swarm<SimBehaviour>,
     aggregated_subnets: &BTreeSet<u32>,
@@ -438,8 +457,13 @@ pub fn subscribe_to_topics(
     run_id: &str,
 ) -> Result<()> {
     for subnet in subscribed_subnets.union(aggregated_subnets) {
-        let topic = IdentTopic::new(topics::subnet_topic(run_id, *subnet));
-        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+        match swarm.behaviour_mut().waggle.as_mut() {
+            Some(waggle) => waggle.subscribe(*subnet),
+            None => {
+                let topic = IdentTopic::new(topics::subnet_topic(run_id, *subnet));
+                swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+            }
+        }
     }
     Ok(())
 }
@@ -512,6 +536,12 @@ pub enum NetEvent {
     PartialGossip {
         topic: gossipsub::TopicHash,
         peers: Vec<PeerId>,
+    },
+    /// A waggle message on a subnet: a bundle, parts metadata, or both.
+    Waggle {
+        peer: PeerId,
+        subnet: u32,
+        pieces: waggle::handler::ObjectPieces,
     },
     /// The last connection to a peer closed. If it connects again it may be a
     /// restarted host with no state, so nothing known about it holds any more.
@@ -605,6 +635,17 @@ pub async fn next_event(
             SwarmEvent::Behaviour(SimBehaviourEvent::Gossipsub(
                 gossipsub::Event::PartialGossip { topic, peers },
             )) => return Some(NetEvent::PartialGossip { topic, peers }),
+            SwarmEvent::Behaviour(SimBehaviourEvent::Waggle(SigWaggleEvent::Pieces {
+                peer,
+                subnet,
+                pieces,
+            })) => {
+                return Some(NetEvent::Waggle {
+                    peer,
+                    subnet,
+                    pieces,
+                });
+            }
             SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
                 request_response::Event::Message { message, .. },
             )) => {

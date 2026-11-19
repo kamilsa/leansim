@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use libp2p::Swarm;
 
-use leansim::config::experiment::{NodeConfig, NodeRole, SignaturePropagation, SignatureSync};
+use leansim::config::experiment::{NodeConfig, NodeRole, SignatureSync, SignatureTransport};
 use leansim::config::plan::AggregationPlan;
 use leansim::messages::proof::ProofId;
 use leansim::messages::wire::WireMessage;
@@ -54,6 +54,10 @@ fn main() -> Result<()> {
         Command::Node { config } => run_node(config),
     }
 }
+
+/// How long a host waits before it pushes again what a peer's full send queue
+/// turned away.
+const SEND_RETRY: Duration = Duration::from_millis(20);
 
 /// What a host keeps across the sessions churn cuts its run into: its
 /// measurements, and whether its validators have had their turn to sign.
@@ -211,7 +215,10 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
     );
     let signing_subnets = state.signing_subnets();
     let subscribed_subnets = state.subscribed_subnets();
-    let bundled = node_config.experiment.signature_propagation == SignaturePropagation::Bundled;
+    // Signatures travel as bundles: over gossipsub partial messages, or over
+    // waggle, where a bundle holds a single signature without `waggle_bundled`.
+    let bundled = node_config.experiment.bundles_enabled();
+    let waggle = node_config.experiment.signature_transport == SignatureTransport::Waggle;
     // Bundles track every subnet this host hears or signs in; a subnet it only signs
     // in is pushed to fanout peers.
     let bundle_subnets: Vec<u32> = subscribed_subnets
@@ -233,7 +240,9 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
         &node_config.experiment,
     )?;
 
-    if bundled {
+    if waggle {
+        leansim::network::swarm::track_waggle_subnets(&mut swarm, bundle_subnets.iter().copied());
+    } else if bundled {
         leansim::network::swarm::enable_partial_topics(
             &mut swarm,
             bundle_subnets.iter().copied(),
@@ -295,11 +304,10 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
     }
     let mut sync_io = SyncIo::new(experiment.signature_payload_bytes);
     let sync_interval = Duration::from_millis(experiment.sync_interval_ms.max(1));
-    let mut bundles: BundleSync<libp2p::PeerId> = BundleSync::new(
-        BundleSettings::from_config(experiment),
-        bundle_subnets.iter().copied(),
-    )
-    .with_local(*swarm.local_peer_id());
+    let bundle_settings = BundleSettings::from_config(experiment);
+    let mut bundles: BundleSync<libp2p::PeerId> =
+        BundleSync::new(bundle_settings, bundle_subnets.iter().copied())
+            .with_local(*swarm.local_peer_id());
     // Subnets this host is in the mesh of; the rest of its bundle subnets are publish-only.
     let mesh_subnets: std::collections::BTreeSet<u32> = subscribed_subnets
         .union(&state.aggregated_subnets)
@@ -312,13 +320,13 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
                 .copied()
                 .filter(|subnet| !mesh_subnets.contains(subnet)),
         );
-    let bundle_tick = Duration::from_millis(experiment.bundle_tick_ms);
+    let bundle_tick = Duration::from_millis(experiment.push_tick_ms());
     // Each host's tick clock has its own phase, as real hosts' would.
     let run_start = tokio::time::Instant::from_std(carry.start);
     let bundle_anchor = {
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(u64::from(state.node_id));
-        let offset_ms = rng.gen_range(0..experiment.bundle_tick_ms.max(1));
+        let offset_ms = rng.gen_range(0..experiment.push_tick_ms().max(1));
         run_start + Duration::from_millis(offset_ms)
     };
     // The next tick with signatures to push; None while there are none.
@@ -408,7 +416,7 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
                 if node_config.role == NodeRole::LocalAggregator {
                     leansim::node::local_aggregator::record_own_signatures(&state);
                 }
-                emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Signing);
+                emit_mesh_degrees(&state, &mut swarm, &mesh_subnets, MeshSample::Signing);
                 carry.signing_at = tokio::time::Instant::now().saturating_duration_since(run_start);
             }
         }
@@ -427,6 +435,10 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
     let heartbeat = Duration::from_millis(experiment.gossipsub_heartbeat_interval_ms.max(1));
     let mut next_target_check =
         (bundled && experiment.churn_enabled()).then(|| tokio::time::Instant::now() + heartbeat);
+    // Waggle has no heartbeat to pick gossip peers: this host's clock does.
+    let waggle_gossip = Duration::from_millis(experiment.waggle_gossip_interval_ms());
+    let mut next_waggle_gossip = (waggle && experiment.waggle_gossip_peers > 0)
+        .then(|| tokio::time::Instant::now() + waggle_gossip);
 
     loop {
         if tokio::time::Instant::now() >= end {
@@ -439,6 +451,7 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             next_sync,
             next_bundle_tick,
             next_target_check,
+            next_waggle_gossip,
             bundles.next_request_due(),
         ]
         .into_iter()
@@ -491,23 +504,40 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             Ok(Some(NetEvent::SyncFailed { request_id })) => {
                 sync_io.on_failure(&mut sync, request_id)
             }
-            Ok(Some(NetEvent::Partial { peer, message })) => {
+            Ok(Some(frame @ (NetEvent::Partial { .. } | NetEvent::Waggle { .. }))) => {
                 let now = tokio::time::Instant::now();
-                let deliveries = bundle_io.on_partial(
-                    &mut swarm,
-                    &mut bundles,
-                    meter.as_mut(),
-                    peer,
-                    message,
-                    now,
-                    state.elapsed_ms(),
-                );
+                let deliveries = match frame {
+                    NetEvent::Partial { peer, message } => bundle_io.on_partial(
+                        &mut swarm,
+                        &mut bundles,
+                        meter.as_mut(),
+                        peer,
+                        message,
+                        now,
+                        state.elapsed_ms(),
+                    ),
+                    NetEvent::Waggle {
+                        peer,
+                        subnet,
+                        pieces,
+                    } => bundle_io.on_pieces(
+                        &mut swarm,
+                        &mut bundles,
+                        meter.as_mut(),
+                        peer,
+                        subnet,
+                        pieces,
+                        now,
+                        state.elapsed_ms(),
+                    ),
+                    _ => unreachable!("matched above"),
+                };
                 bundle_recv_msgs += deliveries.len() as u64;
                 bundle_recv_bytes += deliveries.iter().map(|d| d.byte_size).sum::<u64>();
                 // New signatures go out at the next tick, even if a later one was
                 // already planned for staggered pushes. With announcements, so does
                 // the answer to what the peer announced.
-                if experiment.bundle_announce || deliveries.iter().any(|d| !d.duplicate) {
+                if bundle_settings.announce || deliveries.iter().any(|d| !d.duplicate) {
                     let tick_at = next_tick(bundle_anchor, bundle_tick, now);
                     next_bundle_tick =
                         Some(next_bundle_tick.map_or(tick_at, |planned| planned.min(tick_at)));
@@ -569,18 +599,11 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             );
         }
         if let Some(due) = next_target_check.filter(|due| *due <= now) {
-            let run_id = &state.config.run_id;
             let new_targets = bundle_subnets.iter().any(|&subnet| {
                 if bundles.held_count(subnet) == 0 {
                     return false;
                 }
-                let topic = libp2p::gossipsub::IdentTopic::new(
-                    leansim::network::topics::subnet_topic(run_id, subnet),
-                );
-                let targets = swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .partial_targets(&topic.hash());
+                let targets = bundle_io.targets(&mut swarm, subnet);
                 bundles.has_new_targets(subnet, &targets)
             });
             if new_targets {
@@ -602,6 +625,33 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             next_bundle_tick = bundles
                 .next_lazy_due()
                 .map(|due| next_tick(bundle_anchor, bundle_tick, due));
+            // So do the ones a full send queue turned away, once it had time to drain.
+            if bundle_io.take_retry() {
+                let retry_at = next_tick(bundle_anchor, bundle_tick, now + SEND_RETRY);
+                next_bundle_tick =
+                    Some(next_bundle_tick.map_or(retry_at, |planned| planned.min(retry_at)));
+            }
+        }
+        if let Some(due) = next_waggle_gossip.filter(|due| *due <= now) {
+            for &subnet in &bundle_subnets {
+                if bundles.held_count(subnet) == 0 {
+                    continue;
+                }
+                let peers = swarm
+                    .behaviour_mut()
+                    .waggle
+                    .as_mut()
+                    .map_or_else(Vec::new, |waggle| waggle.gossip_peers(subnet));
+                bundle_io.advertise(
+                    &mut swarm,
+                    &mut bundles,
+                    meter.as_mut(),
+                    subnet,
+                    &peers,
+                    state.elapsed_ms(),
+                );
+            }
+            next_waggle_gossip = Some((due + waggle_gossip).max(now));
         }
         if let Some(due) = next_sync.filter(|due| *due <= now) {
             let run_id = &state.config.run_id;
@@ -641,7 +691,7 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
 
     // What the session measured stays with the host; everything else goes with it.
     if session.last {
-        emit_mesh_degrees(&state, &swarm, &mesh_subnets, MeshSample::Exit);
+        emit_mesh_degrees(&state, &mut swarm, &mesh_subnets, MeshSample::Exit);
     }
     let bundle_stats = bundle_io.final_stats(&bundles);
     emit(&sync_io.transport_stats(
@@ -668,26 +718,32 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
     Ok(())
 }
 
-/// Logs how many gossipsub mesh peers the host has on each subnet it subscribes to.
+/// Logs how many peers the host pushes to on each subnet it subscribes to: its
+/// gossipsub mesh peers, or over waggle the subscribers it picked.
 fn emit_mesh_degrees(
     state: &NodeState,
-    swarm: &Swarm<SimBehaviour>,
+    swarm: &mut Swarm<SimBehaviour>,
     subnets: &std::collections::BTreeSet<u32>,
     at: MeshSample,
 ) {
     for &subnet in subnets {
-        let topic = libp2p::gossipsub::IdentTopic::new(leansim::network::topics::subnet_topic(
-            &state.config.run_id,
-            subnet,
-        ));
+        let peers = match swarm.behaviour_mut().waggle.as_mut() {
+            Some(waggle) => waggle.push_targets(subnet).len(),
+            None => {
+                let topic = libp2p::gossipsub::IdentTopic::new(
+                    leansim::network::topics::subnet_topic(&state.config.run_id, subnet),
+                );
+                swarm
+                    .behaviour()
+                    .gossipsub
+                    .mesh_peers(&topic.hash())
+                    .count()
+            }
+        };
         emit(&JsonlEvent::MeshDegree {
             node_id: state.node_id,
             subnet_id: subnet,
-            peers: swarm
-                .behaviour()
-                .gossipsub
-                .mesh_peers(&topic.hash())
-                .count() as u32,
+            peers: peers as u32,
             at,
             ts_ms: state.elapsed_ms(),
         });

@@ -24,6 +24,7 @@ dashmap = "5.0"
 futures = "0.3"
 bytes = "1.0"
 zero-copy-write = { path = "patch/zero-copy-write" }
+waggle = { path = "patch/waggle" }
 
 [patch.crates-io]
 quinn-udp = { path = "patch/quinn-udp" }

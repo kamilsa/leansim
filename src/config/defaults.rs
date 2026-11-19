@@ -123,6 +123,21 @@ pub const fn default_bundle_request_delay_ms() -> u64 {
     0
 }
 
+/// Subscribers a host pushes a subnet's signatures to over waggle.
+pub const fn default_waggle_push_peers() -> usize {
+    8
+}
+
+/// Gossipsub's default `gossip_lazy`.
+pub const fn default_waggle_gossip_peers() -> usize {
+    6
+}
+
+/// Waggle's own default for both of its queues.
+pub const fn default_waggle_queue() -> usize {
+    100
+}
+
 pub const fn default_churn_tick_ms() -> u64 {
     100
 }

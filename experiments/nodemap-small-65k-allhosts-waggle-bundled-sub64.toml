@@ -1,0 +1,78 @@
+# Signature transport comparison on
+# experiments/nodemap-small-65k-allhosts-sub64.toml's network (same hosts,
+# subnets, aggregators and 90% local threshold): EIP-8334 bundles over waggle
+# instead of gossipsub partial messages. Each host pushes 8 subscribers of a
+# subnet the signatures they lack every bundle_tick_ms, and advertises to 6
+# others every heartbeat interval.
+# Baselines: nodemap-small-65k-allhosts-sync-gossip-sub64.toml (gossipsub
+# messages) and nodemap-small-65k-allhosts-sync-bundled-sub64.toml (the same
+# bundles over partial messages).
+run_id = "nodemap-small-65k-allhosts-waggle-bundled-sub64"
+run_timeout_secs = 120
+
+validator_count = 65536
+node_map = "nodes_small.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+# Peers come only from subnet discovery: gossipsub_mesh_n per subscribed subnet
+# and 2 per subnet a host only publishes in.
+random_peer_count = 0
+subnet_count = 64
+local_aggregators_per_subnet = 16
+
+local_threshold = 0.9
+burst_time_ms = 100
+burst_jitter_ms = 100
+
+signature_aggregation_rate = 1000
+signature_payload_bytes = 1200
+
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n = 8
+gossipsub_mesh_n_high = 12
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+
+signature_sync = "none"
+signature_transport = "waggle"
+waggle_bundled = true
+# As many push peers as the baselines' mesh degree; the launcher connects each
+# host to gossipsub_mesh_n peers per subscribed subnet.
+waggle_push_peers = 8
+waggle_gossip_peers = 6
+# EIP-8334's recommended tick and bundle cap.
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+# A signature requested from one advertiser is not requested from another
+# until this long without it arriving.
+bundle_request_timeout_ms = 1000
+
+use_geo_latency = true
+geo_seed = 42
+geo_jitter = 0.0
+
+supernode_by_validator_count = 100
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
+
+[run]
+runner = "docker"
+runs = 1
+parallelism = 0  # all cores of the machine running Shadow
+
+[docker]
+shadow_image = "kamilsa/shadow-arm:latest"
+# A tag of its own: an image built before waggle would ignore
+# signature_transport and silently run gossipsub.
+image_name = "leansim-shadow:waggle"
+rebuild = false
+
+[output]
+dir = "output-nodemap-small-65k-allhosts-waggle-bundled-sub64"

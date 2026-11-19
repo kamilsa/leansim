@@ -1,18 +1,24 @@
-//! Sends [`BundleSync`]'s bundles and parts metadata as gossipsub partial
-//! messages, handles the ones peers send, and counts their traffic.
+//! Sends [`BundleSync`]'s bundles and parts metadata, as gossipsub partial
+//! messages or as waggle messages, handles the ones peers send, and counts
+//! their traffic.
+//!
+//! Over waggle a subnet is one object, [`GROUP_ID`]: a bundle is its `pieces`
+//! and parts metadata its `metadata`, on the stream of the subnet's topic.
 
 use std::collections::{HashMap, HashSet};
 
 use libp2p::gossipsub::{IdentTopic, PartialMessage, TopicHash};
 use libp2p::{PeerId, Swarm};
 use tokio::time::Instant;
+use waggle::handler::ObjectPieces;
 
-use crate::config::experiment::ExperimentConfig;
+use crate::config::experiment::{ExperimentConfig, SignatureTransport};
 use crate::messages::bundle::{BundleKind, PartsMetadata, SignatureBundle, GROUP_ID, INDEX_BYTES};
 use crate::metrics::events::SigVia;
 use crate::metrics::traffic::{Direction, Kind, TrafficMeter};
 use crate::network::swarm::SimBehaviour;
 use crate::network::topics;
+use crate::network::waggle_net;
 use crate::node::bundles::{Arrival, BundleSync};
 use crate::node::sigsync::Held;
 use crate::node::sync_io::Delivery;
@@ -39,9 +45,13 @@ pub struct BundleStats {
     pub requests_suppressed: u64,
     pub requests_avoided: u64,
     pub invalid_partials: u64,
+    /// Bundles and metadata the transport did not take: the peer's waggle send
+    /// queue was full, or the peer was gone.
+    pub frames_unsent: u64,
 }
 
 pub struct BundleIo {
+    transport: SignatureTransport,
     signature_bytes: usize,
     max_per_bundle: usize,
     run_id: String,
@@ -49,6 +59,8 @@ pub struct BundleIo {
     subnets: HashMap<TopicHash, u32>,
     /// Subnets this host signs in without subscribing: pushed to fanout peers.
     publish_only: HashSet<u32>,
+    /// A push or announcement of the last flush was not sent.
+    retry: bool,
     pub stats: BundleStats,
 }
 
@@ -56,14 +68,16 @@ impl BundleIo {
     pub fn new(config: &ExperimentConfig, subnets: impl IntoIterator<Item = u32>) -> Self {
         let run_id = config.run_id.clone();
         Self {
+            transport: config.signature_transport,
             signature_bytes: config.signature_payload_bytes,
-            max_per_bundle: config.bundle_max_signatures.max(1),
+            max_per_bundle: config.max_signatures_per_bundle(),
             subnets: subnets
                 .into_iter()
                 .map(|subnet| (subnet_topic(&run_id, subnet), subnet))
                 .collect(),
             run_id,
             publish_only: HashSet::new(),
+            retry: false,
             stats: BundleStats::default(),
         }
     }
@@ -80,6 +94,18 @@ impl BundleIo {
         self.signature_bytes as u64 + INDEX_BYTES
     }
 
+    /// The peers this host pushes `subnet`'s signatures to: gossipsub's mesh or
+    /// fanout peers, or the subscribers picked over waggle.
+    pub fn targets(&self, swarm: &mut Swarm<SimBehaviour>, subnet: u32) -> Vec<PeerId> {
+        push_targets(swarm, self.transport, &self.run_id, subnet)
+    }
+
+    /// Whether the last flush left pushes or announcements unsent, to try again
+    /// at a later tick. Cleared by the call.
+    pub fn take_retry(&mut self) -> bool {
+        std::mem::take(&mut self.retry)
+    }
+
     /// The tick: push every target the signatures it lacks.
     pub fn flush(
         &mut self,
@@ -89,23 +115,15 @@ impl BundleIo {
         now: Instant,
         ts_ms: u64,
     ) {
-        let run_id = &self.run_id;
-        let pushes = sync.tick(now, |subnet| {
-            swarm
-                .behaviour_mut()
-                .gossipsub
-                .partial_targets(&subnet_topic(run_id, subnet))
-        });
+        let (transport, run_id) = (self.transport, &self.run_id);
+        let pushes = sync.tick(now, |subnet| push_targets(swarm, transport, run_id, subnet));
         for push in pushes {
             let kind = if push.backlog {
                 BundleKind::Backlog
             } else {
                 BundleKind::Push
             };
-            if self.publish_only.contains(&push.subnet) {
-                self.stats.fanout_sigs_sent += push.signatures.len() as u64;
-            }
-            self.send_bundle(
+            let sent = self.send_bundle(
                 swarm,
                 meter.as_deref_mut(),
                 push.peer,
@@ -114,6 +132,12 @@ impl BundleIo {
                 kind,
                 ts_ms,
             );
+            if !sent {
+                sync.unsent_signatures(push.peer, push.subnet, validator_ids(&push.signatures));
+                self.retry = true;
+            } else if self.publish_only.contains(&push.subnet) {
+                self.stats.fanout_sigs_sent += push.signatures.len() as u64;
+            }
         }
         for announcement in sync.take_announcements() {
             let metadata = PartsMetadata {
@@ -121,13 +145,11 @@ impl BundleIo {
                 available: announcement.available.into_iter().map(u64::from).collect(),
                 requests: Vec::new(),
             };
-            self.send_metadata(
-                swarm,
-                meter.as_deref_mut(),
-                announcement.peer,
-                metadata,
-                ts_ms,
-            );
+            let peer = announcement.peer;
+            if !self.send_metadata(swarm, meter.as_deref_mut(), peer, &metadata, ts_ms) {
+                sync.unsent_available(peer, metadata.subnet, &metadata.available);
+                self.retry = true;
+            }
         }
     }
 
@@ -137,22 +159,39 @@ impl BundleIo {
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         sync: &mut BundleSync<PeerId>,
-        mut meter: Option<&mut TrafficMeter>,
+        meter: Option<&mut TrafficMeter>,
         topic: &TopicHash,
         peers: &[PeerId],
         ts_ms: u64,
     ) {
-        let Some(&subnet) = self.subnets.get(topic) else {
-            return;
-        };
+        if let Some(&subnet) = self.subnets.get(topic) {
+            self.advertise(swarm, sync, meter, subnet, peers, ts_ms);
+        }
+    }
+
+    /// Advertises to `peers`, gossip peers of `subnet`, what each is not known
+    /// to hold and has not been told about.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advertise(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        sync: &mut BundleSync<PeerId>,
+        mut meter: Option<&mut TrafficMeter>,
+        subnet: u32,
+        peers: &[PeerId],
+        ts_ms: u64,
+    ) {
         for advert in sync.advertise(subnet, peers) {
-            self.stats.available_ids_sent += advert.available.len() as u64;
             let metadata = PartsMetadata {
                 subnet,
                 available: advert.available.into_iter().map(u64::from).collect(),
                 requests: Vec::new(),
             };
-            self.send_metadata(swarm, meter.as_deref_mut(), advert.peer, metadata, ts_ms);
+            if self.send_metadata(swarm, meter.as_deref_mut(), advert.peer, &metadata, ts_ms) {
+                self.stats.available_ids_sent += metadata.available.len() as u64;
+            } else {
+                sync.unsent_available(advert.peer, subnet, &metadata.available);
+            }
         }
     }
 
@@ -163,7 +202,7 @@ impl BundleIo {
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         sync: &mut BundleSync<PeerId>,
-        mut meter: Option<&mut TrafficMeter>,
+        meter: Option<&mut TrafficMeter>,
         peer: PeerId,
         message: PartialMessage,
         now: Instant,
@@ -176,11 +215,59 @@ impl BundleIo {
             self.stats.invalid_partials += 1;
             return Vec::new();
         }
+        let frame = Frame {
+            body: message.message.as_deref(),
+            metadata: message.metadata.as_deref(),
+            bytes: message.frame_len() as u64,
+        };
+        self.on_frame(swarm, sync, meter, peer, subnet, frame, now, ts_ms)
+    }
+
+    /// A waggle message arrived on `subnet`: take its signatures, then answer its
+    /// metadata. Returns every signature it carried, new or duplicate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_pieces(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        sync: &mut BundleSync<PeerId>,
+        meter: Option<&mut TrafficMeter>,
+        peer: PeerId,
+        subnet: u32,
+        pieces: ObjectPieces,
+        now: Instant,
+        ts_ms: u64,
+    ) -> Vec<Delivery> {
+        if !sync.tracks(subnet) {
+            return Vec::new();
+        }
+        if pieces.object_id != GROUP_ID {
+            self.stats.invalid_partials += 1;
+            return Vec::new();
+        }
+        let frame = Frame {
+            body: pieces.pieces.as_deref(),
+            metadata: pieces.metadata.as_deref(),
+            bytes: waggle_net::frame_len(&pieces) as u64,
+        };
+        self.on_frame(swarm, sync, meter, peer, subnet, frame, now, ts_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_frame(
+        &mut self,
+        swarm: &mut Swarm<SimBehaviour>,
+        sync: &mut BundleSync<PeerId>,
+        mut meter: Option<&mut TrafficMeter>,
+        peer: PeerId,
+        subnet: u32,
+        frame: Frame<'_>,
+        now: Instant,
+        ts_ms: u64,
+    ) -> Vec<Delivery> {
         let label = peer_label(&peer);
-        let frame_bytes = message.frame_len() as u64;
         let mut deliveries = Vec::new();
 
-        if let Some(body) = &message.message {
+        if let Some(body) = frame.body {
             match SignatureBundle::decode(body, self.signature_bytes, self.max_per_bundle) {
                 Ok(bundle) if bundle.subnet == subnet => {
                     let via = match bundle.kind {
@@ -221,11 +308,11 @@ impl BundleIo {
         if let Some(meter) = meter.as_deref_mut() {
             // Whatever the frame adds to the signatures: framing, or metadata alone.
             let signatures = deliveries.len() as u64 * self.signature_wire_bytes();
-            let rest = frame_bytes.saturating_sub(signatures);
+            let rest = frame.bytes.saturating_sub(signatures);
             meter.record(ts_ms, Direction::In, Kind::SyncControl, rest, &label);
         }
 
-        if let Some(raw) = &message.metadata {
+        if let Some(raw) = frame.metadata {
             match PartsMetadata::decode(raw) {
                 Ok(metadata) if metadata.subnet == subnet => {
                     let reply = sync.on_metadata(
@@ -236,17 +323,19 @@ impl BundleIo {
                         now,
                     );
                     if !reply.requests.is_empty() {
-                        self.stats.request_ids_sent += reply.requests.len() as u64;
                         let request = PartsMetadata {
                             subnet,
                             available: Vec::new(),
                             requests: reply.requests.into_iter().map(u64::from).collect(),
                         };
-                        self.send_metadata(swarm, meter.as_deref_mut(), peer, request, ts_ms);
+                        if self.send_metadata(swarm, meter.as_deref_mut(), peer, &request, ts_ms) {
+                            self.stats.request_ids_sent += request.requests.len() as u64;
+                        } else {
+                            sync.unsent_requests(subnet, &request.requests);
+                        }
                     }
                     for signatures in reply.serve {
-                        self.stats.requested_sigs_served += signatures.len() as u64;
-                        self.send_bundle(
+                        let sent = self.send_bundle(
                             swarm,
                             meter.as_deref_mut(),
                             peer,
@@ -255,6 +344,11 @@ impl BundleIo {
                             BundleKind::Requested,
                             ts_ms,
                         );
+                        if sent {
+                            self.stats.requested_sigs_served += signatures.len() as u64;
+                        } else {
+                            sync.unsent_signatures(peer, subnet, validator_ids(&signatures));
+                        }
                     }
                 }
                 _ => self.stats.invalid_partials += 1,
@@ -273,13 +367,16 @@ impl BundleIo {
         ts_ms: u64,
     ) {
         for request in sync.due_requests(now) {
-            self.stats.request_ids_sent += request.validators.len() as u64;
             let metadata = PartsMetadata {
                 subnet: request.subnet,
                 available: Vec::new(),
                 requests: request.validators.into_iter().map(u64::from).collect(),
             };
-            self.send_metadata(swarm, meter.as_deref_mut(), request.peer, metadata, ts_ms);
+            if self.send_metadata(swarm, meter.as_deref_mut(), request.peer, &metadata, ts_ms) {
+                self.stats.request_ids_sent += metadata.requests.len() as u64;
+            } else {
+                sync.unsent_requests(metadata.subnet, &metadata.requests);
+            }
         }
     }
 
@@ -297,6 +394,7 @@ impl BundleIo {
         }
     }
 
+    /// Sends one bundle; false if the transport did not take it.
     #[allow(clippy::too_many_arguments)]
     fn send_bundle(
         &mut self,
@@ -307,7 +405,12 @@ impl BundleIo {
         signatures: &[Held],
         kind: BundleKind,
         ts_ms: u64,
-    ) {
+    ) -> bool {
+        // Before building the bundle: a full queue turns away most of a burst.
+        if !self.can_send(swarm, &peer, subnet) {
+            self.stats.frames_unsent += 1;
+            return false;
+        }
         let bundle = SignatureBundle {
             subnet,
             validators: signatures
@@ -318,15 +421,10 @@ impl BundleIo {
             kind,
             signatures: vec![0; signatures.len() * self.signature_bytes],
         };
-        let message = PartialMessage {
-            topic: subnet_topic(&self.run_id, subnet),
-            group_id: GROUP_ID.to_vec(),
-            message: Some(bundle.encode()),
-            metadata: None,
-        };
-        let bytes = swarm.behaviour_mut().gossipsub.send_partial(&peer, message) as u64;
+        let bytes = self.send(swarm, &peer, subnet, Some(bundle.encode()), None);
         if bytes == 0 {
-            return;
+            self.stats.frames_unsent += 1;
+            return false;
         }
         let n = signatures.len() as u64;
         self.stats.bundles_sent += 1;
@@ -343,25 +441,22 @@ impl BundleIo {
                 &peer_label(&peer),
             );
         }
+        true
     }
 
+    /// Sends parts metadata; false if the transport did not take it.
     fn send_metadata(
         &mut self,
         swarm: &mut Swarm<SimBehaviour>,
         meter: Option<&mut TrafficMeter>,
         peer: PeerId,
-        metadata: PartsMetadata,
+        metadata: &PartsMetadata,
         ts_ms: u64,
-    ) {
-        let message = PartialMessage {
-            topic: subnet_topic(&self.run_id, metadata.subnet),
-            group_id: GROUP_ID.to_vec(),
-            message: None,
-            metadata: Some(metadata.encode()),
-        };
-        let bytes = swarm.behaviour_mut().gossipsub.send_partial(&peer, message) as u64;
+    ) -> bool {
+        let bytes = self.send(swarm, &peer, metadata.subnet, None, Some(metadata.encode()));
         if bytes == 0 {
-            return;
+            self.stats.frames_unsent += 1;
+            return false;
         }
         self.stats.metadata_sent += 1;
         self.stats.metadata_bytes_sent += bytes;
@@ -374,7 +469,88 @@ impl BundleIo {
                 &peer_label(&peer),
             );
         }
+        true
     }
+
+    /// Whether the transport would take a frame for `peer` now. Gossipsub
+    /// answers when it is given the frame.
+    fn can_send(&self, swarm: &Swarm<SimBehaviour>, peer: &PeerId, subnet: u32) -> bool {
+        match self.transport {
+            SignatureTransport::Gossipsub => true,
+            SignatureTransport::Waggle => swarm
+                .behaviour()
+                .waggle
+                .as_ref()
+                .is_some_and(|waggle| waggle.can_send(peer, subnet)),
+        }
+    }
+
+    /// Hands one frame to the transport. Returns its bytes on the wire, or 0 if
+    /// the transport did not take it.
+    fn send(
+        &self,
+        swarm: &mut Swarm<SimBehaviour>,
+        peer: &PeerId,
+        subnet: u32,
+        body: Option<Vec<u8>>,
+        metadata: Option<Vec<u8>>,
+    ) -> u64 {
+        let bytes = match self.transport {
+            SignatureTransport::Gossipsub => {
+                let message = PartialMessage {
+                    topic: subnet_topic(&self.run_id, subnet),
+                    group_id: GROUP_ID.to_vec(),
+                    message: body,
+                    metadata,
+                };
+                swarm.behaviour_mut().gossipsub.send_partial(peer, message)
+            }
+            SignatureTransport::Waggle => {
+                let pieces = ObjectPieces {
+                    object_id: GROUP_ID.to_vec(),
+                    metadata,
+                    pieces: body,
+                };
+                swarm
+                    .behaviour_mut()
+                    .waggle
+                    .as_mut()
+                    .map_or(0, |waggle| waggle.send(peer, subnet, pieces))
+            }
+        };
+        bytes as u64
+    }
+}
+
+/// A bundle, parts metadata or both, as either transport delivers them.
+struct Frame<'a> {
+    body: Option<&'a [u8]>,
+    metadata: Option<&'a [u8]>,
+    /// Bytes of the frame on the wire.
+    bytes: u64,
+}
+
+fn push_targets(
+    swarm: &mut Swarm<SimBehaviour>,
+    transport: SignatureTransport,
+    run_id: &str,
+    subnet: u32,
+) -> Vec<PeerId> {
+    match transport {
+        SignatureTransport::Gossipsub => swarm
+            .behaviour_mut()
+            .gossipsub
+            .partial_targets(&subnet_topic(run_id, subnet)),
+        SignatureTransport::Waggle => swarm
+            .behaviour_mut()
+            .waggle
+            .as_mut()
+            .map_or_else(Vec::new, |waggle| waggle.push_targets(subnet)),
+    }
+}
+
+fn validator_ids(signatures: &[Held]) -> impl Iterator<Item = u32> + '_ {
+    signatures.iter().map(|held| held.validator_id)
 }
 
 fn subnet_topic(run_id: &str, subnet: u32) -> TopicHash {

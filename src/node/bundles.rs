@@ -59,17 +59,36 @@ pub struct BundleSettings {
     /// With a stagger: the end that waits announces the signature to the peer at
     /// once, and a peer announces back what it holds and was announced.
     pub announce: bool,
+    /// The end of a link that does not push a signature first never pushes it:
+    /// the hash that orders a stagger's turns picks who may send instead.
+    pub sender_only: bool,
+    /// With `sender_only`: most targets a signature is pushed to, the ones the
+    /// hash ranks first; 0 = every target this host is the sender for.
+    pub push_cap: usize,
 }
 
 impl BundleSettings {
+    /// Without bundling (waggle with `waggle_bundled = false`) every signature
+    /// goes in a bundle of its own, with no stagger. With waggle's hashed push
+    /// selection the hash picks the sender of each signature on each link, so
+    /// there is no stagger either, and announcements need none.
     pub fn from_config(config: &ExperimentConfig) -> Self {
+        let bundled = config.bundled();
+        let hashed = config.waggle_hashed();
+        let stagger = if bundled && !hashed {
+            config.bundle_stagger_ms
+        } else {
+            0
+        };
         Self {
             validators_per_subnet: config.validators_per_subnet(),
-            max_per_bundle: config.bundle_max_signatures.max(1),
+            max_per_bundle: config.max_signatures_per_bundle(),
             request_timeout: Duration::from_millis(config.bundle_request_timeout_ms),
             request_delay: Duration::from_millis(config.bundle_request_delay_ms),
-            stagger: Duration::from_millis(config.bundle_stagger_ms),
-            announce: config.bundle_announce,
+            stagger: Duration::from_millis(stagger),
+            announce: config.bundle_announce && (bundled || hashed),
+            sender_only: hashed,
+            push_cap: if hashed { config.waggle_push_peers } else { 0 },
         }
     }
 }
@@ -128,6 +147,12 @@ struct PeerView {
     /// Signatures the peer knows this host holds: it sent them, we sent them, or
     /// we advertised or announced them.
     knows: Bits,
+    /// Signatures this host pushes first on its link with the peer, by
+    /// [`pushes_first`]; worked out when a tick first needs them.
+    first: Option<Bits>,
+    /// Signatures not pushed to the peer because `push_cap` other targets ranked
+    /// before it.
+    capped: Bits,
 }
 
 impl PeerView {
@@ -136,7 +161,31 @@ impl PeerView {
             has: Bits::new(size),
             advertised: Bits::new(size),
             knows: Bits::new(size),
+            first: None,
+            capped: Bits::new(size),
         }
+    }
+
+    /// Whether this host, `local`, pushes column `col` first on its link with `peer`.
+    fn pushes_first<P: Hash + Ord>(
+        &mut self,
+        local: &P,
+        peer: &P,
+        base: u32,
+        size: usize,
+        col: u32,
+    ) -> bool {
+        self.first
+            .get_or_insert_with(|| {
+                let mut first = Bits::new(size);
+                for col in 0..size {
+                    if pushes_first(local, peer, base + col as u32) {
+                        first.set(col);
+                    }
+                }
+                first
+            })
+            .get(col as usize)
     }
 }
 
@@ -160,6 +209,8 @@ struct SubnetState<P> {
     peers: HashMap<P, PeerView>,
     /// Held signatures and targets at the previous tick.
     last_tick: Option<(usize, BTreeSet<P>)>,
+    /// How many of `order`'s signatures have had their `push_cap` targets picked.
+    capped_upto: usize,
 }
 
 impl<P: Copy + Eq + Hash + Ord> SubnetState<P> {
@@ -176,7 +227,41 @@ impl<P: Copy + Eq + Hash + Ord> SubnetState<P> {
             pending: HashMap::new(),
             peers: HashMap::new(),
             last_tick: None,
+            capped_upto: 0,
         }
+    }
+
+    /// Picks the targets of every signature held since the last call: of the
+    /// `peers` this host is the sender for that are not known to hold it, the
+    /// `cap` the hash ranks first. The others are marked as capped.
+    fn cap_new_signatures(&mut self, local: &P, peers: &[P], cap: usize) {
+        let (base, size) = (self.base, self.size);
+        for i in self.capped_upto..self.order.len() {
+            let col = self.order[i];
+            let own = self.own.get(col as usize);
+            let mut eligible: Vec<(u64, P)> = Vec::new();
+            for &peer in peers {
+                let view = self
+                    .peers
+                    .entry(peer)
+                    .or_insert_with(|| PeerView::new(size));
+                if !view.has.get(col as usize)
+                    && (own || view.pushes_first(local, &peer, base, size, col))
+                {
+                    eligible.push((pair_hash(local, &peer, base + col), peer));
+                }
+            }
+            if eligible.len() <= cap {
+                continue;
+            }
+            eligible.sort_unstable();
+            for (_, peer) in eligible.drain(cap..) {
+                if let Some(view) = self.peers.get_mut(&peer) {
+                    view.capped.set(col as usize);
+                }
+            }
+        }
+        self.capped_upto = self.order.len();
     }
 
     fn column(&self, validator_id: u64) -> Option<u32> {
@@ -363,7 +448,9 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
     pub fn tick(&mut self, now: Instant, mut targets: impl FnMut(u32) -> Vec<P>) -> Vec<Push<P>> {
         let max = self.settings.max_per_bundle;
         let stagger = self.settings.stagger;
-        let local = self.local.filter(|_| !stagger.is_zero());
+        let sender_only = self.settings.sender_only;
+        let cap = self.settings.push_cap;
+        let local = self.local.filter(|_| sender_only || !stagger.is_zero());
         let announce = self.settings.announce && local.is_some();
         let mut next_lazy_due: Option<Instant> = None;
         let mut pushes = Vec::new();
@@ -374,6 +461,10 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
             let mut peers = targets(subnet);
             peers.sort_unstable();
             peers.dedup();
+            if let Some(local) = local.filter(|_| sender_only && cap > 0) {
+                state.cap_new_signatures(&local, &peers, cap);
+            }
+            let (base, size) = (state.base, state.size);
             for &peer in &peers {
                 // Signatures held at the previous tick are backlog for a peer that
                 // was not a target then.
@@ -381,7 +472,6 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
                     Some((held, previous)) if !previous.contains(&peer) => *held,
                     _ => 0,
                 };
-                let size = state.size;
                 let view = state
                     .peers
                     .entry(peer)
@@ -398,22 +488,30 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
                         continue;
                     }
                     // The end of the link that does not push this signature first
-                    // gives the other end `stagger` to deliver it.
+                    // gives the other end `stagger` to deliver it, or with
+                    // `sender_only` leaves it to the other end for good.
                     let waits = local.is_some_and(|local| {
                         !state.own.get(col as usize)
-                            && !pushes_first(&local, &peer, state.base + col)
+                            && !view.pushes_first(&local, &peer, base, size, col)
                     });
                     if waits {
-                        let due = state.held_at[col as usize].map_or(now, |at| at + stagger);
-                        if due > now {
+                        let due = (!sender_only)
+                            .then(|| state.held_at[col as usize].map_or(now, |at| at + stagger));
+                        if due.is_none_or(|due| due > now) {
                             if announce && !view.knows.get(col as usize) {
                                 view.knows.set(col as usize);
                                 announced.push(state.base + col);
                             }
-                            next_lazy_due = Some(next_lazy_due.map_or(due, |next| next.min(due)));
+                            if let Some(due) = due {
+                                next_lazy_due =
+                                    Some(next_lazy_due.map_or(due, |next| next.min(due)));
+                            }
                             continue;
                         }
                         self.counters.lazy_pushes += 1;
+                    }
+                    if view.capped.get(col as usize) {
+                        continue;
                     }
                     view.has.set(col as usize);
                     view.knows.set(col as usize);
@@ -545,6 +643,55 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
 }
 
 impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
+    /// A bundle for `peer` was not sent (its send queue was full, say): the peer
+    /// does not hold these signatures after all, so a tick pushes them again and
+    /// a gossip round advertises them again.
+    pub fn unsent_signatures(
+        &mut self,
+        peer: P,
+        subnet: u32,
+        validators: impl IntoIterator<Item = u32>,
+    ) {
+        let Some(state) = self.subnets.get_mut(&subnet) else {
+            return;
+        };
+        for validator_id in validators {
+            if let Some(col) = state.column(u64::from(validator_id)) {
+                let view = state.view(peer);
+                view.has.unset(col as usize);
+                view.advertised.unset(col as usize);
+            }
+        }
+    }
+
+    /// An advertisement or announcement for `peer` was not sent: the peer was
+    /// not told this host holds these signatures.
+    pub fn unsent_available(&mut self, peer: P, subnet: u32, validators: &[u64]) {
+        let Some(state) = self.subnets.get_mut(&subnet) else {
+            return;
+        };
+        for &validator_id in validators {
+            if let Some(col) = state.column(validator_id) {
+                let view = state.view(peer);
+                view.advertised.unset(col as usize);
+                view.knows.unset(col as usize);
+            }
+        }
+    }
+
+    /// A request was not sent: these signatures can be requested from the next
+    /// peer that advertises them.
+    pub fn unsent_requests(&mut self, subnet: u32, validators: &[u64]) {
+        let Some(state) = self.subnets.get_mut(&subnet) else {
+            return;
+        };
+        for &validator_id in validators {
+            if let Some(col) = state.column(validator_id) {
+                state.requested.remove(&col);
+            }
+        }
+    }
+
     /// When the next delayed request is due.
     pub fn next_request_due(&self) -> Option<Instant> {
         self.pending_due.first().map(|&(due, _, _)| due)
@@ -593,7 +740,14 @@ impl<P: Copy + Eq + Hash + Ord> BundleSync<P> {
 /// signature first. Both ends compute the same hash, so exactly one of them does.
 pub fn pushes_first<P: Hash + Ord>(local: &P, peer: &P, validator_id: u32) -> bool {
     let local_is_low = local <= peer;
-    let (low, high) = if local_is_low {
+    let low_first = pair_hash(local, peer, validator_id) & 1 == 0;
+    low_first == local_is_low
+}
+
+/// A hash of `validator_id`'s signature and the two ends of a link, the same
+/// whichever end computes it.
+fn pair_hash<P: Hash + Ord>(local: &P, peer: &P, validator_id: u32) -> u64 {
+    let (low, high) = if local <= peer {
         (local, peer)
     } else {
         (peer, local)
@@ -602,8 +756,7 @@ pub fn pushes_first<P: Hash + Ord>(local: &P, peer: &P, validator_id: u32) -> bo
     validator_id.hash(&mut hasher);
     low.hash(&mut hasher);
     high.hash(&mut hasher);
-    let low_first = hasher.finish() & 1 == 0;
-    low_first == local_is_low
+    hasher.finish()
 }
 
 /// The first tick at or after `now` of a clock ticking every `tick` from `anchor`.
@@ -644,6 +797,8 @@ mod tests {
             request_delay: Duration::ZERO,
             stagger: Duration::ZERO,
             announce: false,
+            sender_only: false,
+            push_cap: 0,
         }
     }
 
@@ -826,6 +981,123 @@ mod tests {
         assert_eq!(validators(&pushes, 9), waiting[1..].to_vec());
         assert_eq!(sync.counters.lazy_pushes, waiting.len() as u64 - 1);
         assert_eq!(sync.next_lazy_due(), None);
+    }
+
+    fn sender_only(push_cap: usize) -> BundleSettings {
+        BundleSettings {
+            sender_only: true,
+            push_cap,
+            max_per_bundle: 50,
+            ..settings()
+        }
+    }
+
+    #[test]
+    fn with_sender_only_exactly_one_end_of_a_link_ever_pushes_a_signature() {
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(60);
+        let mut five: BundleSync<u8> = BundleSync::new(sender_only(0), [0]).with_local(5);
+        let mut nine: BundleSync<u8> = BundleSync::new(sender_only(0), [0]).with_local(9);
+        // Both ends get validators 0..16 from peers of their own.
+        for v in 0..16 {
+            five.deliver(0, v, 0, Some(1), t0);
+            nine.deliver(0, v, 0, Some(2), t0);
+        }
+        let from_five = validators(&five.tick(t0, |_| vec![1, 9]), 9);
+        let from_nine = validators(&nine.tick(t0, |_| vec![2, 5]), 5);
+        let expected: Vec<u32> = (0..16).filter(|&v| pushes_first(&5u8, &9u8, v)).collect();
+        assert_eq!(from_five, expected);
+        assert!(!from_five.is_empty() && !from_nine.is_empty());
+        let mut all: Vec<u32> = from_five.iter().chain(&from_nine).copied().collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..16).collect::<Vec<u32>>(), "each crosses once");
+
+        // The end the hash does not pick never pushes, however long it waits.
+        assert!(five.tick(later, |_| vec![1, 9]).is_empty());
+        assert_eq!(five.next_lazy_due(), None);
+        assert_eq!(five.counters.lazy_pushes, 0);
+        // A host is the sender of its own signatures on every link.
+        let mut own: BundleSync<u8> = BundleSync::new(sender_only(0), [0]).with_local(5);
+        for v in 0..16 {
+            own.deliver(0, v, 0, None, t0);
+        }
+        assert_eq!(validators(&own.tick(t0, |_| vec![9]), 9).len(), 16);
+    }
+
+    #[test]
+    fn a_push_cap_keeps_the_targets_the_hash_ranks_first() {
+        let t0 = Instant::now();
+        let peers: Vec<u8> = (10..30).collect();
+        let mut sync: BundleSync<u8> = BundleSync::new(sender_only(3), [0]).with_local(5);
+        // An own signature could go to all twenty peers: it goes to three.
+        sync.deliver(0, 0, 0, None, t0);
+        // A received one goes to at most three of the peers this host sends it to.
+        sync.deliver(0, 1, 0, Some(1), t0);
+        let pushes = sync.tick(t0, |_| peers.clone());
+        let targets = |pushes: &[Push<u8>], v: u32| -> Vec<u8> {
+            pushes
+                .iter()
+                .filter(|p| p.signatures.iter().any(|h| h.validator_id == v))
+                .map(|p| p.peer)
+                .collect()
+        };
+        assert_eq!(targets(&pushes, 0).len(), 3);
+        let received = targets(&pushes, 1);
+        assert_eq!(received.len(), 3);
+        assert!(received.iter().all(|peer| pushes_first(&5u8, peer, 1)));
+        assert!(
+            peers
+                .iter()
+                .filter(|peer| pushes_first(&5u8, peer, 1))
+                .count()
+                > 3,
+            "the cap bound"
+        );
+        // The pick holds: later ticks push the capped peers nothing.
+        assert!(sync.tick(t0, |_| peers.clone()).is_empty());
+
+        // A peer known to hold a signature takes none of its three places.
+        let mut sync: BundleSync<u8> = BundleSync::new(sender_only(3), [0]).with_local(5);
+        sync.deliver(0, 0, 0, None, t0);
+        sync.on_metadata(10, 0, &[0], &[], t0);
+        sync.on_metadata(11, 0, &[0], &[], t0);
+        let pushes = sync.tick(t0, |_| vec![10, 11, 12, 13, 14]);
+        assert_eq!(targets(&pushes, 0), vec![12, 13, 14]);
+
+        // A peer that turns up later was capped out of nothing: it gets what this
+        // host sends it, as backlog.
+        let mut sync: BundleSync<u8> = BundleSync::new(sender_only(1), [0]).with_local(5);
+        sync.deliver(0, 0, 0, None, t0);
+        assert_eq!(sync.tick(t0, |_| vec![10, 11]).len(), 1);
+        let pushes = sync.tick(t0, |_| vec![10, 11, 12]);
+        assert_eq!(targets(&pushes, 0), vec![12]);
+        assert!(pushes[0].backlog);
+    }
+
+    #[test]
+    fn with_sender_only_the_other_end_can_announce_instead() {
+        let t0 = Instant::now();
+        let v = validator_pushed_first_by(9, 5);
+        let announcing = BundleSettings {
+            announce: true,
+            ..sender_only(0)
+        };
+        let mut sync: BundleSync<u8> = BundleSync::new(announcing, [0]).with_local(5);
+        sync.deliver(0, u64::from(v), 0, Some(1), t0);
+        assert!(sync.tick(t0, |_| vec![9]).is_empty());
+        assert_eq!(
+            sync.take_announcements(),
+            vec![Advert {
+                peer: 9,
+                subnet: 0,
+                available: vec![v]
+            }]
+        );
+        // Told once; a peer that lacks it requests it and is served.
+        sync.tick(t0, |_| vec![9]);
+        assert!(sync.take_announcements().is_empty());
+        let reply = sync.on_metadata(9, 0, &[], &[u64::from(v)], t0);
+        assert_eq!(reply.serve.len(), 1);
     }
 
     #[test]
@@ -1066,6 +1338,63 @@ mod tests {
         let reply = sync.on_metadata(8, 0, &[1], &[], t0 + Duration::from_millis(100));
         assert!(reply.requests.is_empty(), "waits out the request delay");
         assert!(sync.next_request_due().is_some());
+    }
+
+    #[test]
+    fn unsent_signatures_are_pushed_and_advertised_again() {
+        let mut sync: BundleSync<u8> = BundleSync::new(settings(), [0]);
+        for v in 0..4 {
+            sync.deliver(0, v, 0, None, Instant::now());
+        }
+        let pushes = sync.tick(Instant::now(), |_| vec![7]);
+        assert_eq!(validators(&pushes, 7), vec![0, 1, 2, 3]);
+        // The second bundle (validator 3) found the peer's queue full.
+        sync.unsent_signatures(7, 0, [3]);
+        let pushes = sync.tick(Instant::now(), |_| vec![7]);
+        assert_eq!(validators(&pushes, 7), vec![3]);
+        assert!(pushes.iter().all(|push| !push.backlog));
+        assert!(sync.tick(Instant::now(), |_| vec![7]).is_empty());
+
+        // A served request that was not sent is advertised again.
+        assert_eq!(sync.advertise(0, &[8])[0].available, vec![0, 1, 2, 3]);
+        let reply = sync.on_metadata(8, 0, &[], &[1, 2], Instant::now());
+        assert_eq!(reply.serve.len(), 1);
+        sync.unsent_signatures(8, 0, [1, 2]);
+        assert_eq!(sync.advertise(0, &[8])[0].available, vec![1, 2]);
+        sync.unsent_signatures(8, 9, [1]);
+        sync.unsent_signatures(8, 0, [99]);
+    }
+
+    #[test]
+    fn unsent_metadata_is_sent_again() {
+        let t0 = Instant::now();
+        let mut sync: BundleSync<u8> = BundleSync::new(settings(), [0]);
+        sync.deliver(0, 1, 0, None, t0);
+        assert_eq!(sync.advertise(0, &[8])[0].available, vec![1]);
+        sync.unsent_available(8, 0, &[1]);
+        assert_eq!(sync.advertise(0, &[8])[0].available, vec![1]);
+        assert!(sync.advertise(0, &[8]).is_empty());
+
+        // An unsent request is not in flight: the next advertiser is asked.
+        assert_eq!(
+            sync.on_metadata(7, 0, &[2, 3], &[], t0).requests,
+            vec![2, 3]
+        );
+        sync.unsent_requests(0, &[3]);
+        let reply = sync.on_metadata(9, 0, &[2, 3], &[], t0);
+        assert_eq!(reply.requests, vec![3]);
+        assert_eq!(sync.counters.requests_suppressed, 1);
+
+        // An unsent announcement is announced at the next tick.
+        let v = validator_pushed_first_by(9, 5);
+        let mut waiting: BundleSync<u8> =
+            BundleSync::new(announcing(Duration::ZERO), [0]).with_local(5);
+        waiting.deliver(0, u64::from(v), 0, Some(1), t0);
+        waiting.tick(t0, |_| vec![9]);
+        assert_eq!(waiting.take_announcements().len(), 1);
+        waiting.unsent_available(9, 0, &[u64::from(v)]);
+        waiting.tick(t0, |_| vec![9]);
+        assert_eq!(waiting.take_announcements()[0].available, vec![v]);
     }
 
     #[test]

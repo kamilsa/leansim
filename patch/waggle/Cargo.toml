@@ -1,0 +1,31 @@
+[package]
+name = "waggle"
+authors = ["João Oliveira <hello@jxs.pt>", "Daniel Knopik <daniel@dknopik.de>"]
+categories = ["network-programming", "asynchronous"]
+description = "Waggle protocol implementation"
+edition = "2024"
+keywords = ["peer-to-peer", "libp2p", "networking", "gossip"]
+license = "MIT"
+repository = "https://github.com/sigp/waggle"
+version = "0.1.0"
+publish = false
+
+# leansim vendors sigp/waggle PR #2 (3b031d0) on libp2p 0.54. build.rs only
+# regenerated src/waggle.pb.rs, which is checked in, so it and its
+# build-dependencies are dropped.
+
+[dependencies]
+async-channel = "2.5.0"
+asynchronous-codec = "0.7"
+bytes = "1"
+futures = "0.3"
+libp2p = "0.54.1"
+prost = "0.14"
+prost-codec = "0.4.0"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+libp2p = { version = "0.54.1", features = ["ed25519", "plaintext", "tokio", "yamux"] }
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt", "time"] }

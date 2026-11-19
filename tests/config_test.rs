@@ -1,5 +1,6 @@
 use leansim::config::experiment::{
     ExperimentConfig, NetworkDefaults, NodeConfig, NodeRole, SignaturePropagation, SignatureSync,
+    SignatureTransport, WagglePushSelection,
 };
 use leansim::network::swarm::warmup_ms;
 
@@ -46,6 +47,16 @@ fn base_config() -> ExperimentConfig {
         bundle_request_delay_ms: 0,
         bundle_stagger_ms: 0,
         bundle_announce: false,
+        signature_transport: SignatureTransport::Gossipsub,
+        waggle_bundled: true,
+        waggle_push_peers: 8,
+        waggle_push_selection: WagglePushSelection::Fixed,
+        waggle_gossip_peers: 6,
+        waggle_gossip_interval_ms: None,
+        waggle_max_send_queue: 100,
+        waggle_max_receive_queue: 100,
+        waggle_max_message_bytes: None,
+        waggle_max_topic_subscription: None,
         churn_tick_ms: 100,
         regular_churn_fraction: 0.0,
         regular_churn_leave_probability: 0.01,
@@ -559,6 +570,190 @@ fn bundled_propagation_rejects_bad_settings() {
     // Gossipsub ignores the bundle settings.
     exp.signature_propagation = SignaturePropagation::Gossipsub;
     exp.validate().unwrap();
+}
+
+#[test]
+fn signature_transport_defaults_to_gossipsub() {
+    let exp: ExperimentConfig =
+        toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    assert_eq!(exp.signature_transport, SignatureTransport::Gossipsub);
+    assert!(exp.waggle_bundled);
+    assert_eq!(exp.waggle_push_peers, 8);
+    assert_eq!(exp.waggle_gossip_peers, 6);
+    assert_eq!(exp.waggle_gossip_interval_ms, None);
+    assert_eq!(exp.waggle_max_send_queue, 100);
+    assert_eq!(exp.waggle_max_receive_queue, 100);
+    assert_eq!(exp.waggle_max_message_bytes, None);
+    assert_eq!(exp.waggle_max_topic_subscription, None);
+    // Gossipsub messages: no bundles at all.
+    assert!(!exp.bundles_enabled() && !exp.bundled());
+    exp.validate().unwrap();
+}
+
+#[test]
+fn waggle_deserializes_bundled_or_not() {
+    let exp: ExperimentConfig = toml::from_str(
+        r#"
+run_id = "test"
+validator_count = 2048
+subnet_count = 2
+signature_payload_bytes = 3072
+gossipsub_heartbeat_interval_ms = 300
+signature_transport = "waggle"
+waggle_push_peers = 4
+waggle_gossip_peers = 0
+waggle_max_send_queue = 512
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+bundle_stagger_ms = 100
+bundle_announce = true
+"#,
+    )
+    .unwrap();
+    exp.validate().unwrap();
+    assert_eq!(exp.signature_transport, SignatureTransport::Waggle);
+    assert_eq!(exp.waggle_push_peers, 4);
+    assert_eq!(exp.waggle_gossip_peers, 0);
+    assert_eq!(exp.waggle_max_send_queue, 512);
+    // Bundled by default: the bundle settings apply as they are.
+    assert!(exp.bundles_enabled() && exp.bundled());
+    assert_eq!(exp.push_tick_ms(), 20);
+    assert_eq!(exp.max_signatures_per_bundle(), 50);
+    // Unset settings follow the run: the heartbeat, one topic per subnet, and
+    // room for a bundle of 50 signatures, which waggle's 64 KiB would not hold.
+    assert_eq!(exp.waggle_gossip_interval_ms(), 300);
+    assert_eq!(exp.waggle_max_topic_subscription(), 2);
+    assert_eq!(exp.waggle_needed_message_bytes(), 50 * (3072 + 12) + 128);
+    assert_eq!(exp.waggle_max_message_bytes(), 50 * (3072 + 12) + 128);
+
+    let mut single = exp.clone();
+    single.waggle_bundled = false;
+    single.validate().unwrap();
+    assert!(single.bundles_enabled() && !single.bundled());
+    assert_eq!(single.push_tick_ms(), 0, "forwarded on receipt");
+    assert_eq!(single.max_signatures_per_bundle(), 1);
+    // One signature fits waggle's default; the metadata of 1,024 validators too.
+    assert_eq!(single.waggle_needed_message_bytes(), 1024 * 8 + 128);
+    assert_eq!(single.waggle_max_message_bytes(), 65536);
+    let settings = leansim::node::bundles::BundleSettings::from_config(&single);
+    assert_eq!(settings.max_per_bundle, 1);
+    assert!(settings.stagger.is_zero() && !settings.announce);
+    let settings = leansim::node::bundles::BundleSettings::from_config(&exp);
+    assert_eq!(settings.max_per_bundle, 50);
+    assert!(!settings.stagger.is_zero() && settings.announce);
+}
+
+#[test]
+fn waggle_rejects_bad_settings() {
+    let mut exp = base_config();
+    exp.signature_transport = SignatureTransport::Waggle;
+    exp.validate().unwrap();
+
+    exp.signature_propagation = SignaturePropagation::Bundled;
+    assert!(exp.validate().is_err(), "waggle_bundled says it");
+    exp.signature_propagation = SignaturePropagation::Gossipsub;
+    exp.signature_sync = SignatureSync::BitmapPull;
+    assert!(exp.validate().is_err(), "sync runs over the gossipsub mesh");
+    exp.signature_sync = SignatureSync::None;
+    exp.gossipsub_explicit_aggregator_count = 1;
+    assert!(exp.validate().is_err());
+    exp.gossipsub_explicit_aggregator_count = 0;
+
+    exp.waggle_max_send_queue = 0;
+    assert!(exp.validate().is_err());
+    exp.waggle_max_send_queue = 100;
+    exp.waggle_max_receive_queue = 0;
+    assert!(exp.validate().is_err());
+    exp.waggle_max_receive_queue = 100;
+    exp.waggle_gossip_interval_ms = Some(0);
+    assert!(exp.validate().is_err());
+    exp.waggle_gossip_interval_ms = Some(500);
+    exp.waggle_max_topic_subscription = Some(0);
+    assert!(exp.validate().is_err());
+    exp.waggle_max_topic_subscription = Some(64);
+    exp.validate().unwrap();
+    assert_eq!(exp.waggle_gossip_interval_ms(), 500);
+    assert_eq!(exp.waggle_max_topic_subscription(), 64);
+
+    // A limit below the run's largest bundle would close streams mid-run.
+    exp.waggle_max_message_bytes = Some(exp.waggle_needed_message_bytes() - 1);
+    assert!(exp.validate().is_err());
+    exp.waggle_max_message_bytes = Some(exp.waggle_needed_message_bytes());
+    exp.validate().unwrap();
+    assert_eq!(
+        exp.waggle_max_message_bytes(),
+        exp.waggle_needed_message_bytes()
+    );
+    exp.waggle_max_message_bytes = None;
+
+    // The bundle settings are checked as for bundled gossipsub.
+    exp.bundle_request_timeout_ms = 0;
+    assert!(exp.validate().is_err());
+    exp.bundle_request_timeout_ms = 1000;
+    exp.bundle_max_signatures = 0;
+    assert!(exp.validate().is_err());
+    exp.waggle_bundled = false;
+    exp.validate().unwrap();
+    exp.bundle_request_timeout_ms = 0;
+    assert!(
+        exp.validate().is_err(),
+        "single signatures are requested too"
+    );
+
+    // Gossipsub ignores the waggle settings.
+    exp.signature_transport = SignatureTransport::Gossipsub;
+    exp.waggle_max_send_queue = 0;
+    exp.validate().unwrap();
+}
+
+#[test]
+fn waggle_hashed_selection_filters_instead_of_staggering() {
+    let exp: ExperimentConfig =
+        toml::from_str("run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\n").unwrap();
+    assert_eq!(exp.waggle_push_selection, WagglePushSelection::Fixed);
+    assert!(!exp.waggle_hashed());
+
+    let mut exp = base_config();
+    exp.signature_transport = SignatureTransport::Waggle;
+    let fixed = leansim::node::bundles::BundleSettings::from_config(&exp);
+    assert!(!fixed.sender_only);
+    assert_eq!(
+        fixed.push_cap, 0,
+        "fixed selection caps the peers, not the signature"
+    );
+
+    exp.waggle_push_selection = WagglePushSelection::Hashed;
+    exp.waggle_push_peers = 5;
+    exp.validate().unwrap();
+    assert!(exp.waggle_hashed());
+    let hashed = leansim::node::bundles::BundleSettings::from_config(&exp);
+    assert!(hashed.sender_only && hashed.stagger.is_zero() && !hashed.announce);
+    assert_eq!(hashed.push_cap, 5);
+
+    // The hash decides for good, so there is nothing to stagger; the waiting end
+    // may still announce, bundled or not.
+    exp.bundle_stagger_ms = 200;
+    assert!(exp.validate().is_err());
+    exp.bundle_stagger_ms = 0;
+    exp.bundle_announce = true;
+    exp.validate().unwrap();
+    assert!(leansim::node::bundles::BundleSettings::from_config(&exp).announce);
+    exp.waggle_bundled = false;
+    exp.validate().unwrap();
+    let single = leansim::node::bundles::BundleSettings::from_config(&exp);
+    assert!(single.sender_only && single.announce);
+    assert_eq!((single.max_per_bundle, single.push_cap), (1, 5));
+
+    // Only waggle hashes: gossipsub keeps its mesh.
+    exp.signature_transport = SignatureTransport::Gossipsub;
+    assert!(!exp.waggle_hashed());
+    assert!(!leansim::node::bundles::BundleSettings::from_config(&exp).sender_only);
+
+    let parsed: ExperimentConfig = toml::from_str(
+        "run_id = \"t\"\nvalidator_count = 4\nsubnet_count = 1\nsignature_transport = \"waggle\"\nwaggle_push_selection = \"hashed\"\n",
+    )
+    .unwrap();
+    assert!(parsed.waggle_hashed());
 }
 
 #[test]

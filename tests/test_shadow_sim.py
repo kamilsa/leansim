@@ -562,6 +562,76 @@ class SignaturePropagationConfigTests(unittest.TestCase):
                 shadow_sim.validate_experiment(self.config(**overrides))
 
 
+class SignatureTransportConfigTests(unittest.TestCase):
+    def config(self, **overrides: object) -> dict:
+        return shadow_sim.experiment_defaults({"run_id": "t", "validator_count": 2048, "subnet_count": 2, **overrides})
+
+    def test_defaults_to_gossipsub_with_waggles_settings(self) -> None:
+        config = self.config()
+        shadow_sim.validate_experiment(config)
+        self.assertEqual(config["signature_transport"], "gossipsub")
+        self.assertIs(config["waggle_bundled"], True)
+        self.assertEqual(config["waggle_push_peers"], 8)
+        self.assertEqual(config["waggle_push_selection"], "fixed")
+        self.assertEqual(config["waggle_gossip_peers"], 6)
+        self.assertEqual(config["waggle_max_send_queue"], 100)
+        self.assertEqual(config["waggle_max_receive_queue"], 100)
+        # Left to the node, which derives them from the run.
+        for key in ("waggle_gossip_interval_ms", "waggle_max_message_bytes", "waggle_max_topic_subscription"):
+            self.assertNotIn(key, config)
+
+    def test_waggle_validates_bundled_or_not(self) -> None:
+        for overrides in (
+            {},
+            {"waggle_bundled": False},
+            {"waggle_push_peers": 0, "waggle_gossip_peers": 0},
+            {"bundle_stagger_ms": 200, "bundle_announce": True},
+            {"waggle_gossip_interval_ms": 500, "waggle_max_topic_subscription": 64},
+            {"waggle_max_message_bytes": 1 << 20},
+            {"waggle_push_selection": "hashed"},
+            # The hash decides who sends, so announcements need no stagger.
+            {"waggle_push_selection": "hashed", "bundle_announce": True},
+            {"waggle_push_selection": "hashed", "bundle_announce": True, "waggle_bundled": False},
+        ):
+            shadow_sim.validate_experiment(self.config(signature_transport="waggle", **overrides))
+
+    def test_the_message_limit_must_fit_the_runs_largest_message(self) -> None:
+        # 50 signatures of 3,072 bytes with their indices and origins, plus framing.
+        bundled = self.config(signature_transport="waggle")
+        self.assertEqual(shadow_sim.waggle_needed_message_bytes(bundled, 1024), 50 * 3084 + 128)
+        # One signature is smaller than the parts metadata of 1,024 validators.
+        single = self.config(signature_transport="waggle", waggle_bundled=False)
+        self.assertEqual(shadow_sim.waggle_needed_message_bytes(single, 1024), 1024 * 8 + 128)
+        shadow_sim.validate_experiment(self.config(signature_transport="waggle", waggle_max_message_bytes=50 * 3084 + 128))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            shadow_sim.validate_experiment(self.config(signature_transport="waggle", waggle_max_message_bytes=65536))
+        # Gossipsub never sends a waggle message.
+        shadow_sim.validate_experiment(self.config(waggle_max_message_bytes=65536))
+
+    def test_bad_settings_are_rejected(self) -> None:
+        for overrides in (
+            {"signature_transport": "bundled"},
+            {"waggle_bundled": 1},
+            {"waggle_push_peers": -1},
+            {"waggle_gossip_peers": -1},
+            {"waggle_max_send_queue": 0},
+            {"waggle_max_receive_queue": 0},
+            {"waggle_gossip_interval_ms": 0},
+            {"waggle_max_message_bytes": 0},
+            {"waggle_max_topic_subscription": 0},
+            {"signature_transport": "waggle", "signature_propagation": "bundled"},
+            {"signature_transport": "waggle", "signature_sync": "bitmap_pull"},
+            {"signature_transport": "waggle", "local_aggregators_per_subnet": 4, "gossipsub_explicit_aggregator_count": 1},
+            {"signature_transport": "waggle", "bundle_announce": True},
+            {"waggle_push_selection": "random"},
+            {"signature_transport": "waggle", "waggle_push_selection": "hashed", "bundle_stagger_ms": 200},
+            # Only waggle hashes: over gossipsub an announcement still needs a stagger.
+            {"waggle_push_selection": "hashed", "signature_propagation": "bundled", "bundle_announce": True},
+        ):
+            with self.assertRaises(SystemExit, msg=str(overrides)), contextlib.redirect_stderr(io.StringIO()):
+                shadow_sim.validate_experiment(self.config(**overrides))
+
+
 class CommitteeAggregatorTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()

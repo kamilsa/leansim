@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use leansim::config::experiment::{
     ExperimentConfig, NetworkDefaults, NodeRole, SignaturePropagation, SignatureSync,
+    SignatureTransport, WagglePushSelection,
 };
 use leansim::messages::wire::WireMessage;
 use leansim::node::state::{NodeState, PendingProof};
@@ -50,6 +51,16 @@ fn test_config() -> ExperimentConfig {
         bundle_request_delay_ms: 0,
         bundle_stagger_ms: 0,
         bundle_announce: false,
+        signature_transport: SignatureTransport::Gossipsub,
+        waggle_bundled: true,
+        waggle_push_peers: 8,
+        waggle_push_selection: WagglePushSelection::Fixed,
+        waggle_gossip_peers: 6,
+        waggle_gossip_interval_ms: None,
+        waggle_max_send_queue: 100,
+        waggle_max_receive_queue: 100,
+        waggle_max_message_bytes: None,
+        waggle_max_topic_subscription: None,
         churn_tick_ms: 100,
         regular_churn_fraction: 0.0,
         regular_churn_leave_probability: 0.01,

@@ -88,6 +88,30 @@ class FigureTests(unittest.TestCase):
         config["bundle_announce"] = True
         self.assertIn("waits 200 ms and announces", report.config_groups(config, {})[0][1][0][2])
 
+    def test_config_names_waggle_and_its_propagation(self) -> None:
+        config = {"signature_transport": "waggle", "signature_propagation": "gossipsub", "waggle_bundled": True,
+                  "waggle_push_peers": 8, "waggle_gossip_peers": 6, "gossipsub_heartbeat_interval_ms": 300,
+                  "bundle_tick_ms": 20, "bundle_max_signatures": 50}
+        rows = dict((label, (value, note)) for label, value, note in dict(report.config_groups(config, {}))["Gossip"])
+        self.assertEqual(rows["Transport"],
+                         ("waggle", "pushes to 8 subscribers of a subnet; advertises to 6 others every 300 ms"))
+        self.assertEqual(rows["Propagation"], ("bundled", "every 20 ms, at most 50 a bundle; EIP-8334 over waggle"))
+
+        config.update(waggle_bundled=False, waggle_push_peers=0, waggle_gossip_peers=0)
+        rows = dict((label, (value, note)) for label, value, note in dict(report.config_groups(config, {}))["Gossip"])
+        self.assertEqual(rows["Transport"], ("waggle", "pushes to every subscriber of a subnet"))
+        self.assertEqual(rows["Propagation"], ("single", "one waggle message per signature, forwarded on receipt"))
+
+        config.update(waggle_push_selection="hashed", waggle_push_peers=5)
+        rows = dict((label, (value, note)) for label, value, note in dict(report.config_groups(config, {}))["Gossip"])
+        self.assertEqual(rows["Transport"], (
+            "waggle", "a hash of each signature and the two peer ids names the end of a link that sends it; "
+                      "pushed to at most 5 of the subscribers it names this host for"))
+
+        # Over gossipsub the propagation row says it all.
+        rows = dict(report.config_groups({"signature_transport": "gossipsub", "signature_propagation": "gossipsub"}, {}))
+        self.assertEqual(rows["Gossip"], [("Propagation", "gossipsub", "one message per signature")])
+
     def test_transport_section_shows_bundle_paths_and_ledger(self) -> None:
         empty = {"unique": 0, "duplicate": 0, "bytes": 0}
         metrics = {"signature_transport": {

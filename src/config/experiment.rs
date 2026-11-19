@@ -31,6 +31,35 @@ pub enum SignaturePropagation {
     Bundled,
 }
 
+/// The protocol that carries subnet signatures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureTransport {
+    /// Gossipsub messages, or partial messages with `signature_propagation = "bundled"`.
+    #[default]
+    Gossipsub,
+    /// Waggle: a stream per subnet topic and peer, one object per subnet. Its
+    /// pieces are signature bundles and its metadata is the parts metadata.
+    Waggle,
+}
+
+/// How a host picks the subscribers it pushes a subnet's signatures to over waggle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WagglePushSelection {
+    /// `waggle_push_peers` subscribers, picked at random and kept, for every signature.
+    #[default]
+    Fixed,
+    /// Per signature: a hash of the signature and the two peer ids, the same at
+    /// both ends, names the end of each link that may send it. A host pushes a
+    /// signature to at most `waggle_push_peers` of the subscribers it is the
+    /// sender for, and never to the others.
+    Hashed,
+}
+
+/// Bytes waggle's 64 KiB default message limit allows.
+pub const WAGGLE_DEFAULT_MESSAGE_BYTES: usize = 65536;
+
 /// Network defaults applied to all node-to-node links in Shadow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkDefaults {
@@ -219,6 +248,55 @@ pub struct ExperimentConfig {
     #[serde(default)]
     pub bundle_announce: bool,
 
+    /// Gossipsub or waggle. Waggle ignores `signature_propagation`: `waggle_bundled`
+    /// says whether its signatures travel in bundles.
+    #[serde(default)]
+    pub signature_transport: SignatureTransport,
+
+    /// Waggle: signatures travel in bundles pushed every `bundle_tick_ms`, as
+    /// with `signature_propagation = "bundled"` (all `bundle_*` settings apply).
+    /// False sends every signature in a message of its own, forwarded on receipt.
+    #[serde(default = "default_true")]
+    pub waggle_bundled: bool,
+
+    /// Waggle: subscribers of a subnet a host pushes its signatures to, picked at
+    /// random and kept; 0 pushes to every subscriber. With hashed selection, the
+    /// most subscribers one signature is pushed to; 0 = all the hash allows.
+    #[serde(default = "defaults::default_waggle_push_peers")]
+    pub waggle_push_peers: usize,
+
+    /// Waggle: the same push peers for every signature, or picked per signature
+    /// by a hash both ends of a link agree on.
+    #[serde(default)]
+    pub waggle_push_selection: WagglePushSelection,
+
+    /// Waggle: other subscribers of a subnet a host advertises what it holds to
+    /// every `waggle_gossip_interval_ms`, picked anew each time; 0 = none.
+    #[serde(default = "defaults::default_waggle_gossip_peers")]
+    pub waggle_gossip_peers: usize,
+
+    /// Waggle: how often a host advertises; defaults to the gossipsub heartbeat interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waggle_gossip_interval_ms: Option<u64>,
+
+    /// Waggle: messages queued for one peer on one topic. A message that finds
+    /// the queue full is not sent, and its signatures are pushed again later.
+    #[serde(default = "defaults::default_waggle_queue")]
+    pub waggle_max_send_queue: usize,
+
+    /// Waggle: received messages buffered per topic; reading pauses when it is full.
+    #[serde(default = "defaults::default_waggle_queue")]
+    pub waggle_max_receive_queue: usize,
+
+    /// Waggle: largest message on the wire. Defaults to waggle's 64 KiB, or to
+    /// what the largest bundle or parts metadata of the run needs if that is more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waggle_max_message_bytes: Option<usize>,
+
+    /// Waggle: topics one peer may subscribe to on a connection; defaults to `subnet_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waggle_max_topic_subscription: Option<usize>,
+
     /// Churn: how often a churny host may flip between online and offline.
     #[serde(default = "defaults::default_churn_tick_ms")]
     pub churn_tick_ms: u64,
@@ -344,20 +422,71 @@ impl ExperimentConfig {
                 return Err("sync_coded_redundancy must be a positive number".into());
             }
         }
-        if self.signature_propagation == SignaturePropagation::Bundled {
-            if self.signature_sync != SignatureSync::None {
+        let waggle = self.signature_transport == SignatureTransport::Waggle;
+        if waggle {
+            if self.signature_propagation == SignaturePropagation::Bundled {
                 return Err(
-                    "signature_propagation = \"bundled\" requires signature_sync = \"none\"".into(),
+                    "signature_transport = \"waggle\" takes waggle_bundled, not signature_propagation = \"bundled\""
+                        .into(),
                 );
             }
+            if self.signature_sync != SignatureSync::None {
+                return Err(
+                    "signature_transport = \"waggle\" requires signature_sync = \"none\"".into(),
+                );
+            }
+            if self.gossipsub_explicit_aggregator_count > 0 {
+                return Err(
+                    "signature_transport = \"waggle\" does not support gossipsub_explicit_aggregator_count"
+                        .into(),
+                );
+            }
+            if self.waggle_max_send_queue == 0 || self.waggle_max_receive_queue == 0 {
+                return Err(
+                    "waggle_max_send_queue and waggle_max_receive_queue must be > 0".into(),
+                );
+            }
+            if self.waggle_gossip_interval_ms == Some(0) {
+                return Err("waggle_gossip_interval_ms must be > 0".into());
+            }
+            if self.waggle_max_topic_subscription == Some(0) {
+                return Err("waggle_max_topic_subscription must be > 0".into());
+            }
+            if self.waggle_hashed() && self.bundle_stagger_ms > 0 {
+                return Err(
+                    "waggle_push_selection = \"hashed\" has no stagger: the end of a link the hash does not pick never pushes; set bundle_stagger_ms = 0"
+                        .into(),
+                );
+            }
+        }
+        if self.signature_propagation == SignaturePropagation::Bundled
+            && self.signature_sync != SignatureSync::None
+        {
+            return Err(
+                "signature_propagation = \"bundled\" requires signature_sync = \"none\"".into(),
+            );
+        }
+        if self.bundles_enabled() && self.bundle_request_timeout_ms == 0 {
+            return Err("bundle_request_timeout_ms must be > 0".into());
+        }
+        if self.bundled() {
             if self.bundle_max_signatures == 0 {
                 return Err("bundle_max_signatures must be > 0".into());
             }
-            if self.bundle_request_timeout_ms == 0 {
-                return Err("bundle_request_timeout_ms must be > 0".into());
-            }
-            if self.bundle_announce && self.bundle_stagger_ms == 0 {
+            if self.bundle_announce && self.bundle_stagger_ms == 0 && !self.waggle_hashed() {
                 return Err("bundle_announce requires bundle_stagger_ms > 0".into());
+            }
+        }
+        // After the bundle checks: the size waggle needs depends on the bundle cap.
+        if waggle {
+            let needed = self.waggle_needed_message_bytes();
+            if self
+                .waggle_max_message_bytes
+                .is_some_and(|max| max < needed)
+            {
+                return Err(format!(
+                    "waggle_max_message_bytes must be at least {needed} to carry this run's bundles and parts metadata"
+                ));
             }
         }
         if self.churn_tick_ms == 0 {
@@ -401,6 +530,78 @@ impl ExperimentConfig {
     /// Whether any host of the run churns.
     pub fn churn_enabled(&self) -> bool {
         self.regular_churn_fraction > 0.0 || self.supernode_churn_fraction > 0.0
+    }
+
+    /// Whether signatures travel as bundles and parts metadata (over gossipsub
+    /// partial messages or over waggle) rather than as gossipsub messages.
+    pub fn bundles_enabled(&self) -> bool {
+        self.signature_transport == SignatureTransport::Waggle
+            || self.signature_propagation == SignaturePropagation::Bundled
+    }
+
+    /// Whether a bundle may carry more than one signature and waits for a tick.
+    /// False with gossipsub messages, and over waggle with `waggle_bundled = false`.
+    pub fn bundled(&self) -> bool {
+        match self.signature_transport {
+            SignatureTransport::Gossipsub => {
+                self.signature_propagation == SignaturePropagation::Bundled
+            }
+            SignatureTransport::Waggle => self.waggle_bundled,
+        }
+    }
+
+    /// Whether waggle picks each signature's push peers by hash.
+    pub fn waggle_hashed(&self) -> bool {
+        self.signature_transport == SignatureTransport::Waggle
+            && self.waggle_push_selection == WagglePushSelection::Hashed
+    }
+
+    /// Most signatures in one bundle: one without bundling.
+    pub fn max_signatures_per_bundle(&self) -> usize {
+        if self.bundled() {
+            self.bundle_max_signatures.max(1)
+        } else {
+            1
+        }
+    }
+
+    /// How often a host pushes its new signatures; 0, at once, without bundling.
+    pub fn push_tick_ms(&self) -> u64 {
+        if self.bundled() {
+            self.bundle_tick_ms
+        } else {
+            0
+        }
+    }
+
+    pub fn waggle_gossip_interval_ms(&self) -> u64 {
+        self.waggle_gossip_interval_ms
+            .unwrap_or(self.gossipsub_heartbeat_interval_ms)
+            .max(1)
+    }
+
+    /// Bytes of the largest waggle message of the run: a full bundle, or parts
+    /// metadata naming every validator of a subnet, with room for their framing.
+    pub fn waggle_needed_message_bytes(&self) -> usize {
+        // Bincode's fixed fields and length prefixes, the object id and protobuf framing.
+        const FRAMING: usize = 128;
+        // A signature, its 8-byte validator index and its 4-byte origin.
+        let bundle = self.max_signatures_per_bundle() * (self.signature_payload_bytes + 12);
+        let metadata = self.validators_per_subnet() * 8;
+        bundle.max(metadata) + FRAMING
+    }
+
+    pub fn waggle_max_message_bytes(&self) -> usize {
+        self.waggle_max_message_bytes.unwrap_or_else(|| {
+            self.waggle_needed_message_bytes()
+                .max(WAGGLE_DEFAULT_MESSAGE_BYTES)
+        })
+    }
+
+    pub fn waggle_max_topic_subscription(&self) -> usize {
+        self.waggle_max_topic_subscription
+            .unwrap_or(self.subnet_count)
+            .max(1)
     }
 
     pub fn heartbeat_initial_delay_ms(&self) -> u64 {

@@ -45,7 +45,7 @@ TRANSPORT_FIELDS = (
     "bundles_sent", "bundle_sigs_sent", "bundle_bytes_sent", "bundle_framing_bytes_sent",
     "requested_sigs_served", "backlog_sigs_sent", "metadata_sent", "metadata_bytes_sent", "available_ids_sent",
     "request_ids_sent", "pushes_avoided", "lazy_sigs_sent", "announce_ids_sent", "requests_already_sent",
-    "requests_suppressed", "requests_avoided", "invalid_partials",
+    "requests_suppressed", "requests_avoided", "invalid_partials", "frames_unsent",
     "restart_notices_sent", "restart_reconnects",
 )
 SIG_VIAS = ("gossip", "pull", "coded", "bundle", "backlog", "requested")
@@ -360,6 +360,11 @@ CONFIG_KEYS = (
     "gossipsub_flood_publish", "gossipsub_gossip", "gossipsub_idontwant", "gossipsub_idontwant_threshold_bytes",
     "signature_sync", "sync_interval_ms", "sync_grace_ms", "sync_pull_batch",
     "sync_coded_degree", "sync_coded_redundancy", "sync_coded_per_tick",
+    "signature_propagation", "bundle_tick_ms", "bundle_max_signatures", "bundle_request_timeout_ms",
+    "bundle_request_delay_ms", "bundle_stagger_ms", "bundle_announce",
+    "signature_transport", "waggle_bundled", "waggle_push_peers", "waggle_push_selection", "waggle_gossip_peers",
+    "waggle_gossip_interval_ms", "waggle_max_send_queue", "waggle_max_receive_queue",
+    "waggle_max_message_bytes", "waggle_max_topic_subscription",
     "churn_tick_ms", "regular_churn_fraction", "regular_churn_leave_probability", "regular_churn_rejoin_probability",
     "supernode_churn_fraction", "supernode_churn_leave_probability", "supernode_churn_rejoin_probability",
 )

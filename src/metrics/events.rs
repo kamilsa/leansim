@@ -243,6 +243,11 @@ pub enum JsonlEvent {
         /// Bundles and metadata dropped as malformed.
         #[serde(default)]
         invalid_partials: u64,
+        /// Bundles and metadata the transport did not take, because the peer's
+        /// waggle send queue was full or the peer was gone. Their signatures are
+        /// pushed or advertised again, so they are in none of the counts above.
+        #[serde(default)]
+        frames_unsent: u64,
         /// Churn: peers this host told that it restarted, after rejoining.
         #[serde(default)]
         restart_notices_sent: u64,

@@ -455,6 +455,96 @@ copies already held), and parts metadata and bundle framing are `sync_control`.
 `nodemap-*-allhosts-sync-bundled-sub64` runs the gossip baseline's network with
 bundles.
 
+#### Signatures over waggle
+
+`signature_transport = "waggle"` carries subnet signatures over
+[waggle](https://github.com/libp2p/specs/pull/732) instead of gossipsub, the
+protocol EIP-8334 moved to. Waggle is vendored in `patch/waggle` from
+sigp/waggle `3b031d0`, ported to libp2p 0.54. With the default
+`signature_transport = "gossipsub"` the waggle behaviour is off and nothing of
+it is on the wire.
+
+Waggle only opens streams: a host that subscribes to a topic opens one to every
+connected peer, and a peer writes to it what it chooses. There is no mesh, no
+forwarding and no heartbeat, so the rest is leansim's:
+
+- A subnet's topic is its gossipsub topic string, and the subnet is one waggle
+  object (slot 0, as the partial-message group). A message's `pieces` are a
+  signature bundle and its `piecesMetadata` the parts metadata, the same
+  encodings as over partial messages, driven by the same state machine. The
+  topic is named once per stream, not in every message.
+- A host accepts subscriptions to the subnets whose signatures it holds: the ones
+  it subscribes to, aggregates or signs in. So a host that only signs in a subnet
+  still pushes to its subscribers, as gossipsub's fanout does.
+- It pushes a subnet's signatures to `waggle_push_peers` of the subnet's
+  subscribers, picked at random when it first pushes and kept until they
+  unsubscribe; a free place goes to another subscriber. The pick is one-sided:
+  a host may push to a peer that does not push back, and a host no peer picked
+  gets nothing by push. 0 pushes to every subscriber.
+- With `waggle_push_selection = "hashed"` a host picks push peers per signature
+  instead. Every subscriber is a candidate. A hash of the signature and the two
+  peer ids, the same at both ends (the one a stagger takes turns by), names the
+  end of each link that sends the signature: a host pushes a signature only to
+  the subscribers the hash names it the sender for, so no link carries a
+  signature both ways, and the other end never pushes it, however long nothing
+  comes. Of those subscribers a host pushes to at most `waggle_push_peers`, the
+  ones the hash ranks first among those not known to hold the signature; 0
+  pushes to all of them. A host sends its own signatures whatever the hash
+  says, to at most `waggle_push_peers` subscribers. A subscriber that turns up
+  after a signature's peers were picked gets it if the hash names this host the
+  sender. About half a host's subscribers are named for a signature, so the cap
+  only binds below half of them. There is no stagger
+  (`bundle_stagger_ms` must be 0), and `bundle_announce` needs none: the end
+  that does not send tells the sender at once that it holds the signature, and
+  a sender that lacks it requests it. Hashed selection works with and without
+  bundling.
+- Every `waggle_gossip_interval_ms` it advertises what it holds to
+  `waggle_gossip_peers` of the other subscribers, picked anew each time, which
+  request what they lack: the parts metadata exchange of bundled propagation,
+  and the only way to a host no peer pushes to. With hashed selection any
+  subscriber can be picked, and is told what it was not pushed.
+- `waggle_bundled = true` pushes bundles every `bundle_tick_ms`, with every
+  `bundle_*` setting of bundled propagation (stagger and announcements
+  included). `waggle_bundled = false` sends each signature in a message of its
+  own, forwarded on receipt to the push peers not known to hold it: gossipsub's
+  forward-on-receipt. It ignores the tick, the bundle cap, the stagger and the
+  announcements, and keeps the requests.
+- A message that finds the peer's send queue full (`waggle_max_send_queue`
+  messages per peer and topic) is not sent. Its signatures are pushed again 20 ms
+  later, or advertised again at the next gossip round (`frames_unsent` counts
+  the messages turned away).
+
+`signature_propagation` must stay `gossipsub` with waggle, which also requires
+`signature_sync = "none"` and no explicit aggregators: both need gossipsub's
+mesh. The launcher still connects hosts by `gossipsub_mesh_n` peers per
+subscribed subnet.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `signature_transport` | `"gossipsub"` | `gossipsub` or `waggle` |
+| `waggle_bundled` | `true` | Bundles every tick, or one signature per message |
+| `waggle_push_peers` | `8` | Subscribers of a subnet a host pushes to; 0 = all. Hashed: per signature |
+| `waggle_push_selection` | `"fixed"` | `fixed`: the same push peers for every signature; `hashed`: per signature, by a hash both ends agree on |
+| `waggle_gossip_peers` | `6` | Other subscribers a host advertises to each round; 0 = none |
+| `waggle_gossip_interval_ms` | heartbeat interval | How often a host advertises |
+| `waggle_max_send_queue` | `100` | Messages queued for one peer on one topic |
+| `waggle_max_receive_queue` | `100` | Received messages buffered per topic; reading pauses when full |
+| `waggle_max_message_bytes` | 64 KiB, or the run's largest message | Largest message on the wire |
+| `waggle_max_topic_subscription` | `subnet_count` | Topics a peer may subscribe to on a connection |
+
+The logs and metrics are those of bundled propagation, in both modes:
+`SigReceived` names `bundle`, `backlog` or `requested`, `TransportStats` counts
+bundles and parts metadata, and `NodeStats` counts frames exactly. Byte counts
+are waggle frames (protobuf and its length prefix; QUIC and stream negotiation
+excluded). `MeshDegree` logs a host's push peers per subnet, with hashed
+selection its subscribers, about half of which a signature goes to. The analyzer counts
+a mesh link as two-sided, so with one-sided picks `copies_per_link` reads about
+twice the copies per push edge. `pushes_avoided` also counts copies from peers
+that push to a host without being its push peers, to which it would not have
+pushed anyway, so it is not the tick's saving as it is over gossipsub. `nodemap-small-65k-allhosts-waggle-bundled-sub64`
+and `nodemap-small-65k-allhosts-waggle-single-sub64` run the gossip baseline's
+network over waggle.
+
 #### Churn
 
 With churn, some hosts crash and rejoin while the run goes on, as the churny

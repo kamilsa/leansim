@@ -339,6 +339,7 @@ impl SyncIo {
             requests_suppressed: b.requests_suppressed,
             requests_avoided: b.requests_avoided,
             invalid_partials: b.invalid_partials,
+            frames_unsent: b.frames_unsent,
             restart_notices_sent: links.restart_notices_sent,
             restart_reconnects: links.restart_reconnects,
         }
