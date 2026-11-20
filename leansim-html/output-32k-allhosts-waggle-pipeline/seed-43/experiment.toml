@@ -1,0 +1,55 @@
+# Full-map slot: fixed-four signature Waggle, then authenticated proof Waggle.
+run_id = "32k-allhosts-waggle4-proof-waggle"
+run_timeout_secs = 25
+validator_count = 32768
+node_map = "nodes.csv"
+all_hosts = true
+subnet_subscriptions_per_node = 2
+subscribe_to_duty_subnets = false
+random_peer_count = 0
+publish_subnet_peer_count = 8
+subnet_count = 16
+# The existing subscriber selector assigns exactly four distinct hosts per
+# committee. The validator lottery would only target four in expectation.
+local_aggregators_per_subnet = 4
+local_threshold = 0.9
+signature_aggregation_rate = 1000
+burst_time_ms = 100
+burst_jitter_ms = 100
+signature_payload_bytes = 2400
+aggregate_proof_bytes = 200000
+# Simulated 16-to-1 combine cost; this is not a proving benchmark.
+recursive_aggregation_time_ms = 1200
+
+gossipsub_mesh_n_low = 3
+gossipsub_mesh_n = 4
+gossipsub_mesh_n_high = 6
+gossipsub_mesh_outbound_min = 2
+gossipsub_heartbeat_interval_ms = 300
+mesh_warmup_ms = 3000
+gossipsub_idontwant_threshold_bytes = 1000
+signature_transport = "waggle"
+waggle_bundled = true
+waggle_push_selection = "fixed"
+waggle_push_peers = 4
+waggle_gossip_peers = 6
+waggle_gossip_interval_ms = 300
+bundle_tick_ms = 20
+bundle_max_signatures = 50
+bundle_stagger_ms = 1600
+bundle_announce = true
+bundle_request_delay_ms = 200
+bundle_request_timeout_ms = 1000
+
+use_geo_latency = true
+geo_seed = 43
+geo_jitter = 0.0
+supernode_by_validator_count = 10
+supernode_uplink_mbps = 1000
+supernode_downlink_mbps = 1000
+topology_degree = 50
+
+[network_defaults]
+uplink_mbps = 50
+downlink_mbps = 100
+latency_ms = 50
