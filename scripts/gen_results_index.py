@@ -5,8 +5,8 @@ Usage:
     python3 scripts/gen_results_index.py [results_dir]
 
 Scans <results_dir> (default: leansim-html/ next to the repo root) for
-subdirectories containing a run-manifest.json, and (re)writes index.html
-with one row per run. Re-run this after copying new run directories into
+classic run manifests and integrated pipeline seed reports, and (re)writes
+index.html with one row per run. Re-run this after copying new run directories into
 the results folder, then commit and push: GitHub Pages serves the folder
 verbatim, so index.html is the landing page.
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 PAGE_CSS = """
@@ -92,7 +93,34 @@ def load_run(run_dir: Path) -> dict | None:
         "subnet_pages": len(list(run_dir.glob("subnet-*.html"))),
         "traffic_pages": len(list(run_dir.glob("traffic-*.html"))),
         "has_summary": (run_dir / "summary.html").exists(),
+        "data_file": "run-manifest.json",
         "config": {k: experiment.get(k) for k in CONFIG_KEYS},
+    }
+
+
+def load_pipeline_run(summary_path: Path, results_dir: Path) -> dict:
+    run_dir = summary_path.parent
+    experiment = tomllib.loads((run_dir / "experiment.toml").read_text())
+    summary = json.loads(summary_path.read_text())
+    signature = experiment["signature_transport"]
+    selection = experiment["waggle_push_selection"]
+    eager_peers = experiment["waggle_push_peers"]
+    comparison = run_dir.parent / "index.html"
+    return {
+        "dir": run_dir.relative_to(results_dir).as_posix(),
+        "run_id": experiment["run_id"],
+        "seed": summary["seed"],
+        "hosts": summary["hosts"],
+        "validators": experiment["validator_count"],
+        "subnets": experiment["subnet_count"],
+        "aggregators": experiment["local_aggregators_per_subnet"],
+        "threshold": experiment["local_threshold"],
+        "mode": f"{signature.title()} signatures ({selection}, {eager_peers} peers) + Waggle proofs",
+        "subnet_pages": len(list(run_dir.glob("subnet-*.html"))),
+        "traffic_pages": len(list(run_dir.glob("traffic-*.html"))),
+        "has_summary": (run_dir / "summary.html").is_file(),
+        "data_file": summary_path.name,
+        "comparison": comparison.relative_to(results_dir).as_posix() if comparison.is_file() else None,
     }
 
 
@@ -141,11 +169,18 @@ def render(runs: list[dict], generated_note: str) -> str:
             f'<td>{fmt(run["threshold"])}</td>'
             f'<td>{e(run["mode"])}</td>'
             f'<td>{run["subnet_pages"]} + {run["traffic_pages"]} traffic</td>'
-            f'<td><a href="{e(run["dir"])}/run-manifest.json">manifest</a></td>'
+            f'<td><a href="{e(run["dir"])}/{e(run["data_file"])}">'
+            + ("manifest" if run["data_file"] == "run-manifest.json" else "summary data")
+            + "</a></td>"
             "</tr>"
         )
     total_subnet = sum(r["subnet_pages"] for r in runs)
     total_traffic = sum(r["traffic_pages"] for r in runs)
+    comparisons = sorted({(r["run_id"], r["comparison"]) for r in runs if r.get("comparison")})
+    comparison_links = "".join(
+        f'<li><a href="{e(path)}">{e(run)}: compare seeds</a></li>' for run, path in comparisons
+    )
+    comparison_html = f'<ul>{comparison_links}</ul>' if comparison_links else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -164,6 +199,7 @@ def render(runs: list[dict], generated_note: str) -> str:
   <h2>Runs</h2>
   <p class="caption">One row per run directory. <b>Pages</b> counts subnet-*.html and traffic-*.html
   files in the directory; every run links to its full summary.</p>
+  {comparison_html}
   <div class="table-scroll">
   <table>
     <thead><tr>
@@ -190,12 +226,13 @@ def main() -> None:
         sys.exit(f"results dir not found: {results_dir}")
 
     runs = [r for d in sorted(results_dir.iterdir()) if d.is_dir() for r in [load_run(d)] if r]
+    runs.extend(load_pipeline_run(path, results_dir) for path in sorted(results_dir.glob("*/seed-*/pipeline-summary.json")))
     if not runs:
-        sys.exit(f"no run directories with run-manifest.json under {results_dir}")
+        sys.exit(f"no run reports under {results_dir}")
 
     import datetime as dt
 
-    note = f"Generated {dt.date.today().isoformat()} from run-manifest.json files"
+    note = f"Generated {dt.date.today().isoformat()} from run manifests and report inputs"
     out = results_dir / "index.html"
     out.write_text(render(runs, note))
     print(f"wrote {out} ({len(runs)} runs)")
