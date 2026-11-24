@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type Root = [u8; 32];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProofKey {
     pub subnet: u32,
     pub producer: u32,

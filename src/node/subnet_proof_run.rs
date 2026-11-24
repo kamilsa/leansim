@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::time::{interval_at, sleep_until, Instant, MissedTickBehavior};
 
+use super::seacast::Seacast;
+use super::subnet_proof_seacast::ProofSeacast;
 use super::subnet_proof_waggle::{ProofWaggle, DRIVE_INTERVAL};
 use super::subnet_proofs::{
     pieces, sign_commitment, Admission, Assembly, Piece, ProofKey, Pulls,
@@ -29,6 +31,9 @@ pub enum Mode {
     Gossipsub,
     Eip8411,
     Waggle,
+    /// SEACAST (cskiraly/seacast-spec v0.12.0, tier 4) on its Waggle binding: the proof
+    /// Reed–Solomon coded at rate 1/2, any `chunks` of `2 * chunks` rebuild it.
+    Seacast,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +46,10 @@ pub struct Settings {
     commitment_lead_ms: u64,
     chunks: usize,
     producers: Vec<ProofKey>,
+    /// Hosts whose uplink is at least 500 Mbit/s (SEACAST's fast class, card 17; at
+    /// 1 Gbit/s also striping, card 13). Only the SEACAST arm reads it.
+    #[serde(default)]
+    fast_hosts: Vec<u32>,
 }
 
 fn release_schedule(settings: &Settings, node_id: u32) -> BTreeSet<(u64, ProofKey)> {
@@ -110,6 +119,7 @@ struct Run<'a> {
     allowed: BTreeMap<ProofKey, PeerId>,
     keys: BTreeMap<ProofKey, PublicKey>,
     waggle: Option<ProofWaggle>,
+    seacast: Option<ProofSeacast>,
 }
 
 impl Run<'_> {
@@ -325,16 +335,36 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     let experiment = &cfg.experiment;
     let key = node_keypair(cfg.node_id);
     let waggle_topic = format!("/leansim/{}/subnet-proof-waggle/1", experiment.run_id).into_bytes();
-    let waggle = (settings.mode == Mode::Waggle).then(|| {
+    let seacast = (settings.mode == Mode::Seacast).then(|| {
+        let fast = settings.fast_hosts.contains(&cfg.node_id);
+        ProofSeacast::new(
+            Seacast::new(
+                cfg.node_id,
+                experiment.geo_seed,
+                settings.chunks,
+                experiment.aggregate_proof_bytes,
+                if fast {
+                    1000
+                } else {
+                    experiment.network_defaults.uplink_mbps
+                },
+                settings.producers.iter().copied(),
+            ),
+            waggle_topic.clone(),
+        )
+    });
+    let uses_waggle = matches!(settings.mode, Mode::Waggle | Mode::Seacast);
+    let waggle = uses_waggle.then(|| {
         waggle::behaviour::Behaviour::new(
             waggle::config::Config::default()
                 .set_max_topic_subscription(1)
                 .set_topic_whitelist(Some([waggle_topic.clone()].into()))
-                .set_max_protobuf_size(
+                .set_max_protobuf_size(seacast.as_ref().map_or(
                     experiment.aggregate_proof_bytes.div_ceil(settings.chunks)
                         + COMMITMENT_SIGNATURE_BYTES
                         + 1024,
-                ),
+                    ProofSeacast::max_message_bytes,
+                )),
         )
     });
     // LeanSim signs all pubsub messages at the transport layer. At the application layer
@@ -393,6 +423,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 settings.producers.iter().copied(),
             )
         }),
+        seacast,
     };
     let waggle_rx = swarm
         .behaviour_mut()
@@ -414,6 +445,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     let measure_at = settings.release_ms - settings.commitment_lead_ms;
     let mut drive = interval_at(start + Duration::from_millis(measure_at), DRIVE_INTERVAL);
     drive.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let waggle_proofs = settings.mode == Mode::Waggle;
     loop {
         let due = releases.first().map_or(timeout, |k| k.0);
         let due = if sent_before.is_none() {
@@ -453,14 +485,26 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                             run.waggle.as_mut().expect("Waggle mode").release(key, root, chunks)?;
                             run.complete(key);
                         }
+                        Mode::Seacast => {
+                            run.seacast.as_mut().expect("SEACAST mode").release(key, &prepare(key, experiment))?;
+                            run.complete(key);
+                        }
                     }
                 }
             }
-            _ = drive.tick(), if waggle_rx.is_some() => {
+            _ = drive.tick(), if waggle_proofs => {
                 run.waggle.as_mut().expect("Waggle mode").drive();
             }
+            _ = sleep_until(run.seacast.as_ref().and_then(ProofSeacast::next_due).unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))), if run.seacast.is_some() => {
+                run.seacast.as_mut().expect("SEACAST mode").drive();
+            }
             Ok(event) = async { waggle_rx.as_ref().expect("Waggle mode").recv().await }, if waggle_rx.is_some() => {
-                if let Some(key) = run.waggle.as_mut().expect("Waggle mode").on_topic(event) {
+                let done = match (&mut run.waggle, &mut run.seacast) {
+                    (Some(w), _) => w.on_topic(event),
+                    (None, Some(s)) => s.on_topic(event),
+                    (None, None) => None,
+                };
+                if let Some(key) = done {
                     run.complete(key);
                 }
             }
@@ -476,9 +520,16 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                     if let Some(waggle) = &mut run.waggle {
                         waggle.disconnected(peer_id, connection_id);
                     }
+                    if let Some(seacast) = &mut run.seacast {
+                        seacast.disconnected(peer_id, connection_id);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Waggle(event)) => {
-                    run.waggle.as_mut().expect("Waggle mode").on_behaviour(event);
+                    if let Some(waggle) = &mut run.waggle {
+                        waggle.on_behaviour(event);
+                    } else if let Some(seacast) = &mut run.seacast {
+                        seacast.on_behaviour(event);
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Pull(event)) if settings.mode == Mode::AnnouncePull => run.on_pull(&mut swarm, event),
                 SwarmEvent::Behaviour(BehaviourEvent::Gossip(gossipsub::Event::Message { propagation_source, message_id, message })) => {
@@ -490,13 +541,28 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     }
     let after = zero_copy_write::stats();
     let before = sent_before.context("measurement never started")?;
-    let signatures = run.waggle.as_ref().map_or([0; 2], ProofWaggle::signatures);
+    let mut signatures = run.waggle.as_ref().map_or([0; 2], ProofWaggle::signatures);
+    let mut pending = run
+        .waggle
+        .as_ref()
+        .map_or(run.pending.len(), ProofWaggle::pending);
+    let mut seacast_stats = serde_json::Value::Null;
+    if let Some(seacast) = &run.seacast {
+        let stats = seacast.stats();
+        signatures = [
+            stats.pushes + stats.answers - stats.headers_sent,
+            stats.headers_sent,
+        ];
+        pending = seacast.pending();
+        seacast_stats = serde_json::to_value(&stats)?;
+        seacast_stats["mesh_at_end"] = seacast.mesh_size().into();
+    }
     log(
         serde_json::json!({"event":"proof_traffic", "node_id":cfg.node_id,
         "bytes":after.shared_bytes + after.copied_bytes - before.shared_bytes - before.copied_bytes,
         "peers":swarm.connected_peers().count(),
-        "pending_fetches":run.waggle.as_ref().map_or(run.pending.len(), ProofWaggle::pending),
-        "chunks_unsigned":signatures[0], "chunks_signed":signatures[1]}),
+        "pending_fetches":pending,
+        "chunks_unsigned":signatures[0], "chunks_signed":signatures[1], "seacast":seacast_stats}),
     );
     Ok(())
 }
@@ -516,6 +582,7 @@ mod tests {
             Mode::Gossipsub,
             Mode::Eip8411,
             Mode::Waggle,
+            Mode::Seacast,
         ] {
             let settings = Settings {
                 mode,
@@ -524,6 +591,7 @@ mod tests {
                 commitment_lead_ms: 500,
                 chunks: 64,
                 producers: vec![key],
+                fast_hosts: Vec::new(),
             };
             assert_eq!(
                 release_schedule(&settings, 7)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHADOW = runpy.run_path(str(ROOT / "shadow-sim.py"))
-MODES = ("announce_pull", "gossipsub", "eip8411", "waggle")
+MODES = ("announce_pull", "gossipsub", "eip8411", "waggle", "seacast")
 DEADLINES = (1000, 2000, 4000, 6000, 8000, 12000)
 IMAGE = "leansim-shadow:subnet-proofs"
 
@@ -129,7 +129,9 @@ def generate(path, mode, case, args):
     exp, nodes, latency, producers, edges = case
     path.mkdir(parents=True, exist_ok=False)
     settings = {"mode": mode, "release_ms": args.release_ms, "stagger_ms": args.stagger_ms,
-                "commitment_lead_ms": args.commitment_lead_ms, "chunks": args.chunks, "producers": producers}
+                "commitment_lead_ms": args.commitment_lead_ms, "chunks": args.chunks, "producers": producers,
+                # SEACAST's fast class (card 17, and striping at 1 Gbit/s): the supernodes.
+                "fast_hosts": sorted(n["node_id"] for n in nodes if n.get("uplink_mbps", 0) >= 500)}
     json_write(path / "proof-settings.json", settings)
     json_write(path / "network.json", {"nodes": nodes, "edges": edges, "experiment": exp})
     # Physical latency graph, separate from the libp2p overlay.
@@ -172,6 +174,7 @@ def summarize(path):
     subnets = set(range(exp["subnet_count"]))
     proofs = {(p["subnet"], p["producer"]) for p in settings["producers"]}
     release, completion, traffic = {}, {}, {}
+    seacast = defaultdict(int)
     for stdout in (path / "shadow.data" / "hosts").glob("node-*/*.stdout"):
         for line in stdout.read_text().splitlines():
             if not line.startswith('{"'):
@@ -182,6 +185,10 @@ def summarize(path):
             kind = event["event"]
             if kind == "proof_traffic":
                 assert node not in traffic
+                if event.get("seacast"):
+                    for name, value in event["seacast"].items():
+                        if isinstance(value, int):
+                            seacast[name] += value
                 traffic[node] = event
                 continue
             subnet, producer = event["subnet"], event["producer"]
@@ -221,7 +228,10 @@ def summarize(path):
             "ready_by_ms": {ms: sum(at <= ms for at in ready.values()) for ms in DEADLINES},
             "quic_stream_bytes": sent, "mean_sent_bytes": sent / len(nodes),
             "bytes_over_one_copy_per_delivery": sent / (len(proofs) * (len(nodes) - 1) * exp["aggregate_proof_bytes"]),
-            "pending_fetches": sum(t["pending_fetches"] for t in traffic.values()), "directory": str(path)}
+            "pending_fetches": sum(t["pending_fetches"] for t in traffic.values()),
+            "chunks_signed": sum(t.get("chunks_signed", 0) for t in traffic.values()),
+            "chunks_unsigned": sum(t.get("chunks_unsigned", 0) for t in traffic.values()),
+            "seacast": dict(seacast) or None, "directory": str(path)}
 
 
 def build_parser():
