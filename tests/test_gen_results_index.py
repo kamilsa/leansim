@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from gen_results_index import load_pipeline_run, load_run, render
+from gen_results_index import load_pipeline_run, load_reports, load_run, render
 
 
 class ResultsIndexTests(unittest.TestCase):
@@ -45,3 +45,27 @@ waggle_push_peers = 4
             self.assertIn(f'href="waggle/seed-{seed}/summary.html"', output)
             self.assertIn(f'href="waggle/seed-{seed}/pipeline-summary.json"', output)
         self.assertEqual(output.count('Waggle signatures (fixed, 4 peers) + Waggle proofs'), 2)
+
+    def test_written_reports_are_listed_above_the_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / 'reports'
+            reports.mkdir()
+            (reports / 'proof-propagation-report.html').write_text(
+                '<html><head><title>Propagating proofs &amp; more</title></head></html>')
+            (reports / 'proof-propagation-data.json').write_text('{}')
+            found = load_reports(root)
+            self.assertEqual(found, [{'path': 'reports/proof-propagation-report.html',
+                                      'title': 'Propagating proofs & more',
+                                      'data': 'reports/proof-propagation-data.json'}])
+            classic = root / 'classic'
+            classic.mkdir()
+            (classic / 'run-manifest.json').write_text(json.dumps({'run_id': 'classic'}))
+            self.assertIsNone(load_run(reports))
+            run = load_run(classic)
+            output = render([run], 'test', found)
+        self.assertIn('<h2>Reports</h2>', output)
+        self.assertLess(output.index('<h2>Reports</h2>'), output.index('<h2>Runs</h2>'))
+        self.assertIn('<a href="reports/proof-propagation-report.html">Propagating proofs &amp; more</a>', output)
+        self.assertIn('href="reports/proof-propagation-data.json"', output)
+        self.assertNotIn('<h2>Reports</h2>', render([run], 'test'))

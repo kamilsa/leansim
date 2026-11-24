@@ -16,6 +16,7 @@ Stdlib only; deterministic output for the same directory contents.
 from __future__ import annotations
 
 import html
+import re
 import json
 import sys
 import tomllib
@@ -149,8 +150,33 @@ def fmt(value) -> str:
     return format(value, ",d") if isinstance(value, int) and not isinstance(value, bool) else html.escape(str(value))
 
 
-def render(runs: list[dict], generated_note: str) -> str:
+def load_reports(results_dir: Path) -> list[dict]:
+    """Written reports in reports/: one entry per HTML file, with its title and data file."""
+    reports = []
+    for path in sorted((results_dir / "reports").glob("*.html")):
+        match = re.search(r"<title>(.*?)</title>", path.read_text(), re.S)
+        data = path.with_name(path.name.replace("-report.html", "-data.json"))
+        reports.append({
+            "path": path.relative_to(results_dir).as_posix(),
+            "title": html.unescape(match.group(1).strip()) if match else path.stem,
+            "data": data.relative_to(results_dir).as_posix() if data.exists() and data != path else None,
+        })
+    return reports
+
+
+def render(runs: list[dict], generated_note: str, reports: list[dict] = ()) -> str:
     e = html.escape
+    report_items = "".join(
+        f'<li><a href="{e(r["path"])}">{e(r["title"])}</a>'
+        + (f' · <a href="{e(r["data"])}">data</a>' if r["data"] else "")
+        + "</li>"
+        for r in reports
+    )
+    reports_html = (
+        '<section>\n  <h2>Reports</h2>\n  <p class="caption">Written analyses across several runs.</p>\n'
+        f"  <ul>{report_items}</ul>\n</section>\n"
+        if reports else ""
+    )
     rows = []
     for run in sorted(runs, key=lambda r: r["dir"]):
         name_cell = (
@@ -195,7 +221,7 @@ def render(runs: list[dict], generated_note: str) -> str:
   <h1>Simulation results</h1>
   <p class="facts">{len(runs)} published run{"" if len(runs) == 1 else "s"} · {total_subnet} subnet pages · {total_traffic} traffic pages</p>
 </header>
-<section>
+{reports_html}<section>
   <h2>Runs</h2>
   <p class="caption">One row per run directory. <b>Pages</b> counts subnet-*.html and traffic-*.html
   files in the directory; every run links to its full summary.</p>
@@ -234,7 +260,7 @@ def main() -> None:
 
     note = f"Generated {dt.date.today().isoformat()} from run manifests and report inputs"
     out = results_dir / "index.html"
-    out.write_text(render(runs, note))
+    out.write_text(render(runs, note, load_reports(results_dir)))
     print(f"wrote {out} ({len(runs)} runs)")
 
 

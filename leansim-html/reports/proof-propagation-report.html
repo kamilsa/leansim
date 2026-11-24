@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Propagating committee proofs: four strategies compared</title>
+
+<style>
+:root {
+  --ink: #1f2933; --muted: #5f6b7a; --line: #e3e7ec; --soft: #f6f8fa;
+  --blue: #0072B2; --sky: #56B4E9; --green: #009E73; --orange: #E69F00;
+  --red: #D55E00; --purple: #8e5ea2; --grey: #8a8f98;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 940px; margin: 0 auto; padding: 44px 24px 90px; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+h2 { font-size: 24px; margin: 56px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+h3 { font-size: 18px; margin: 30px 0 8px; }
+p { margin: 10px 0; }
+.sub { color: var(--muted); margin: 0 0 26px; }
+a { color: var(--blue); }
+code { font: 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--soft);
+  padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+  overflow-x: auto; }
+pre code { background: none; padding: 0; }
+ul { padding-left: 22px; }
+li { margin: 5px 0; }
+.summary { background: var(--soft); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; }
+.summary p:first-child { margin-top: 0; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 18px 0 6px; }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff; }
+.tile .big { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; }
+.tile .big span { color: var(--muted); font-weight: 500; font-size: 18px; }
+.tile .what { color: var(--muted); font-size: 14px; }
+.finding { border-left: 4px solid var(--green); background: #f1faf6; padding: 10px 16px; margin: 16px 0;
+  border-radius: 0 8px 8px 0; }
+.finding.neg { border-left-color: var(--red); background: #fdf3ee; }
+.finding.note { border-left-color: var(--orange); background: #fdf8ea; }
+figure { margin: 22px 0; padding: 16px 16px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+figure svg { display: block; width: 100%; height: auto; }
+figcaption { color: var(--muted); font-size: 14px; margin-top: 10px; }
+.chart-title { font-weight: 600; font-size: 15px; margin: 0 0 6px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14.5px; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; border-bottom: 2px solid var(--line); }
+th:first-child, td:first-child { text-align: left; white-space: normal; }
+tr.best td { background: #f1faf6; font-weight: 600; }
+tr.base td { color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13.5px; color: var(--muted); margin: 6px 0 0; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+svg .lbl { font-size: 13px; fill: var(--ink); }
+svg .val { font-size: 13px; fill: var(--ink); font-weight: 600; }
+svg .tick { font-size: 12px; fill: var(--muted); }
+svg .axis { font-size: 12.5px; fill: var(--muted); }
+svg .grid { stroke: var(--line); stroke-width: 1; }
+svg .d-title { font-size: 14px; font-weight: 650; fill: var(--ink); }
+svg .d-text { font-size: 12.5px; fill: var(--ink); }
+svg .d-muted { font-size: 12px; fill: var(--muted); }
+svg .d-out { font-size: 13px; font-weight: 650; fill: var(--ink); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.small { font-size: 14px; color: var(--muted); }
+@media (max-width: 720px) { .tiles, .two { grid-template-columns: 1fr; } h1 { font-size: 28px; } }
+tr.grp td { text-align: left; font-weight: 600; background: var(--soft); white-space: normal; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 14px 0 18px; }
+.stat { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.stat .k { color: var(--muted); font-size: 13.5px; }
+.stat .v { font-size: 25px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; }
+.stat .d { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.cfg { display: grid; grid-template-columns: minmax(0, 460px); gap: 14px; margin: 0 0 10px; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 6px; }
+.card h4 { margin: 0 0 6px; font-size: 15.5px; }
+.card .row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.card .row:first-of-type { border-top: 0; }
+.card .row span { color: var(--muted); white-space: nowrap; }
+.card .row b { text-align: right; font-weight: 600; }
+.card .row small { display: block; color: var(--muted); font-weight: 400; font-size: 12.5px; line-height: 1.35; margin-top: 2px; }
+tr.gap td { height: 22px; padding: 0; border-bottom: 0; }
+i.sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+@media (max-width: 860px) { .stats { grid-template-columns: repeat(3, 1fr); } .cfg { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Propagating committee proofs: four strategies compared</h1>
+<p class="sub">leansim experiments on branch <code>feature/subnet-proof-strategies</code> · updated 23 November 2026 · Shadow simulations of 16 committees on 3,713 hosts</p>
+
+<div class="summary">
+<p><b>Summary.</b> Every proof of every committee has to reach every host. We compared four ways of spreading
+200 kB proofs: announce and pull, the whole proof on GossipSub, signed Merkle pieces on GossipSub (EIP-8411 style), and
+the same pieces on Waggle. <b>Waggle was the fastest at the 95th percentile in all six matched cases</b> and the only
+strategy with every host ready within 4 s. Announce and pull sent the fewest bytes, 2% above one copy, and trailed
+Waggle by 0.19 s with four proofs per committee. Pieces on GossipSub
+were the slowest and the heaviest.</p>
+<div class="tiles">
+  <div class="tile"><div class="big">3.78 <span>→</span> 3.10 s</div><div class="what">until 95% of hosts hold a proof for every committee</div></div>
+  <div class="tile"><div class="big">8.00 <span>→</span> 3.71 s</div><div class="what">until the last host does</div></div>
+  <div class="tile"><div class="big">91.4 <span>→</span> 23.2 MB</div><div class="what">sent per host for the 64 proofs</div></div>
+</div>
+<p class="small" style="margin-bottom:0">Baseline: the whole proof on GossipSub at the mesh-8 setting. Best: Waggle, as set
+out in <a href="#conclusion">the conclusion</a>. Four proofs per committee, mean of two seeds, proof traffic only on a
+lossless network.</p>
+</div>
+
+<figure>
+<p class="chart-title">Seconds until 95% of hosts hold a proof for every committee, four proofs per committee</p>
+<div id="c-head"></div>
+<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
+<figcaption>3,713 hosts, 64 proofs of 200,000 bytes released at the same instant, mean of two seeds. Mesh settings are
+GossipSub's low / target / high. Announce and pull and Waggle send nothing over a GossipSub mesh.</figcaption>
+</figure>
+
+<h2 id="setup">1. What we simulate and what we measure</h2>
+<p>Each run is one round of proof dissemination. It starts when the proofs exist: these runs send no signatures and do
+no proving.</p>
+<ul>
+<li><b>Workload.</b> 16 committees. Each has 1, 2 or 4 producers, so a run carries 16, 32 or 64 proofs. Every producer
+releases its own 200,000-byte synthetic proof at the same instant, and nothing is sent ahead of that instant. The
+proofs of one committee differ from each other, and every one of them is meant to reach every host. Producers are
+distinct hosts holding validators of their committee; the roster for one producer per committee is the first round of
+the roster for two, and so on.</li>
+<li><b>Coverage.</b> Every host became ready in every run. All runs but two delivered every proof to every host. The
+two runs of pieces on GossipSub ended 3 and 1 deliveries short of 237,568.</li>
+</ul>
+
+<h3 id="network">Network</h3>
+<div class="stats">
+  <div class="stat"><div class="k">Hosts</div><div class="v">3,713</div><div class="d">671 supernodes</div></div>
+  <div class="stat"><div class="k">Validators</div><div class="v">32,768</div><div class="d">held by 1,548 hosts in seed 42</div></div>
+  <div class="stat"><div class="k">Committees</div><div class="v">16</div><div class="d">2,048 validators each</div></div>
+  <div class="stat"><div class="k">Countries</div><div class="v">16</div><div class="d">country-to-country latency</div></div>
+</div>
+<div class="cfg">
+  <div class="card"><h4>Hosts and links</h4>
+    <div class="row"><span>Supernodes</span><b>1,000 / 1,000 Mbps<small>hosts with at least 10 validators in the node map</small></b></div>
+    <div class="row"><span>Regular nodes</span><b>50 / 100 Mbps<small>uplink / downlink</small></b></div>
+    <div class="row"><span>Latency</span><b>By country pair<small>no jitter, no loss</small></b></div>
+  </div>
+</div>
+<div class="scroll"><table><tr><th>Class</th><th>Hosts</th><th>Share</th><th>Uplink</th><th>Downlink</th><th>Validators</th><th>Share</th></tr>
+<tr><td><i class="sw" style="background:#0072B2"></i>Supernodes</td><td>671</td><td>18.1%</td><td>1,000 Mbps</td><td>1,000 Mbps</td><td>31,580 / 31,648</td><td>96.4% / 96.6%</td></tr>
+<tr><td><i class="sw" style="background:#D55E00"></i>Regular nodes</td><td>3,042</td><td>81.9%</td><td>50 Mbps</td><td>100 Mbps</td><td>1,188 / 1,120</td><td>3.6% / 3.4%</td></tr>
+</table></div>
+<p class="small">Supernodes are hosts with at least 10 validators in the node map. Validator counts are seed 42 / seed 43:
+each seed places the 32,768 simulated validators anew, on the same hosts and links. With four proofs per committee,
+54 and 55 of the 64 producers are supernodes.</p>
+<div class="two">
+<figure><p class="chart-title">Validators per host</p><div id="c-vph"></div>
+<div class="legend"><span><i style="background:var(--blue)"></i>supernodes</span><span><i style="background:var(--red)"></i>regular nodes</span></div></figure>
+<figure><p class="chart-title">Hosts and validators by country</p><div id="c-ctry"></div>
+<div class="legend"><span><i style="background:var(--blue)"></i>supernodes</span><span><i style="background:var(--red)"></i>regular nodes</span><span><i style="background:#5f6b7a"></i>validators</span></div></figure>
+</div>
+<p class="small">Charts are seed 42. Seed 42 reuses the placement and peer graph of the signature runs on this map; seed
+43 draws a new placement and graph. Within a seed and producer count, all strategies use the same hosts, links,
+connections, producers and release time.</p>
+<h3>Metrics</h3>
+<ul>
+<li><b>Ready</b>: time from the release until a host holds at least one complete proof for every one of the 16
+committees, which is what a proposer would need before it can combine them. A host's own proof counts. Median, 95th
+percentile and last host, over all 3,713 hosts.</li>
+<li><b>Ready by 4 s</b>: how many of the 3,713 hosts were ready 4 s after the release.</li>
+<li><b>MB sent per host</b>: bytes written to QUIC streams, averaged over hosts: proof data including duplicates,
+signatures, framing and control messages. It leaves out UDP/IP and QUIC packet overhead and retransmissions, so it is
+not wire bytes.</li>
+<li><b>× one copy</b>: the same bytes divided by one transfer of every proof to every other host, which is
+3.20, 6.40 and 12.80 MB per host for 16, 32 and 64 proofs. A strategy that delivers every
+proof cannot go below 1.</li>
+</ul>
+<p class="small">The clock starts at the release, not at the start of a slot. These numbers do not show by themselves
+that a slot schedule holds.</p>
+
+<h2 id="strategies">2. The four strategies</h2>
+<figure>
+<svg viewBox="0 0 720 510" role="img" aria-labelledby="st-title st-desc">
+  <title id="st-title">What two neighbouring hosts exchange under each strategy</title>
+  <desc id="st-desc">Four panels, time running downwards. Announce and pull sends an announcement, a request and the whole proof. GossipSub sends the whole proof on every mesh link, including to hosts that already hold it. Pieces on GossipSub send many small pieces on every mesh link, each with the root signature. Waggle pushes a first piece with the root signature and further pieces without it, then advertises its inventory and serves requests for missing pieces.</desc>
+  <defs>
+    <marker id="p4o" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#D55E00"/></marker>
+    <marker id="p4b" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#0072B2"/></marker>
+    <marker id="p4g" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#009E73"/></marker>
+    <marker id="p4p" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#8e5ea2"/></marker>
+    <marker id="s4o" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#D55E00"/></marker>
+    <marker id="s4b" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0072B2"/></marker>
+    <marker id="m4o" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D55E00"/></marker>
+    <marker id="m4b" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0072B2"/></marker>
+  </defs>
+  <g stroke="#e3e7ec"><line x1="360" y1="8" x2="360" y2="502"/><line x1="8" y1="255" x2="712" y2="255"/></g>
+
+  <g>
+    <text x="180" y="24" text-anchor="middle" class="d-title">1. Announce and pull</text>
+    <text x="60" y="48" text-anchor="middle" class="d-text">A</text><text x="170" y="48" text-anchor="middle" class="d-text">B</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="60" y1="58" x2="60" y2="200"/><line x1="170" y1="58" x2="170" y2="200"/></g>
+    <circle cx="60" cy="72" r="5" fill="#1f2933"/>
+    <line x1="60" y1="78" x2="164" y2="96" stroke="#8e5ea2" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#p4p)"/>
+    <text x="184" y="94" class="d-muted">announce</text>
+    <line x1="170" y1="104" x2="66" y2="122" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#p4g)"/>
+    <text x="184" y="120" class="d-muted">request</text>
+    <line x1="60" y1="130" x2="164" y2="178" stroke="#0072B2" stroke-width="5" marker-end="url(#p4b)"/>
+    <text x="184" y="160" class="d-muted">whole proof, 200 kB</text>
+    <circle cx="170" cy="186" r="5" fill="#1f2933"/>
+    <text x="184" y="190" class="d-muted">B announces in turn</text>
+    <text x="180" y="226" text-anchor="middle" class="d-out">1.02 × the one-copy bytes</text>
+    <text x="180" y="243" text-anchor="middle" class="d-muted">a hop starts after the previous one has finished</text>
+  </g>
+
+  <g transform="translate(360 0)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">2. Whole proof on GossipSub</text>
+    <text x="70" y="48" text-anchor="middle" class="d-text">A</text><text x="180" y="48" text-anchor="middle" class="d-text">B</text><text x="290" y="48" text-anchor="middle" class="d-text">C</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="70" y1="58" x2="70" y2="204"/><line x1="180" y1="58" x2="180" y2="204"/><line x1="290" y1="58" x2="290" y2="204"/></g>
+    <circle cx="70" cy="72" r="5" fill="#1f2933"/><circle cx="290" cy="84" r="5" fill="#1f2933"/>
+    <line x1="70" y1="78" x2="174" y2="136" stroke="#0072B2" stroke-width="5" marker-end="url(#p4b)"/>
+    <circle cx="180" cy="142" r="5" fill="#1f2933"/>
+    <line x1="290" y1="90" x2="187" y2="178" stroke="#D55E00" stroke-width="5" marker-end="url(#p4o)"/>
+    <line x1="180" y1="148" x2="284" y2="198" stroke="#D55E00" stroke-width="5" marker-end="url(#p4o)"/>
+    <text x="180" y="226" text-anchor="middle" class="d-out">7.1 to 7.2 × the one-copy bytes</text>
+    <text x="180" y="243" text-anchor="middle" class="d-muted">every mesh peer forwards the whole proof</text>
+  </g>
+
+  <g transform="translate(0 255)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">3. Pieces on GossipSub (EIP-8411 style)</text>
+    <text x="70" y="48" text-anchor="middle" class="d-text">A</text><text x="180" y="48" text-anchor="middle" class="d-text">B</text><text x="290" y="48" text-anchor="middle" class="d-text">C</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="70" y1="58" x2="70" y2="204"/><line x1="180" y1="58" x2="180" y2="204"/><line x1="290" y1="58" x2="290" y2="204"/></g>
+    <g stroke="#0072B2" stroke-width="3" marker-end="url(#m4b)">
+      <line x1="70" y1="70" x2="174" y2="94"/><line x1="70" y1="88" x2="174" y2="112"/><line x1="70" y1="106" x2="174" y2="130"/><line x1="70" y1="124" x2="174" y2="148"/><line x1="70" y1="142" x2="174" y2="166"/>
+    </g>
+    <g stroke="#D55E00" stroke-width="3" marker-end="url(#m4o)">
+      <line x1="290" y1="80" x2="186" y2="104"/><line x1="290" y1="98" x2="186" y2="122"/><line x1="290" y1="116" x2="186" y2="140"/><line x1="290" y1="134" x2="186" y2="158"/><line x1="290" y1="152" x2="186" y2="176"/>
+    </g>
+    <text x="180" y="226" text-anchor="middle" class="d-out">9.2 × the one-copy bytes</text>
+    <text x="180" y="243" text-anchor="middle" class="d-muted">64 pieces per proof, each with the root signature</text>
+  </g>
+
+  <g transform="translate(360 255)">
+    <text x="180" y="24" text-anchor="middle" class="d-title">4. Pieces on Waggle</text>
+    <text x="60" y="48" text-anchor="middle" class="d-text">A</text><text x="170" y="48" text-anchor="middle" class="d-text">B</text>
+    <g stroke="#5f6b7a" stroke-width="1.5"><line x1="60" y1="58" x2="60" y2="204"/><line x1="170" y1="58" x2="170" y2="204"/></g>
+    <line x1="60" y1="62" x2="164" y2="78" stroke="#0072B2" stroke-width="3" marker-end="url(#m4b)"/>
+    <text x="184" y="78" class="d-muted">first piece + root signature</text>
+    <g stroke="#0072B2" stroke-width="1.5" marker-end="url(#s4b)"><line x1="60" y1="88" x2="165" y2="104"/><line x1="60" y1="98" x2="165" y2="114"/></g>
+    <text x="184" y="110" class="d-muted">then pieces, path only</text>
+    <line x1="60" y1="124" x2="164" y2="138" stroke="#8e5ea2" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#p4p)"/>
+    <text x="184" y="138" class="d-muted">inventory, every 50 ms</text>
+    <line x1="170" y1="148" x2="66" y2="162" stroke="#009E73" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#p4g)"/>
+    <text x="184" y="162" class="d-muted">request, rarest piece first</text>
+    <line x1="60" y1="172" x2="165" y2="190" stroke="#0072B2" stroke-width="1.5" marker-end="url(#s4b)"/>
+    <text x="184" y="190" class="d-muted">the piece</text>
+    <text x="180" y="226" text-anchor="middle" class="d-out">1.7 to 1.8 × the one-copy bytes</text>
+    <text x="180" y="243" text-anchor="middle" class="d-muted">relays push for 250 ms, then only answer requests</text>
+  </g>
+</svg>
+<div class="legend"><span><i style="background:#0072B2"></i>proof data that arrives first</span><span><i style="background:#D55E00"></i>proof data the receiver already holds</span><span><i style="background:#8e5ea2"></i>announcement or inventory</span><span><i style="background:#009E73"></i>request</span></div>
+<figcaption>Neighbouring hosts and one proof, time running downwards. A dot is the moment a host holds the whole proof.
+The thickest arrows are the whole proof, medium arrows are pieces that carry the root signature, thin arrows are pieces
+with their Merkle path only, and dashed arrows are small control messages. The byte ratios are the measured ranges of
+section 3.</figcaption>
+</figure>
+<ul>
+<li><b>Announce and pull.</b> A host that holds a complete proof announces it to all its connected peers. A peer
+requests the proof from the first announcer, keeps one request open per proof, and tries another announcer if the
+request fails. It announces only after the whole proof has arrived, so each hop adds a full 200 kB transfer.</li>
+<li><b>Whole proof on GossipSub.</b> The producer publishes the proof as one message on a global proof topic. Mesh
+peers forward it when they hold all of it. IDONTWANT is enabled for messages above 1,000 bytes.</li>
+<li><b>Pieces, in both piece strategies.</b> The producer cuts the proof into 64 pieces of 3,125 bytes, builds a Merkle
+tree over them and signs only the root, with one 2,400-byte signature per proof. Every piece travels with its 192-byte
+Merkle path. A receiver recomputes the root from the piece and the path, verifies the producer's signature over that
+root once per proof, and holds the proof to it. There is no erasure coding: a host needs all 64 pieces of the same
+producer.</li>
+<li><b>Pieces on GossipSub.</b> The producer publishes the pieces as 64 separate messages on one global topic, and
+every message carries the signature, because a publisher cannot know which receivers already hold it. A piece message
+is 3,125 + 192 + 2,400 bytes. A host verifies a piece before it forwards it. This adapts the chunked GossipSub path of
+the EIP-8411 draft.</li>
+<li><b>Pieces on Waggle.</b> The pieces travel on Waggle streams between connected hosts, with no GossipSub involved. A
+host adds the signature to a piece only while the peer may lack it: it leaves it out once the peer has advertised or
+sent a piece of that proof, or once it has queued the peer a signed piece. A receiver refuses a piece without a
+signature while it holds no signed root. A host pushes each piece to at most two peers, picking those with the shortest
+send queues. A relay pushes only during the 250 ms after its first verified piece; the producer always pushes. Hosts
+advertise the pieces they hold every 50 ms. From 100 ms after it first hears of a proof, a host requests missing pieces,
+rarest first, with one open request per peer per proof. A request that is not answered within 550 ms goes to another
+peer. The policy sits in the application; the vendored Waggle library is unchanged.</li>
+</ul>
+
+<h2 id="results">3. Results with one, two and four proofs per committee</h2>
+<div class="two">
+<figure><p class="chart-title">95th-percentile host ready (s)</p><div id="c-p95"></div></figure>
+<figure><p class="chart-title">MB sent per host</p><div id="c-mb"></div></figure>
+</div>
+<div class="legend" style="margin-bottom:14px"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
+<p class="small">Mean of two seeds, GossipSub at the mesh-8 setting. The horizontal axis is the number of proofs per
+committee. Pieces on GossipSub were run with four proofs per committee only and are in the table.</p>
+<div class="scroll"><table><tr><th>Strategy</th><th>Median<br>host (s)</th><th>95th-percentile<br>host (s)</th><th>MB sent<br>per host</th><th>× one<br>copy</th></tr>
+<tr class="grp"><td colspan="5">One proof per committee: 16 proofs, 3.20 MB per host for one copy of each</td></tr>
+<tr><td>Announce and pull</td><td>2.99 / 2.76</td><td>3.84 / 3.60</td><td>3.28 / 3.28</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.30</td><td>3.16 / 3.05</td><td>22.89 / 22.63</td><td>7.16 / 7.07</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>1.46 / 1.44</td><td>1.84 / 1.85</td><td>5.52 / 5.49</td><td>1.72 / 1.72</td></tr>
+<tr class="gap"><td colspan="5"></td></tr>
+<tr class="grp"><td colspan="5">Two proofs per committee: 32 proofs, 6.40 MB per host for one copy of each</td></tr>
+<tr><td>Announce and pull</td><td>2.44 / 2.26</td><td>3.33 / 3.39</td><td>6.55 / 6.55</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.40</td><td>3.40 / 3.59</td><td>45.83 / 45.79</td><td>7.16 / 7.16</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>1.79 / 1.79</td><td>2.09 / 2.10</td><td>10.76 / 10.70</td><td>1.68 / 1.67</td></tr>
+<tr class="gap"><td colspan="5"></td></tr>
+<tr class="grp"><td colspan="5">Four proofs per committee: 64 proofs, 12.80 MB per host for one copy of each</td></tr>
+<tr><td>Announce and pull</td><td>2.12 / 2.15</td><td>3.28 / 3.29</td><td>13.11 / 13.11</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.38</td><td>3.73 / 3.83</td><td>92.18 / 90.64</td><td>7.20 / 7.08</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;3/4/6</td><td>2.58 / 2.68</td><td>4.19 / 4.42</td><td>72.02 / 72.11</td><td>5.63 / 5.64</td></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>6.46 / 6.74</td><td>11.03 / 11.22</td><td>117.78 / 117.89</td><td>9.20 / 9.21</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>2.66 / 2.66</td><td>3.10 / 3.10</td><td>23.20 / 23.12</td><td>1.81 / 1.81</td></tr>
+</table></div>
+<p class="small">Each cell is seed 42 / seed 43. Mesh settings are GossipSub's low/target/high. 3,713 hosts. The
+shaded row has the lowest 95th percentile of its group.</p>
+<div class="finding"><b>Waggle had the lowest 95th percentile in all six cases, and the shortest tail.</b> Its
+95th-percentile host was ready after 1.85, 2.10 and 3.10 s
+with one, two and four proofs per committee, and its last host after at most 3.75 s. No other strategy
+had every host ready by 4 s in all of its runs.</div>
+<ul>
+<li><b>Announce and pull is the cheapest, and it gets faster with more proofs.</b> It sends 2.4%
+more than one copy of each proof. Its 95th percentile falls from 3.72 to
+3.28 s as producers are added, probably because a host needs only one proof per committee
+and more producers put one closer; we did not measure hop counts. With four proofs per committee its median host
+(2.12 / 2.15 s) is ahead of Waggle's (2.66 / 2.66 s), its 95th percentile is
+0.19 s behind, and it sends 43% fewer bytes.</li>
+<li><b>Waggle's lead shrinks as proofs are added.</b> Its 95th percentile grows by 1.25 s
+from one to four proofs per committee, while announce and pull improves by 0.44 s.
+The gap between them goes from 1.87 s to
+0.19 s. We did not test more than four.</li>
+<li><b>The whole proof on GossipSub sends about seven times the one-copy bytes.</b> 22.8,
+45.8 and 91.4 MB per host, and the 95th percentile rises from
+3.10 to 3.78 s. With four proofs per committee the last host needs
+about 8 s.</li>
+<li><b>Pieces on GossipSub are the slowest and the heaviest.</b> With four proofs per committee the 95th-percentile
+host needs 11.03 / 11.22 s and the last host 19.0 / 19.3 s, within a second of the end of the run.
+Only 764 and 656 of the 3,713 hosts are ready by 4 s, and a host
+sends 118 MB.</li>
+</ul>
+<div class="finding note">We report the result of pieces on GossipSub for this setup: 64 pieces, the signature in every
+piece, four proofs per committee, the mesh-4 setting, simultaneous release. We have not run it with fewer proofs or at
+the mesh-8 setting, and we do not attribute its loss to a particular mechanism.
+<a href="#signature">Section 5</a> shows how much of it the signature accounts for.</div>
+
+<h2 id="bytes">4. How many bytes each strategy sends</h2>
+<figure>
+<p class="chart-title">Bytes sent per host, as a multiple of one copy of every proof (four proofs per committee)</p>
+<div id="c-ratio"></div>
+<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
+<figcaption>One copy of each of the 64 proofs for every other host is 12.80 MB per host. Mean of two
+seeds.</figcaption>
+</figure>
+<ul>
+<li><b>Announce and pull: 1.024.</b> A host fetches each proof once, so nothing arrives twice. The remaining
+2.4% is announcements, requests and framing.</li>
+<li><b>Whole proof on GossipSub: 7.1 to 7.2</b> at the mesh-8
+setting, with IDONTWANT enabled. We did not measure the mesh degree of the proof topic or the copies per mesh link in
+these runs, so we cannot say how the excess splits between mesh forwards and gossip.</li>
+<li><b>Pieces on GossipSub: 9.21</b> at the mesh-4 setting. A piece message is 5,717
+bytes for 3,125 bytes of proof, so one copy of every piece already costs 1.83 times the proof.</li>
+<li><b>Waggle: 1.67 to 1.81.</b> The Merkle paths add 6.1% to every
+piece. The signature rides on 11 to 14% of the piece messages, which
+is 11 to 13 signed messages sent per host and proof, and makes up
+7 to 9% of the bytes. The rest of the excess is pieces pushed to a host
+that already held them, inventories and requests. We have not instrumented how it splits.</li>
+</ul>
+<p>For scale, a 50 Mbit/s uplink moves 6.25 MB per second. With four proofs per committee the whole proof on GossipSub
+sends 91 MB per host on average and pieces on GossipSub 118 MB, about
+15 and 19 s of such an uplink, against
+2.1 s for announce and pull and 3.7 s for Waggle. The
+strategies that send the most also have the longest tails, which is what we would expect if uplinks are the bottleneck.
+We infer this from the totals; we recorded neither queues nor per-host bytes, and the hosts with 1 Gbit/s likely send
+more than the average.</p>
+
+<h2 id="signature">5. What the root signature costs</h2>
+<p>Two more piece formats were run on the same network, to see what the 2,400-byte signature does and where it should
+travel.</p>
+<ul>
+<li><b>Pieces on GossipSub without the root signature.</b> Each piece carries the Merkle root, and the producer's
+ordinary pubsub message signature covers it. A piece message is 3,349 bytes instead of 5,717.</li>
+<li><b>Waggle with the signature in every piece.</b> 16 pieces of 12,500 bytes, each with the root, the signature and
+its Merkle path, so that the signature is 19% of a piece and not 77%.</li>
+</ul>
+<div class="scroll"><table><tr><th>Four proofs per committee</th><th>Median<br>host (s)</th><th>95th-percentile<br>host (s)</th><th>MB sent<br>per host</th><th>× one<br>copy</th></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6: no root signature</td><td>3.75 / 4.02</td><td>6.48 / 6.90</td><td>79.62 / 79.64</td><td>6.22 / 6.22</td></tr>
+<tr class="best"><td>Pieces on GossipSub, mesh&nbsp;3/4/6: signature in every piece</td><td>6.46 / 6.74</td><td>11.03 / 11.22</td><td>117.78 / 117.89</td><td>9.20 / 9.21</td></tr>
+<tr><td>Pieces on Waggle: 16 pieces, signature in every piece</td><td>2.76 / 2.80</td><td>3.45 / 3.50</td><td>28.38 / 28.46</td><td>2.22 / 2.22</td></tr>
+<tr class="best"><td>Pieces on Waggle: 64 pieces, signature only when needed</td><td>2.66 / 2.66</td><td>3.10 / 3.10</td><td>23.20 / 23.12</td><td>1.81 / 1.81</td></tr>
+</table></div>
+<p class="small">Each cell is seed 42 / seed 43. The shaded rows are the formats of sections 2 to 4.</p>
+<div class="finding neg"><b>On GossipSub the signature in every piece costs
+48% more bytes and
+4.4 s at the 95th percentile.</b> Without it the
+95th-percentile host is ready after 6.48 / 6.90 s; with it after 11.03 / 11.22 s,
+and the number of hosts ready by 4 s falls from about 2,000 to about
+700.</div>
+<div class="finding"><b>On Waggle, 64 pieces with the signature sent only when needed beat 16 pieces with the signature
+in each.</b> With four proofs per committee the 95th-percentile host is
+0.38 s earlier and a host sends
+19% fewer bytes. With one and two proofs the differences are
+0.38 and 0.34 s, and
+21 and 19%.
+The two formats differ in piece count and in signature placement, so this does not separate the two.</div>
+<ul>
+<li><b>Even without the signature, pieces on GossipSub trail Waggle.</b> We also ran the unsigned format at the mesh-8
+setting. Its 95th-percentile host was ready after 2.70 / 2.63 s with one proof per
+committee, 4.08 / 4.23 s with two and 6.82 / 6.88 s with
+four, at 25, 50 and
+98 MB per host. Signed Waggle needs 1.85,
+2.10 and 3.10 s.</li>
+<li><b>With one proof per committee the unsigned pieces beat the whole proof</b> at the 95th percentile
+(2.66 against 3.10 s); with two and four they do not.
+We have not run the signed format with one or two proofs.</li>
+<li><b>With four proofs, Waggle with the signature in every piece loses its lead:</b> 3.45 / 3.50 s
+against 3.28 / 3.29 s for announce and pull, and 3,676 and
+3,674 hosts ready by 4 s.</li>
+</ul>
+
+<h2 id="mesh">6. A smaller GossipSub mesh</h2>
+<p>In the signature runs the mesh size was the largest single lever on duplicates. For proofs we ran the whole proof
+with four proofs per committee at both the mesh-8 setting (low 4, target 8, high 12) and the mesh-4 setting (low 3,
+target 4, high 6). The connections, placement and producers are the same; only the three mesh settings differ. The rows
+are in the last group of the table in section 3.</p>
+<div class="finding note"><b>The mesh-4 setting saves about a fifth of the bytes and does not make the whole proof
+competitive.</b> It sends 21% less, its 95th-percentile
+host is 0.53 s later, fewer hosts are ready by 4 s, and it still
+sends more than five times the one-copy bytes.</div>
+<p>Pieces on GossipSub with the signature were run at the mesh-4 setting only. For the unsigned format of section 5 the
+mesh-4 setting sent 19% fewer
+bytes than mesh-8, and its 95th percentile was 6.48 / 6.90 s against
+6.82 / 6.88 s.</p>
+
+<h2 id="conclusion">7. Conclusion: the best setup so far</h2>
+<p>Move authenticated pieces on Waggle: 64 pieces with their Merkle paths, the signature over the root sent to a peer
+only while it may lack it, a short push followed by rarest-first requests.</p>
+<pre><code># proof and pieces (campaign flags)
+--proof-bytes 200000 --chunks 64          # 3,125-byte pieces, 192-byte Merkle path each
+
+# src/node/subnet_proofs.rs
+COMMITMENT_SIGNATURE_BYTES = 2400         # one signature over the Merkle root per proof
+
+# src/node/subnet_proof_waggle.rs
+FANOUT            = 2        # peers a piece is pushed to, shortest send queues first
+PUSH_WINDOW       = 250 ms   # a relay pushes only this long after its first verified piece
+ANNOUNCE_INTERVAL = 50 ms    # inventories are coalesced over this interval
+REQUEST_DELAY     = 100 ms   # earliest request after a host first hears of a proof
+QUEUE_RETRY       = 100 ms   # retry after a send that failed
+request timeout   = 550 ms   # 500 ms + 16 µs per piece byte; then another peer</code></pre>
+<div class="scroll"><table><tr><th>Four proofs per committee, mean of two seeds</th><th>Median host</th><th>95th-percentile host</th><th>MB sent per host</th></tr>
+<tr class="base"><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.34 s</td><td>3.78 s</td><td>91.4</td></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>6.60 s</td><td>11.13 s</td><td>117.8</td></tr>
+<tr><td>Announce and pull</td><td>2.13 s</td><td>3.28 s</td><td>13.1</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>2.66 s</td><td>3.10 s</td><td>23.2</td></tr>
+</table></div>
+<div class="finding note"><b>Waggle buys the tail with bytes.</b> Against announce and pull it brings the
+95th-percentile host forward by 0.19 s and the last host by
+1.78 s, and sends 77%
+more. Against the whole proof on GossipSub it is faster and sends about a quarter of the bytes.</div>
+<h3>Variants</h3>
+<ul>
+<li><b>If bytes matter more than the tail</b>, use announce and pull: within 2.4% of the one-copy floor, and its
+median host is ahead of Waggle's with four proofs per committee. With one proof per committee its 95th percentile is
+1.87 s behind Waggle.</li>
+<li><b>If the proofs must stay on GossipSub</b>, send them whole. With the signature in every piece, pieces took about
+three times as long at the 95th percentile with four proofs per committee.</li>
+</ul>
+
+<h2 id="appendix">Appendix: settings and data</h2>
+<p>Everything is on branch <code>feature/subnet-proof-strategies</code>. Announce and pull and the whole proof are at
+commit <code>180148d</code>; the piece formats are in the worktree and not committed yet.</p>
+<div class="scroll"><table><tr><th>Where</th><th>Setting</th><th>Meaning</th></tr>
+<tr><td><code>scripts/subnet-proof-campaign.py</code></td><td><code>--modes</code></td><td style="text-align:left;white-space:normal"><code>announce_pull</code>, <code>gossipsub</code>, <code>eip8411</code> (pieces on GossipSub), <code>waggle</code></td></tr>
+<tr><td></td><td><code>--network-config</code></td><td style="text-align:left;white-space:normal">Reuse an experiment's hosts, placement, links and peer graph; here <code>sweeps/32k-mix/jobs/gossip-m8.toml</code> with <code>nodes_3713_mix.csv</code></td></tr>
+<tr><td></td><td><code>--copies 1 2 4</code></td><td style="text-align:left;white-space:normal">Producers per committee</td></tr>
+<tr><td></td><td><code>--proof-bytes 200000 --chunks 64</code></td><td style="text-align:left;white-space:normal">Proof size and number of pieces; the script's default is 16 pieces</td></tr>
+<tr><td></td><td><code>--release-ms 5000 --stagger-ms 0</code></td><td style="text-align:left;white-space:normal">All producers release 5 s into the run</td></tr>
+<tr><td></td><td><code>--commitment-lead-ms 500</code></td><td style="text-align:left;white-space:normal">The byte count starts this long before the release; nothing is sent in between</td></tr>
+<tr><td></td><td><code>--idontwant-bytes 1000</code></td><td style="text-align:left;white-space:normal">IDONTWANT threshold for the GossipSub strategies</td></tr>
+<tr><td></td><td><code>--gossip-mesh 3 4 6</code></td><td style="text-align:left;white-space:normal">Mesh low, target and high, applied after the peer graph is built; default 4 8 12</td></tr>
+<tr><td></td><td><code>--seeds 42 43 --seconds 25</code></td><td style="text-align:left;white-space:normal">Seeds and run length; the release is 5 s in</td></tr>
+</table></div>
+<p>The numbers in this report are in <a href="proof-propagation-data.json"><code>proof-propagation-data.json</code></a>, next to this page. They were taken from the campaigns'
+<code>comparison.json</code> files and host logs when the runs finished. Shadow 3.3.0. The runs of sections 3 and 4
+used 24 Shadow workers on 24 of the server's 48 cores, one run at a time. Some runs of section 5 used 12 or 40 workers
+and ran side by side; we assume the worker count does not change simulated results and did not test it.</p>
+
+</main>
+<script>
+function hbar(id, rows, opt) {
+  opt = opt || {};
+  const W = opt.width || 880, labelW = opt.labelW || 330, valW = 76, rowH = 30, pad = 4;
+  const max = opt.max || Math.max(...rows.map(r => r.value)) * 1.02;
+  const H = pad * 2 + rows.length * rowH;
+  const fmt = opt.fmt || (v => String(v));
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  rows.forEach((r, i) => {
+    const y = pad + i * rowH;
+    const w = Math.max(2, (W - labelW - valW) * r.value / max);
+    s += `<text x="${labelW - 10}" y="${y + 20}" text-anchor="end" class="lbl">${r.label}</text>`;
+    s += `<rect x="${labelW}" y="${y + 6}" width="${w.toFixed(1)}" height="${rowH - 12}" rx="3" fill="${r.color}"/>`;
+    s += `<text x="${(labelW + w + 8).toFixed(1)}" y="${y + 20}" class="val">${fmt(r.value)}</text>`;
+  });
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+function lines(id, xs, series, opt) {
+  const W = 440, H = 290, m = { l: 52, r: 78, t: 14, b: 50 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const X = i => m.l + pw * i / (xs.length - 1);
+  const Y = v => m.t + ph * (1 - (v - opt.ymin) / (opt.ymax - opt.ymin));
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  for (let t = opt.ymin; t <= opt.ymax + 1e-9; t += opt.ystep) {
+    s += `<line x1="${m.l}" x2="${m.l + pw}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" class="grid"/>`;
+    s += `<text x="${m.l - 8}" y="${(Y(t) + 4).toFixed(1)}" text-anchor="end" class="tick">${opt.yfmt ? opt.yfmt(t) : t}</text>`;
+  }
+  xs.forEach((x, i) => { s += `<text x="${X(i).toFixed(1)}" y="${H - m.b + 18}" text-anchor="middle" class="tick">${x}</text>`; });
+  s += `<text x="${m.l + pw / 2}" y="${H - 8}" text-anchor="middle" class="axis">${opt.xlabel}</text>`;
+  series.forEach(se => {
+    const pts = se.values.map((v, i) => v == null ? null : [X(i), Y(v)]).filter(Boolean);
+    s += `<polyline fill="none" stroke="${se.color}" stroke-width="2.5" points="${pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}"/>`;
+    pts.forEach(p => { s += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${se.color}"/>`; });
+    const last = pts[pts.length - 1];
+    s += `<text x="${(last[0] + 9).toFixed(1)}" y="${(last[1] + 4).toFixed(1)}" class="lbl" style="fill:${se.color};font-weight:600">${se.name}</text>`;
+  });
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+
+function vstack(id, bins) {
+  const W = 440, H = 300, m = { l: 46, r: 8, t: 22, b: 64 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b, bw = pw / bins.length;
+  const max = Math.max(...bins.map(b => b.super + b.regular)), top = Math.ceil(max / 500) * 500;
+  const Y = v => m.t + ph * (1 - v / top);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Hosts by number of validators">`;
+  for (let t = 0; t <= top; t += 500) {
+    s += `<line x1="${m.l}" x2="${m.l + pw}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" class="grid"/>`;
+    s += `<text x="${m.l - 6}" y="${(Y(t) + 4).toFixed(1)}" text-anchor="end" class="tick">${t.toLocaleString('en-US')}</text>`;
+  }
+  bins.forEach((b, i) => {
+    const x = m.l + i * bw + 3, w = bw - 6, total = b.super + b.regular;
+    s += `<rect x="${x.toFixed(1)}" y="${Y(b.super).toFixed(1)}" width="${w.toFixed(1)}" height="${(Y(0) - Y(b.super)).toFixed(1)}" fill="#0072B2"/>`;
+    s += `<rect x="${x.toFixed(1)}" y="${Y(total).toFixed(1)}" width="${w.toFixed(1)}" height="${(Y(b.super) - Y(total)).toFixed(1)}" fill="#D55E00"/>`;
+    s += `<text x="${(x + w / 2).toFixed(1)}" y="${(Y(total) - 4).toFixed(1)}" text-anchor="middle" class="tick">${total.toLocaleString('en-US')}</text>`;
+    const cx = x + w / 2, cy = H - m.b + 12;
+    s += `<text x="${cx.toFixed(1)}" y="${cy}" text-anchor="end" transform="rotate(-40 ${cx.toFixed(1)} ${cy})" class="tick">${b.bin}</text>`;
+  });
+  s += `<text x="${m.l + pw / 2}" y="${H - 4}" text-anchor="middle" class="axis">validators on the host</text>`;
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+function countries(id, rows) {
+  const W = 440, rowH = 20, m = { l: 108, t: 6, b: 34 }, gap = 30, hw = 160, vw = W - m.l - hw - gap - 8;
+  const H = m.t + rows.length * rowH + m.b, hmax = 1500, vmax = 10000;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Hosts and validators by country">`;
+  const hx = m.l, vx = m.l + hw + gap, bottom = m.t + rows.length * rowH;
+  [[hx, hw, hmax, 500, 'hosts'], [vx, vw, vmax, 5000, 'validators']].forEach(([x0, w, max, step, label]) => {
+    for (let t = 0; t <= max; t += step) {
+      const x = x0 + w * t / max;
+      s += `<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${m.t}" y2="${bottom}" class="grid"/>`;
+      s += `<text x="${x.toFixed(1)}" y="${bottom + 13}" text-anchor="middle" class="tick">${t >= 1000 ? t / 1000 + 'k' : t}</text>`;
+    }
+    s += `<text x="${x0 + w / 2}" y="${H - 4}" text-anchor="middle" class="axis">${label}</text>`;
+  });
+  rows.forEach((r, i) => {
+    const y = m.t + i * rowH + 3, h = rowH - 6;
+    s += `<text x="${m.l - 6}" y="${y + h - 1}" text-anchor="end" class="tick">${r.name}</text>`;
+    const ws = hw * r.super / hmax, wr = hw * r.regular / hmax, wv = vw * Math.min(r.validators, vmax) / vmax;
+    s += `<rect x="${hx}" y="${y}" width="${ws.toFixed(1)}" height="${h}" fill="#0072B2"/>`;
+    s += `<rect x="${(hx + ws).toFixed(1)}" y="${y}" width="${wr.toFixed(1)}" height="${h}" fill="#D55E00"/>`;
+    s += `<rect x="${vx}" y="${y}" width="${wv.toFixed(1)}" height="${h}" fill="#5f6b7a"/>`;
+  });
+  document.getElementById(id).innerHTML = s + '</svg>';
+}
+
+const two = v => v.toFixed(2);
+
+// All numbers: proof-propagation-data.json. Charts are means of seeds 42 and 43 on 3,713 hosts.
+hbar('c-head', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 3.78, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 4.31, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 11.13, "color": "#0072B2"}, {"label": "announce and pull", "value": 3.28, "color": "#E69F00"}, {"label": "pieces on Waggle", "value": 3.1, "color": "#009E73"}], { fmt: two, max: 12.4, labelW: 300 });
+
+const copies = ['1', '2', '4'];
+lines('c-p95', copies, [{"name": "whole", "color": "#8a8f98", "values": [3.1, 3.49, 3.78]}, {"name": "A&amp;P", "color": "#E69F00", "values": [3.72, 3.36, 3.28]}, {"name": "Waggle", "color": "#009E73", "values": [1.85, 2.1, 3.1]}], { ymin: 1.5, ymax: 4, ystep: 0.5, xlabel: 'proofs per committee' });
+lines('c-mb', copies, [{"name": "whole", "color": "#8a8f98", "values": [22.8, 45.8, 91.4]}, {"name": "A&amp;P", "color": "#E69F00", "values": [3.3, 6.6, 13.1]}, {"name": "Waggle", "color": "#009E73", "values": [5.5, 10.7, 23.2]}], { ymin: 0, ymax: 100, ystep: 20, xlabel: 'proofs per committee' });
+
+hbar('c-ratio', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 7.14, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 5.63, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 9.21, "color": "#0072B2"}, {"label": "announce and pull", "value": 1.02, "color": "#E69F00"}, {"label": "pieces on Waggle", "value": 1.81, "color": "#009E73"}], { fmt: two, max: 10.2, labelW: 300 });
+
+vstack('c-vph', [{"bin": "0", "super": 35, "regular": 2130}, {"bin": "1", "super": 74, "regular": 693}, {"bin": "2–3", "super": 146, "regular": 211}, {"bin": "4–7", "super": 114, "regular": 8}, {"bin": "8–15", "super": 72, "regular": 0}, {"bin": "16–31", "super": 68, "regular": 0}, {"bin": "32–63", "super": 54, "regular": 0}, {"bin": "64–127", "super": 47, "regular": 0}, {"bin": "128–255", "super": 31, "regular": 0}, {"bin": "256–511", "super": 18, "regular": 0}, {"bin": "512–1023", "super": 12, "regular": 0}]);
+countries('c-ctry', [{"name": "United States", "super": 259, "regular": 1089, "validators": 9327}, {"name": "Germany", "super": 91, "regular": 496, "validators": 4040}, {"name": "Finland", "super": 44, "regular": 212, "validators": 2588}, {"name": "France", "super": 41, "regular": 208, "validators": 3222}, {"name": "Canada", "super": 34, "regular": 167, "validators": 1940}, {"name": "Singapore", "super": 31, "regular": 144, "validators": 607}, {"name": "United Kingdom", "super": 43, "regular": 123, "validators": 3179}, {"name": "Netherlands", "super": 28, "regular": 117, "validators": 1320}, {"name": "Japan", "super": 36, "regular": 91, "validators": 2579}, {"name": "South Korea", "super": 12, "regular": 68, "validators": 892}, {"name": "Hong Kong", "super": 6, "regular": 67, "validators": 212}, {"name": "Austria", "super": 13, "regular": 55, "validators": 616}, {"name": "Switzerland", "super": 10, "regular": 56, "validators": 1008}, {"name": "China", "super": 9, "regular": 56, "validators": 207}, {"name": "Australia", "super": 9, "regular": 54, "validators": 967}, {"name": "Ireland", "super": 5, "regular": 39, "validators": 64}]);
+</script>
+</body>
+</html>
