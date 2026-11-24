@@ -247,15 +247,26 @@ with four strategies on the same connections and producer roster:
   peers. A receiver fetches one copy from the first advertiser, retries another
   on failure, and reannounces only after the full response arrives.
 - `gossipsub`: the producer publishes each proof whole on a global proof topic.
-- `eip8411`: the producer gossips its authenticated Merkle commitment before
-  release and publishes independent pieces on one global proof topic. A receiver
-  checks each piece against the commitment before forwarding and needs every
-  index from the same producer to count a proof as available. This adapts the
-  draft's chunked GossipSub path, not Lighthouse's Waggle implementation. It
-  uses leanSim's signed pubsub transport, with no block, BAL or erasure coding.
-- `waggle`: the same signed GossipSub commitment and authenticated chunks as
-  `eip8411`, but chunk data travels on one Waggle topic over mutually subscribed
-  connections. The proof policy follows ec-sim's Lighthouse-inspired defaults:
+- `eip8411`: the producer builds a Merkle tree over the pieces, signs only its
+  root, and publishes the pieces independently on one global proof topic. Every
+  piece message carries its Merkle path and that one 2,400-byte root signature,
+  because a publisher cannot know which receivers already hold it. Nothing is
+  sent ahead of the release. A receiver checks that the path leads to a root the
+  producer signed, holds the proof to the first such root, and needs every index
+  from the same producer to count a proof as available. This adapts the draft's
+  chunked GossipSub path, not Lighthouse's Waggle implementation, with no block,
+  BAL or erasure coding.
+- `waggle`: the same pieces and root signature on one Waggle topic over mutually
+  subscribed connections. Every chunk message carries its Merkle path. The
+  signature goes along only while the peer may lack it: a host leaves it out once
+  the peer has advertised or sent a chunk, or once it has queued the peer a signed
+  one on the current stream. A receiver verifies the signature on its first
+  chunk and accepts later chunks on their Merkle path alone; it refuses a chunk
+  without a signature while it holds no signed root. The simulator has no
+  post-quantum scheme: an Ed25519 signature authenticates and filler brings it to
+  2,400 bytes.
+  Every peer on the topic is a push target; an inventory only says which chunks a
+  peer already holds. The proof policy follows ec-sim's Lighthouse-inspired defaults:
   push to up to two peers per chunk, favor shorter queues, coalesce inventories
   over 50 ms, and pull rare chunks with one outstanding request per peer per
   proof. Receivers eager-push for 250 ms after their first chunk; producers are
@@ -271,9 +282,12 @@ python3 scripts/subnet-proof-campaign.py output-subnet-proofs \
 
 On a machine with a working local leanSim Shadow image, use
 `--base-image leansim-shadow:waggle` with `--build` to reuse its Shadow runtime.
-Default proof size is 200,000 bytes, with 16 subnets, 64 chunks, 500 ms commitment
-lead, and IDONTWANT enabled above 1,000 bytes for GossipSub. Mesh settings apply
-to the Waggle arm's commitment topic, not its chunk transport. Regular
+Default proof size is 200,000 bytes, with 16 subnets, 16 chunks, and IDONTWANT
+enabled above 1,000 bytes for GossipSub. No arm sends a commitment ahead of the
+release. `--commitment-lead-ms` (default 500) is kept only as the start of the
+traffic count, that long before the release, so byte totals stay comparable with
+earlier runs. Mesh settings do
+not affect the Waggle arm, which sends nothing on GossipSub. Regular
 hosts have 25/50 Mbit/s up/down; 5% have 1 Gbit/s each way. Every host is a
 candidate proposer. The synthetic proof bytes are released together by default;
 pass `--stagger-ms` to spread release times across producers.
@@ -306,6 +320,38 @@ included in latency percentiles.
 This benchmark does not send signatures, perform real proof verification or
 recursion, model churn, or include parallel block traffic. Arrival latency is
 not time from the start of a slot and does not validate a slot schedule by itself.
+
+### Integrated Waggle slot
+
+`scripts/waggle-pipeline.py` prepares and summarizes a native Shadow run that
+uses the regular signature event loop and the same authenticated chunk policy as
+the proof-only Waggle arm. Committee proofs are released only when the local
+signature threshold is met and simulated proving finishes. One proposer, chosen
+from the placed validators, takes the first complete proof for each committee,
+waits the configured simulated combination time, and broadcasts its global
+proof. Every chunk carries its producer's signed commitment; proofs use a separate
+topic on the same Waggle behaviour as signatures. Both committee variants and the final
+proof continue to propagate. This models one slot, not a real prover or a block.
+
+Use the original `nodes.csv` at the repository root. This experiment chooses
+exactly four subscriber hosts per committee, not a validator lottery with an
+expected count of four. On a Linux host with Shadow installed:
+
+```sh
+cargo build --release --locked
+python3 scripts/waggle-pipeline.py prepare output-waggle-pipeline \
+  --config experiments/nodemap-32k-allhosts-waggle-pipeline.toml \
+  --binary target/release/leansim
+(cd output-waggle-pipeline && shadow -d shadow.data --progress true \
+  --parallelism 24 --use-cpu-pinning false shadow.yaml >shadow.log 2>&1)
+python3 scripts/waggle-pipeline.py summary output-waggle-pipeline
+```
+
+`pipeline-summary.json` and `pipeline-receivers.csv` measure latencies from the
+first signature. The summary records all 64 committee proof variants, proposer
+readiness, global-proof creation, deadline coverage, and total QUIC stream
+bytes across both transports. Latency percentiles include only hosts that
+reached the relevant milestone; use the coverage counts alongside them.
 
 #### Traffic logs
 

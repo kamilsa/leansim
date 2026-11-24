@@ -93,3 +93,8 @@ class SubnetProofCampaignTest(unittest.TestCase):
             self.assertEqual(result["ready_by_ms"][1000], 1)
             self.assertEqual(result["distinct_deliveries"], 3)
             self.assertEqual(result["bytes_over_one_copy_per_delivery"], 1)
+
+    def test_proofs_are_cut_into_16_chunks_by_default(self):
+        args = CAMPAIGN["build_parser"]().parse_args(["out"])
+        self.assertEqual(args.chunks, 16)
+        self.assertEqual(args.proof_bytes, 200_000)

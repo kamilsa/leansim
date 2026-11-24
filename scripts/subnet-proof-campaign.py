@@ -224,7 +224,7 @@ def summarize(path):
             "pending_fetches": sum(t["pending_fetches"] for t in traffic.values()), "directory": str(path)}
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     layout = parser.add_mutually_exclusive_group()
@@ -238,10 +238,11 @@ def main():
                         help="Override runtime GossipSub mesh degrees without changing seed connections")
     parser.add_argument("--dials", type=int, default=12)
     parser.add_argument("--proof-bytes", type=int, default=200_000)
-    parser.add_argument("--chunks", type=int, default=64)
+    parser.add_argument("--chunks", type=int, default=16)
     parser.add_argument("--release-ms", type=int, default=5000)
     parser.add_argument("--stagger-ms", type=int, default=0)
-    parser.add_argument("--commitment-lead-ms", type=int, default=500)
+    parser.add_argument("--commitment-lead-ms", type=int, default=500,
+                        help="Start of the traffic count before the release; no arm sends a commitment ahead")
     parser.add_argument("--idontwant-bytes", type=int, default=1000)
     parser.add_argument("--seconds", type=int, default=30)
     parser.add_argument("--parallelism", type=int, default=8)
@@ -249,6 +250,11 @@ def main():
     parser.add_argument("--base-image", default="kamilsa/shadow-arm:latest")
     parser.add_argument("--image", default=IMAGE)
     parser.add_argument("--native-binary", type=Path, help="Run installed Shadow with this leansim binary instead of Docker")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     args.nodes = 512 if args.nodes is None else args.nodes
     if not args.network_config and not (1 <= args.subnets <= args.nodes and args.nodes % args.subnets == 0

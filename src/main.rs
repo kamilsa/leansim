@@ -21,6 +21,7 @@ use leansim::node::recursive::ProofExchange;
 use leansim::node::sigsync::{SigSync, SyncSettings};
 use leansim::node::state::NodeState;
 use leansim::node::sync_io::{Delivery, SyncIo};
+use leansim::node::waggle_pipeline::{self, Pipeline};
 
 #[derive(Parser)]
 #[command(
@@ -40,6 +41,9 @@ enum Command {
     Node {
         #[arg(long)]
         config: PathBuf,
+        /// Run the integrated slot, with this proposer and producer roster.
+        #[arg(long)]
+        waggle_pipeline: Option<PathBuf>,
     },
     /// Run a node in the proof-only dissemination benchmark.
     SubnetProof {
@@ -58,7 +62,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Node { config } => run_node(config),
+        Command::Node {
+            config,
+            waggle_pipeline,
+        } => {
+            let settings = waggle_pipeline
+                .map(|path| -> Result<_> {
+                    Ok(serde_json::from_reader(std::fs::File::open(path)?)?)
+                })
+                .transpose()?;
+            run_node(config, settings.as_ref())
+        }
         Command::SubnetProof { config, settings } => {
             let cfg: NodeConfig = toml::from_str(&std::fs::read_to_string(config)?)?;
             cfg.experiment.validate().map_err(anyhow::Error::msg)?;
@@ -105,7 +119,7 @@ struct Session {
 /// with it one per stretch online. Each session has a runtime of its own, and
 /// going offline drops it with every socket and task of the session, so a crash
 /// sends nothing and leaves nothing behind.
-fn run_node(config_path: PathBuf) -> Result<()> {
+fn run_node(config_path: PathBuf, settings: Option<&waggle_pipeline::Settings>) -> Result<()> {
     let content = std::fs::read_to_string(&config_path)?;
     let node_config: NodeConfig =
         toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid node config: {e}"))?;
@@ -165,7 +179,7 @@ fn run_node(config_path: PathBuf) -> Result<()> {
             late: from_ms > 0,
             last: until_ms >= run_ms,
         };
-        runtime.block_on(run_session(&node_config, &mut carry, session))?;
+        runtime.block_on(run_session(&node_config, &mut carry, session, settings))?;
         drop(runtime);
         if until_ms < run_ms {
             emit(&JsonlEvent::Churn {
@@ -212,7 +226,12 @@ fn run_node(config_path: PathBuf) -> Result<()> {
 
 /// One session: the host from joining the network, with no state but its
 /// config, until it crashes or the run ends.
-async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Session) -> Result<()> {
+async fn run_session(
+    node_config: &NodeConfig,
+    carry: &mut Carry,
+    session: Session,
+    settings: Option<&waggle_pipeline::Settings>,
+) -> Result<()> {
     let joined = std::time::SystemTime::now();
     let state = Arc::new(
         NodeState::new(
@@ -247,10 +266,14 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
         &node_config.selected_aggregator_addrs,
     )?;
 
-    let mut swarm = leansim::network::swarm::build_swarm(
+    let mut pipeline = settings
+        .map(|settings| Pipeline::new(node_config, settings))
+        .transpose()?;
+    let mut swarm = leansim::network::swarm::build_swarm_with_proofs(
         node_config.node_id,
         &node_config.listen_addr,
         &node_config.experiment,
+        pipeline.as_ref().map(Pipeline::roster),
     )?;
 
     if waggle {
@@ -452,6 +475,7 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
     let waggle_gossip = Duration::from_millis(experiment.waggle_gossip_interval_ms());
     let mut next_waggle_gossip = (waggle && experiment.waggle_gossip_peers > 0)
         .then(|| tokio::time::Instant::now() + waggle_gossip);
+    let mut next_proof_drive = pipeline.as_ref().map(|_| tokio::time::Instant::now());
 
     loop {
         if tokio::time::Instant::now() >= end {
@@ -465,6 +489,8 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             next_bundle_tick,
             next_target_check,
             next_waggle_gossip,
+            next_proof_drive,
+            pipeline.as_ref().and_then(Pipeline::due),
             bundles.next_request_due(),
         ]
         .into_iter()
@@ -478,6 +504,11 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
         .await;
 
         match event {
+            Ok(Some(NetEvent::WaggleProofHeld(key))) => {
+                if let Some(pipeline) = &mut pipeline {
+                    pipeline.completed(key, state.elapsed_ms());
+                }
+            }
             Ok(Some(NetEvent::Gossip(received))) => {
                 handle_signature(&state, &swarm, &mut sync, meter.as_mut(), received)
             }
@@ -680,8 +711,28 @@ async fn run_session(node_config: &NodeConfig, carry: &mut Carry, session: Sessi
             next_sync = Some((due + sync_interval).max(now));
         }
         for proof in leansim::node::local_aggregator::complete_due_proofs(&state) {
+            if let Some(pipeline) = &mut pipeline {
+                let key = pipeline.publish(swarm.behaviour_mut(), node_config, proof.subnet)?;
+                pipeline.completed(key, state.elapsed_ms());
+                continue;
+            }
             let actions = exchange.proof_ready(ProofId::subnet(proof.subnet), now);
             proof_io.execute(&mut swarm, meter.as_mut(), actions, state.elapsed_ms());
+        }
+        if let Some(pipeline) = &mut pipeline {
+            if let Some(subnet) = pipeline.take_global(now, state.elapsed_ms()) {
+                let key = pipeline.publish(swarm.behaviour_mut(), node_config, subnet)?;
+                pipeline.completed(key, state.elapsed_ms());
+            }
+            if next_proof_drive.is_some_and(|due| due <= now) {
+                swarm
+                    .behaviour_mut()
+                    .waggle
+                    .as_mut()
+                    .expect("Waggle pipeline")
+                    .drive_proofs();
+                next_proof_drive = Some(now + waggle_pipeline::DRIVE_INTERVAL);
+            }
         }
         for done in exchange.take_due(now) {
             emit(&JsonlEvent::RecursiveProofGenerated {

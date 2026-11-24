@@ -35,6 +35,8 @@ use waggle::handler::{Handler, ObjectPieces, PieceSender, TopicEvent};
 
 use crate::config::experiment::ExperimentConfig;
 use crate::network::topics;
+use crate::node::subnet_proof_waggle::ProofWaggle;
+use crate::node::subnet_proofs::{Piece, ProofKey, Root};
 
 /// What waggle tells the node.
 #[derive(Debug)]
@@ -45,6 +47,7 @@ pub enum SigWaggleEvent {
         subnet: u32,
         pieces: ObjectPieces,
     },
+    ProofHeld(ProofKey),
 }
 
 /// The subscribers of one subnet and the ones this host pushes to.
@@ -145,20 +148,48 @@ pub struct SigWaggle {
     subscriptions: HashMap<(u32, PeerId), Subscription>,
     /// The events of every subscribed subnet topic, with the subnet.
     inbox: SelectAll<BoxStream<'static, (u32, TopicEvent)>>,
+    proof: Option<(Vec<u8>, ProofWaggle, BoxStream<'static, TopicEvent>)>,
     rng: StdRng,
 }
 
 impl SigWaggle {
     /// `seed` picks this host's push and gossip peers.
     pub fn new(config: &ExperimentConfig, seed: u64) -> Self {
+        Self::with_proofs(config, seed, None)
+    }
+
+    pub(crate) fn with_proofs(
+        config: &ExperimentConfig,
+        seed: u64,
+        proofs: Option<(usize, Vec<ProofKey>)>,
+    ) -> Self {
         let queue = |len: usize| NonZeroUsize::new(len.max(1)).expect("at least 1");
         let waggle_config = waggle::config::Config::default()
             .set_max_send_queue_limit(queue(config.waggle_max_send_queue))
             .set_max_receive_queue_len(queue(config.waggle_max_receive_queue))
-            .set_max_topic_subscription(config.waggle_max_topic_subscription())
+            .set_max_topic_subscription(
+                config.waggle_max_topic_subscription() + usize::from(proofs.is_some()),
+            )
             .set_max_protobuf_size(config.waggle_max_message_bytes());
+        let mut waggle = Behaviour::new(waggle_config);
+        let proof = proofs.map(|(chunks, roster)| {
+            let topic = crate::node::waggle_pipeline::Pipeline::chunk_topic(&config.run_id);
+            let inbox = waggle
+                .subscribe(topic.clone())
+                .expect("new proof topic")
+                .boxed();
+            let policy = ProofWaggle::new(
+                seed as u32,
+                config.geo_seed,
+                chunks,
+                config.aggregate_proof_bytes,
+                topic.clone(),
+                roster,
+            );
+            (topic, policy, inbox)
+        });
         Self {
-            waggle: Behaviour::new(waggle_config),
+            waggle,
             run_id: config.run_id.clone(),
             // Hashed selection caps the push peers of each signature, not of the subnet.
             push_peers: if config.waggle_hashed() {
@@ -172,7 +203,27 @@ impl SigWaggle {
             peers: BTreeMap::new(),
             subscriptions: HashMap::new(),
             inbox: SelectAll::new(),
+            proof,
             rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
+    pub(crate) fn release_proof(
+        &mut self,
+        key: ProofKey,
+        root: Root,
+        chunks: Vec<Piece>,
+    ) -> anyhow::Result<()> {
+        self.proof
+            .as_mut()
+            .expect("configured proof policy")
+            .1
+            .release(key, root, chunks)
+    }
+
+    pub fn drive_proofs(&mut self) {
+        if let Some((_, proof, _)) = &mut self.proof {
+            proof.drive();
         }
     }
 
@@ -252,6 +303,15 @@ impl SigWaggle {
     }
 
     fn on_waggle_event(&mut self, event: Event) {
+        let topic = match &event {
+            Event::Subscribed { topic_id, .. } | Event::Unsubscribed { topic_id, .. } => topic_id,
+        };
+        if let Some((proof_topic, proof, _)) = &mut self.proof {
+            if topic == proof_topic {
+                proof.on_behaviour(event);
+                return;
+            }
+        }
         match event {
             Event::Subscribed {
                 peer_id,
@@ -348,6 +408,11 @@ impl NetworkBehaviour for SigWaggle {
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm) {
+        if let (Some((_, proof, _)), FromSwarm::ConnectionClosed(closed)) =
+            (&mut self.proof, &event)
+        {
+            proof.disconnected(closed.peer_id, closed.connection_id);
+        }
         self.waggle.on_swarm_event(event);
     }
 
@@ -371,6 +436,13 @@ impl NetworkBehaviour for SigWaggle {
                 ToSwarm::GenerateEvent(event) => self.on_waggle_event(event),
                 other => {
                     return Poll::Ready(other.map_out(|_| unreachable!("matched above")));
+                }
+            }
+        }
+        if let Some((_, proof, inbox)) = &mut self.proof {
+            while let Poll::Ready(Some(event)) = inbox.poll_next_unpin(cx) {
+                if let Some(key) = proof.on_topic(event) {
+                    return Poll::Ready(ToSwarm::GenerateEvent(SigWaggleEvent::ProofHeld(key)));
                 }
             }
         }

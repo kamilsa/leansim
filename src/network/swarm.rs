@@ -17,6 +17,7 @@ use crate::messages::sync::{SyncRequest, SyncResponse};
 use crate::messages::wire::WireMessage;
 use crate::network::topics;
 use crate::network::waggle_net::{SigWaggle, SigWaggleEvent};
+use crate::node::subnet_proofs::ProofKey;
 
 /// Gossipsub, or waggle with `signature_transport = "waggle"`, carries signatures;
 /// request-response carries proof announcements and pulls, and per-hop signature
@@ -348,11 +349,25 @@ pub fn build_swarm(
     listen_addr: &str,
     config: &ExperimentConfig,
 ) -> Result<Swarm<SimBehaviour>> {
+    build_swarm_with_proofs(node_id, listen_addr, config, None)
+}
+
+pub fn build_swarm_with_proofs(
+    node_id: u32,
+    listen_addr: &str,
+    config: &ExperimentConfig,
+    proof_roster: Option<Vec<ProofKey>>,
+) -> Result<Swarm<SimBehaviour>> {
     let id_keys = node_keypair(node_id);
 
     let gossipsub = build_gossipsub(&id_keys, config)?;
-    let waggle = (config.signature_transport == SignatureTransport::Waggle)
-        .then(|| SigWaggle::new(config, u64::from(node_id)));
+    let waggle = (config.signature_transport == SignatureTransport::Waggle).then(|| {
+        SigWaggle::with_proofs(
+            config,
+            u64::from(node_id),
+            proof_roster.map(|roster| (crate::node::waggle_pipeline::CHUNKS, roster)),
+        )
+    });
     let proofs = request_response::cbor::Behaviour::new(
         [(
             StreamProtocol::new(PROOF_PROTOCOL),
@@ -499,6 +514,7 @@ pub struct ReceivedMessage {
 /// What the node's event loop handles next.
 pub enum NetEvent {
     Gossip(ReceivedMessage),
+    WaggleProofHeld(ProofKey),
     /// An announcement or a pull; answer it through `channel`.
     ProofRequest {
         request: ProofRequest,
@@ -647,6 +663,9 @@ pub async fn next_event(
                     subnet,
                     pieces,
                 });
+            }
+            SwarmEvent::Behaviour(SimBehaviourEvent::Waggle(SigWaggleEvent::ProofHeld(key))) => {
+                return Some(NetEvent::WaggleProofHeld(key));
             }
             SwarmEvent::Behaviour(SimBehaviourEvent::Proofs(
                 request_response::Event::Message { message, .. },

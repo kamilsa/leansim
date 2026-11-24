@@ -1,5 +1,5 @@
 //! Single-round subnet proof transport benchmark. No signature traffic or proving.
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -8,14 +8,17 @@ use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance};
 use libp2p::request_response::{self as rr, Message};
 use libp2p::swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent};
-use libp2p::{Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder};
+use libp2p::{identity::PublicKey, Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::time::{interval_at, sleep_until, Instant, MissedTickBehavior};
 
 use super::subnet_proof_waggle::{ProofWaggle, DRIVE_INTERVAL};
-use super::subnet_proofs::{pieces, Assembly, Piece, ProofKey, Pulls, Root};
+use super::subnet_proofs::{
+    pieces, sign_commitment, Admission, Assembly, Piece, ProofKey, Pulls,
+    COMMITMENT_SIGNATURE_BYTES,
+};
 use crate::config::experiment::{ExperimentConfig, NodeConfig};
 use crate::network::swarm::{gossipsub_config, node_keypair, peer_id_for};
 
@@ -28,51 +31,37 @@ pub enum Mode {
     Waggle,
 }
 
-impl Mode {
-    fn has_commitments(self) -> bool {
-        matches!(self, Self::Eip8411 | Self::Waggle)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     mode: Mode,
     release_ms: u64,
     stagger_ms: u64,
+    /// No arm sends a commitment ahead any more: the piece arms carry it in every
+    /// piece message. This only sets how long before the release the traffic count starts.
     commitment_lead_ms: u64,
     chunks: usize,
     producers: Vec<ProofKey>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Release {
-    Commitment,
-    Proof,
-}
-
-fn release_schedule(settings: &Settings, node_id: u32) -> BTreeSet<(u64, ProofKey, Release)> {
-    let mut releases = BTreeSet::new();
-    for &key in settings.producers.iter().filter(|p| p.producer == node_id) {
-        let release = settings.release_ms
-            + (u64::from(key.producer).wrapping_mul(2654435761) ^ u64::from(key.subnet))
+fn release_schedule(settings: &Settings, node_id: u32) -> BTreeSet<(u64, ProofKey)> {
+    settings
+        .producers
+        .iter()
+        .filter(|p| p.producer == node_id)
+        .map(|&key| {
+            let stagger = (u64::from(key.producer).wrapping_mul(2654435761)
+                ^ u64::from(key.subnet))
                 % (settings.stagger_ms + 1);
-        releases.insert((release, key, Release::Proof));
-        if settings.mode.has_commitments() {
-            releases.insert((
-                release - settings.commitment_lead_ms,
-                key,
-                Release::Commitment,
-            ));
-        }
-    }
-    releases
+            (settings.release_ms + stagger, key)
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Gossip {
     Proof(ProofKey, Vec<u8>),
-    Commitment(ProofKey, Root),
-    Piece(Piece),
+    /// A piece with its Merkle path and its producer's signature over the root.
+    Piece(#[serde(with = "serde_bytes")] Vec<u8>, Piece),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,7 +85,6 @@ struct Behaviour {
 }
 
 type ProofSwarm = Swarm<Behaviour>;
-type EarlyPiece = (gossipsub::MessageId, PeerId, Piece);
 
 pub(super) fn codec() -> impl Options {
     bincode::DefaultOptions::new()
@@ -114,16 +102,13 @@ struct Run<'a> {
     settings: &'a Settings,
     start: Instant,
     topic: IdentTopic,
-    commitment_topic: IdentTopic,
 
-    commitments: BTreeMap<ProofKey, Root>,
-    // An early chunk can be forwarded only after its producer's commitment arrives.
-    early: BTreeMap<ProofKey, BTreeMap<usize, EarlyPiece>>,
     assembly: Assembly,
     pulls: Pulls,
     whole: BTreeMap<ProofKey, Vec<u8>>,
     pending: HashMap<rr::OutboundRequestId, (ProofKey, u32)>,
     allowed: BTreeMap<ProofKey, PeerId>,
+    keys: BTreeMap<ProofKey, PublicKey>,
     waggle: Option<ProofWaggle>,
 }
 
@@ -227,14 +212,27 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn accept_piece(&mut self, piece: &Piece, root: Root) -> MessageAcceptance {
-        if !piece.verify(root, self.settings.chunks, self.bytes()) {
+    fn accept_piece(&mut self, signature: &[u8], piece: &Piece) -> MessageAcceptance {
+        let Some(producer) = self.keys.get(&piece.key) else {
             return MessageAcceptance::Reject;
+        };
+        match self.assembly.admit(
+            producer,
+            signature,
+            piece,
+            self.settings.chunks,
+            self.cfg.experiment.aggregate_proof_bytes,
+        ) {
+            Admission::Invalid => MessageAcceptance::Reject,
+            // The relaying peer may hold the proof to the other signed root in good faith.
+            Admission::Conflict => MessageAcceptance::Ignore,
+            Admission::Held { complete } => {
+                if complete {
+                    self.complete(piece.key);
+                }
+                MessageAcceptance::Accept
+            }
         }
-        if self.assembly.insert(piece, self.settings.chunks) {
-            self.complete(piece.key);
-        }
-        MessageAcceptance::Accept
     }
 
     fn on_gossip(
@@ -244,7 +242,7 @@ impl Run<'_> {
         id: gossipsub::MessageId,
         message: gossipsub::Message,
     ) {
-        use MessageAcceptance::{Accept, Ignore, Reject};
+        use MessageAcceptance::{Accept, Reject};
         let result = match codec().deserialize(&message.data) {
             Ok(Gossip::Proof(key, bytes))
                 if self.settings.mode == Mode::Gossipsub
@@ -256,43 +254,15 @@ impl Run<'_> {
                 self.complete(key);
                 Accept
             }
-            Ok(Gossip::Commitment(key, root))
-                if self.settings.mode.has_commitments()
-                    && message.topic == self.commitment_topic.hash()
-                    && self.allowed.get(&key) == message.source.as_ref()
-                    && message.source.is_some() =>
-            {
-                if let Entry::Vacant(entry) = self.commitments.entry(key) {
-                    entry.insert(root);
-                    if let Some(waggle) = &mut self.waggle {
-                        waggle.register(key, root);
-                    }
-                    for (_, (id, peer, piece)) in self.early.remove(&key).into_iter().flatten() {
-                        let result = self.accept_piece(&piece, root);
-                        report_validation(swarm, id, peer, result);
-                    }
-                    Accept
-                } else {
-                    Ignore
-                }
-            }
-            Ok(Gossip::Piece(piece))
+            // Every piece message carries the root signature: a publisher cannot know
+            // which receivers already hold it.
+            Ok(Gossip::Piece(signature, piece))
                 if self.settings.mode == Mode::Eip8411
                     && message.topic == self.topic.hash()
-                    && self.allowed.contains_key(&piece.key)
-                    && piece.index < self.settings.chunks =>
+                    && self.allowed.get(&piece.key) == message.source.as_ref()
+                    && message.source.is_some() =>
             {
-                if let Some(root) = self.commitments.get(&piece.key) {
-                    self.accept_piece(&piece, *root)
-                } else {
-                    // Bounded by roster × pieces; never relay an unauthenticated piece.
-                    let early = self.early.entry(piece.key).or_default();
-                    if let Entry::Vacant(entry) = early.entry(piece.index) {
-                        entry.insert((id, peer, piece));
-                        return;
-                    }
-                    Ignore
-                }
+                self.accept_piece(&signature, &piece)
             }
             _ => Reject,
         };
@@ -340,7 +310,7 @@ pub fn run(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
         .block_on(run_async(cfg, settings))
 }
 
-fn prepare(key: ProofKey, config: &ExperimentConfig) -> Vec<u8> {
+pub(super) fn prepare(key: ProofKey, config: &ExperimentConfig) -> Vec<u8> {
     let mut data = vec![0; config.aggregate_proof_bytes];
     let mut seed = Sha256::new();
     seed.update(config.geo_seed.to_le_bytes());
@@ -361,12 +331,15 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 .set_max_topic_subscription(1)
                 .set_topic_whitelist(Some([waggle_topic.clone()].into()))
                 .set_max_protobuf_size(
-                    experiment.aggregate_proof_bytes.div_ceil(settings.chunks) + 1024,
+                    experiment.aggregate_proof_bytes.div_ceil(settings.chunks)
+                        + COMMITMENT_SIGNATURE_BYTES
+                        + 1024,
                 ),
         )
     });
-    // LeanSim signs all pubsub messages at the transport layer. At the application
-    // layer a piece is accepted only if it matches the producer's signed commitment.
+    // LeanSim signs all pubsub messages at the transport layer. At the application layer
+    // a piece is accepted only if its Merkle path leads to a root its producer signed. On
+    // GossipSub every piece carries that signature; on Waggle only a peer's first chunk does.
     let gossip = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(key.clone()),
         gossipsub_config(experiment)?,
@@ -396,12 +369,6 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
         settings,
         start,
         topic: IdentTopic::new(format!("/leansim/{}/subnet-proof", experiment.run_id)),
-        commitment_topic: IdentTopic::new(format!(
-            "/leansim/{}/subnet-proof-commitment",
-            experiment.run_id
-        )),
-        commitments: BTreeMap::new(),
-        early: BTreeMap::new(),
         assembly: Assembly::default(),
         pulls: Pulls::default(),
         whole: BTreeMap::new(),
@@ -411,6 +378,11 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
             .iter()
             .map(|&key| (key, peer_id_for(key.producer)))
             .collect(),
+        keys: settings
+            .producers
+            .iter()
+            .map(|&key| (key, node_keypair(key.producer).public()))
+            .collect(),
         waggle: (settings.mode == Mode::Waggle).then(|| {
             ProofWaggle::new(
                 cfg.node_id,
@@ -418,6 +390,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 settings.chunks,
                 experiment.aggregate_proof_bytes,
                 waggle_topic.clone(),
+                settings.producers.iter().copied(),
             )
         }),
     };
@@ -429,19 +402,12 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     if matches!(settings.mode, Mode::Gossipsub | Mode::Eip8411) {
         swarm.behaviour_mut().gossip.subscribe(&run.topic)?;
     }
-    if settings.mode.has_commitments() {
-        swarm
-            .behaviour_mut()
-            .gossip
-            .subscribe(&run.commitment_topic)?;
-    }
     swarm.listen_on(cfg.listen_addr.parse()?)?;
     for address in &cfg.seed_addrs {
         swarm.dial(address.parse::<Multiaddr>()?)?;
     }
     // Release times are independent of network mode and stagger by producer duty.
     let mut releases = release_schedule(settings, cfg.node_id);
-    let mut pieces_by_key = BTreeMap::new();
 
     let timeout = experiment.run_timeout_secs * 1000;
     let mut sent_before = None;
@@ -463,17 +429,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 }
                 if due == timeout { break; }
                 while releases.first().is_some_and(|k| k.0 == due) {
-                    let (_, key, release) = releases.pop_first().expect("due release");
-                    if release == Release::Commitment {
-                        let (root, chunks) = pieces(key, &prepare(key, experiment), settings.chunks);
-                        run.commitments.insert(key, root);
-                        if let Some(waggle) = &mut run.waggle {
-                            waggle.register(key, root);
-                        }
-                        pieces_by_key.insert(key, chunks);
-                        run.publish(&mut swarm, &run.commitment_topic, Gossip::Commitment(key, root))?;
-                        continue;
-                    }
+                    let (_, key) = releases.pop_first().expect("due release");
                     log(serde_json::json!({"event":"proof_release", "node_id":cfg.node_id,
                         "subnet":key.subnet, "producer":key.producer, "ms":start.elapsed().as_millis()}));
                     let neighbours = swarm.connected_peers().count();
@@ -485,15 +441,16 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                             run.complete(key);
                         }
                         Mode::Eip8411 => {
-                            for piece in pieces_by_key.remove(&key).context("missing prepared chunks")? {
-                                run.publish(&mut swarm, &run.topic, Gossip::Piece(piece))?;
+                            let (root, chunks) = pieces(key, &prepare(key, experiment), settings.chunks);
+                            let signature = sign_commitment(&node_keypair(cfg.node_id), key, root)?;
+                            for piece in chunks {
+                                run.publish(&mut swarm, &run.topic, Gossip::Piece(signature.clone(), piece))?;
                             }
                             run.complete(key);
                         }
                         Mode::Waggle => {
-                            run.waggle.as_mut().expect("Waggle mode").release(
-                                key, pieces_by_key.remove(&key).context("missing prepared chunks")?,
-                            )?;
+                            let (root, chunks) = pieces(key, &prepare(key, experiment), settings.chunks);
+                            run.waggle.as_mut().expect("Waggle mode").release(key, root, chunks)?;
                             run.complete(key);
                         }
                     }
@@ -533,11 +490,13 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     }
     let after = zero_copy_write::stats();
     let before = sent_before.context("measurement never started")?;
+    let signatures = run.waggle.as_ref().map_or([0; 2], ProofWaggle::signatures);
     log(
         serde_json::json!({"event":"proof_traffic", "node_id":cfg.node_id,
         "bytes":after.shared_bytes + after.copied_bytes - before.shared_bytes - before.copied_bytes,
         "peers":swarm.connected_peers().count(),
-        "pending_fetches":run.waggle.as_ref().map_or(run.pending.len(), ProofWaggle::pending)}),
+        "pending_fetches":run.waggle.as_ref().map_or(run.pending.len(), ProofWaggle::pending),
+        "chunks_unsigned":signatures[0], "chunks_signed":signatures[1]}),
     );
     Ok(())
 }
@@ -547,47 +506,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_lead_schedules_commitment_before_its_proof() {
+    fn nothing_is_sent_ahead_of_a_release() {
         let key = ProofKey {
             subnet: 2,
             producer: 7,
         };
-        let settings = Settings {
-            mode: Mode::Eip8411,
-            release_ms: 5000,
-            stagger_ms: 0,
-            commitment_lead_ms: 0,
-            chunks: 64,
-            producers: vec![key],
-        };
-        assert_eq!(
-            release_schedule(&settings, 7)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            vec![
-                (5000, key, Release::Commitment),
-                (5000, key, Release::Proof)
-            ]
-        );
-    }
-
-    #[test]
-    fn waggle_uses_the_same_commitment_and_release_schedule() {
-        let key = ProofKey {
-            subnet: 2,
-            producer: 7,
-        };
-        let mut settings = Settings {
-            mode: serde_json::from_str("\"waggle\"").expect("waggle mode"),
-            release_ms: 5000,
-            stagger_ms: 200,
-            commitment_lead_ms: 500,
-            chunks: 64,
-            producers: vec![key],
-        };
-        let waggle = release_schedule(&settings, key.producer);
-        assert_eq!(waggle.len(), 2);
-        settings.mode = Mode::Eip8411;
-        assert_eq!(waggle, release_schedule(&settings, key.producer));
+        for mode in [
+            Mode::AnnouncePull,
+            Mode::Gossipsub,
+            Mode::Eip8411,
+            Mode::Waggle,
+        ] {
+            let settings = Settings {
+                mode,
+                release_ms: 5000,
+                stagger_ms: 0,
+                commitment_lead_ms: 500,
+                chunks: 64,
+                producers: vec![key],
+            };
+            assert_eq!(
+                release_schedule(&settings, 7)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                vec![(5000, key)]
+            );
+            assert!(release_schedule(&settings, 8).is_empty());
+        }
     }
 }

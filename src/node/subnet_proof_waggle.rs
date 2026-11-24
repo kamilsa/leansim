@@ -2,12 +2,20 @@
 //!
 //! Like ec-sim's Lighthouse payload port, mutually subscribed peers exchange
 //! inventories, eagerly push to a small set of peers, and pull missing chunks.
-//! The proof runner supplies the producer's signed commitment instead of a block.
+//! The producer builds a Merkle tree over the chunks and signs only its root. Every
+//! chunk message carries the chunk's Merkle path, which leads to that root. The root
+//! signature goes along only while the peer may lack it: once a peer has received or
+//! advertised a chunk, or we have queued it a signed one, the path alone is enough.
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use anyhow::Context;
 use bincode::Options;
-use libp2p::{swarm::ConnectionId, PeerId};
+use libp2p::{
+    identity::{Keypair, PublicKey},
+    swarm::ConnectionId,
+    PeerId,
+};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use tokio::time::Instant;
 use waggle::{
@@ -16,7 +24,10 @@ use waggle::{
 };
 
 use super::subnet_proof_run::codec;
-use super::subnet_proofs::{Piece, ProofKey, Root};
+use super::subnet_proofs::{
+    sign_commitment, Commitment, Piece, ProofKey, Root, COMMITMENT_SIGNATURE_BYTES,
+};
+use crate::network::swarm::node_keypair;
 
 const FANOUT: u8 = 2;
 const PUSH_WINDOW: Duration = Duration::from_millis(250);
@@ -67,10 +78,49 @@ struct PeerProof {
     announced: Option<Bitmap>,
     sent: Bitmap,
     pushes: usize,
+    /// The peer sent us a valid chunk, so it holds the signed root.
+    received_from: bool,
+    /// A chunk with the signature is queued to the peer on its current stream.
+    signature_sent: bool,
+}
+
+impl PeerProof {
+    /// A peer that holds, sent or was sent a valid chunk has verified the root signature
+    /// and keeps it for the life of the proof.
+    fn needs_signature(&self) -> bool {
+        !self.signature_sent
+            && !self.received_from
+            && self.has.unwrap_or_default() == Bitmap::default()
+    }
+}
+
+/// The chunk with its Merkle path, followed by the root signature if the peer needs it.
+fn encode_chunk(piece: &[u8], signature: Option<&[u8]>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(piece.len() + signature.map_or(0, <[u8]>::len));
+    bytes.extend_from_slice(piece);
+    bytes.extend_from_slice(signature.unwrap_or_default());
+    bytes
+}
+
+/// Splits a chunk message into the piece, its encoding and the signature, which is
+/// either absent or of the full size.
+fn decode_chunk(encoded: &[u8]) -> Option<(Piece, &[u8], &[u8])> {
+    let mut signature = encoded;
+    let piece = codec()
+        .allow_trailing_bytes()
+        .deserialize_from(&mut signature)
+        .ok()?;
+    (signature.is_empty() || signature.len() == COMMITMENT_SIGNATURE_BYTES).then(|| {
+        (
+            piece,
+            &encoded[..encoded.len() - signature.len()],
+            signature,
+        )
+    })
 }
 
 struct Slot {
-    /// Encoded authenticated chunk, reused for pushes and request replies.
+    /// Encoded chunk with its Merkle path, reused for pushes and request replies.
     piece: Option<Vec<u8>>,
     requested: Option<Request>,
     pushes: u8,
@@ -79,7 +129,12 @@ struct Slot {
 struct Proof {
     key: ProofKey,
     object_id: Vec<u8>,
-    root: Root,
+    producer_key: PublicKey,
+    /// The signed root of the first valid chunk; later chunks must lead to it.
+    commitment: Commitment,
+    /// Chunks sent without and with the signature.
+    signatures: [u64; 2],
+    /// When this host first heard of the proof.
     registered: Instant,
     first_chunk: Option<Instant>,
     producer: bool,
@@ -94,11 +149,19 @@ struct Proof {
 type Senders = BTreeMap<PeerId, PieceSender>;
 
 impl Proof {
-    fn new(key: ProofKey, root: Root, count: usize, now: Instant, producer: bool) -> Self {
+    fn new(
+        key: ProofKey,
+        producer_key: PublicKey,
+        count: usize,
+        now: Instant,
+        producer: bool,
+    ) -> Self {
         Self {
             key,
             object_id: codec().serialize(&key).expect("proof key encodes"),
-            root,
+            producer_key,
+            commitment: Commitment::default(),
+            signatures: [0; 2],
             registered: now,
             first_chunk: None,
             producer,
@@ -136,7 +199,8 @@ impl Proof {
         request: Option<usize>,
     ) -> bool {
         let state = self.peers.entry(peer).or_default();
-        let announce = state.announced != Some(self.have) || request.is_some();
+        // An empty inventory says nothing: every peer on the topic is assumed to want the proof.
+        let announce = state.announced.unwrap_or_default() != self.have || request.is_some();
         if !announce && chunk.is_none() {
             return true;
         }
@@ -151,7 +215,13 @@ impl Proof {
             metadata.extend_from_slice(&requests.0[..n]);
             metadata
         });
-        let pieces = chunk.map(|i| self.slots[i].piece.as_ref().expect("held piece").clone());
+        let sign = chunk.is_some() && state.needs_signature();
+        let pieces = chunk.map(|i| {
+            encode_chunk(
+                self.slots[i].piece.as_ref().expect("held piece"),
+                sign.then(|| self.commitment.signature().expect("held chunks are signed")),
+            )
+        });
         if sender
             .try_send(ObjectPieces {
                 object_id: self.object_id.clone(),
@@ -164,6 +234,8 @@ impl Proof {
         }
         if let Some(index) = chunk {
             state.sent.set(index);
+            state.signature_sent |= sign;
+            self.signatures[usize::from(sign)] += 1;
         }
         if announce {
             state.announced = Some(self.have);
@@ -191,15 +263,13 @@ impl Proof {
             return;
         }
         let per_peer = (self.slots.len() * usize::from(FANOUT) * 2).div_ceil(senders.len().max(1));
+        // A peer need not have advertised anything to be pushed to.
+        for &peer in senders.keys() {
+            self.peers.entry(peer).or_default();
+        }
         let mut candidates = senders
             .iter()
-            .filter(|(peer, sender)| {
-                !sender.is_full()
-                    && self
-                        .peers
-                        .get(peer)
-                        .is_some_and(|p| p.has.is_some() && p.pushes < per_peer)
-            })
+            .filter(|(peer, sender)| !sender.is_full() && self.peers[peer].pushes < per_peer)
             .map(|(&peer, sender)| (peer, sender, sender.len()))
             .collect::<Vec<_>>();
         candidates.shuffle(rng);
@@ -216,7 +286,7 @@ impl Proof {
                         let state = &self.peers[p];
                         state.pushes < per_peer
                             && !state.sent.get(i)
-                            && !state.has.expect("tracking").get(i)
+                            && !state.has.unwrap_or_default().get(i)
                             && !s.is_full()
                             && !s.is_closed()
                     })
@@ -310,7 +380,7 @@ impl Proof {
         let mut complete = false;
         let mut added = None;
         if let Some(encoded) = msg.pieces {
-            let Ok(piece) = codec().deserialize::<Piece>(&encoded) else {
+            let Some((piece, body, signature)) = decode_chunk(&encoded) else {
                 return false;
             };
             if piece.key != self.key || piece.index >= count {
@@ -318,19 +388,30 @@ impl Proof {
             }
             let index = piece.index;
             if let Some(held) = &self.slots[index].piece {
-                if held != &encoded {
+                if held != body {
                     return false;
                 }
             } else {
-                if !piece.verify(self.root, count, bytes) {
+                // The Merkle path leads to a root. The first chunk must bring the producer's
+                // signature over it; once that root is held the path alone is enough.
+                let Some(root) = piece.root(count, bytes) else {
+                    return false;
+                };
+                if self
+                    .commitment
+                    .admit(&self.producer_key, self.key, root, signature, true)
+                    .is_err()
+                {
                     return false;
                 }
-                complete = self.insert(index, encoded, now);
+                let body = body.to_vec();
+                complete = self.insert(index, body, now);
                 added = Some(index);
                 self.nudge_pull(now);
             }
+            // A peer that sends a valid chunk holds the signed root.
+            self.peers.entry(peer).or_default().received_from = true;
         }
-        let mut first_inventory = false;
         if let Some(metadata) = msg.metadata {
             let n = count.div_ceil(8);
             if metadata.len() == 2 * n {
@@ -340,13 +421,6 @@ impl Proof {
                 ) {
                     let state = self.peers.entry(peer).or_default();
                     if state.has.is_none_or(|old| has.includes(old)) {
-                        first_inventory = state.has.is_none();
-                        if first_inventory {
-                            // The remote may not have known the commitment when
-                            // we sent our initial inventory.
-                            state.announced = None;
-                            self.announce_at = Some(now);
-                        }
                         if state.has != Some(has) {
                             state.has = Some(has);
                             self.nudge_pull(now);
@@ -368,10 +442,7 @@ impl Proof {
                 }
             }
         }
-        if first_inventory {
-            // Reconsider chunks not previously pushed to enough tracking peers.
-            self.push(senders, (0..count).collect(), now, rng);
-        } else if let Some(i) = added {
+        if let Some(i) = added {
             self.push(senders, vec![i], now, rng);
         }
         complete
@@ -384,12 +455,15 @@ struct Link {
     sender: Option<PieceSender>,
 }
 
-pub(super) struct ProofWaggle {
+pub(crate) struct ProofWaggle {
     node_id: u32,
     count: usize,
     bytes: usize,
     topic: Vec<u8>,
     rng: StdRng,
+    keypair: Keypair,
+    /// Proofs this host accepts, with the key that must sign each commitment.
+    roster: BTreeMap<ProofKey, PublicKey>,
     links: BTreeMap<PeerId, Link>,
     /// Only links with both subscription streams open participate.
     senders: Senders,
@@ -397,40 +471,59 @@ pub(super) struct ProofWaggle {
 }
 
 impl ProofWaggle {
-    pub(super) fn new(node_id: u32, seed: u64, count: usize, bytes: usize, topic: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        node_id: u32,
+        seed: u64,
+        count: usize,
+        bytes: usize,
+        topic: Vec<u8>,
+        roster: impl IntoIterator<Item = ProofKey>,
+    ) -> Self {
         Self {
             node_id,
             count,
             bytes,
             topic,
             rng: StdRng::seed_from_u64(seed ^ u64::from(node_id)),
+            keypair: node_keypair(node_id),
+            roster: roster
+                .into_iter()
+                .map(|key| (key, node_keypair(key.producer).public()))
+                .collect(),
             links: BTreeMap::new(),
             senders: BTreeMap::new(),
             proofs: BTreeMap::new(),
         }
     }
 
-    pub(super) fn register(&mut self, key: ProofKey, root: Root) {
-        self.proofs.entry(key).or_insert_with(|| {
-            Proof::new(
-                key,
-                root,
-                self.count,
-                Instant::now(),
-                self.node_id == key.producer,
-            )
-        });
+    /// The proof for `key`, created when this host first hears of it.
+    fn proof(&mut self, key: ProofKey) -> Option<&mut Proof> {
+        let producer_key = self.roster.get(&key)?;
+        let (count, producer) = (self.count, self.node_id == key.producer);
+        Some(self.proofs.entry(key).or_insert_with(|| {
+            Proof::new(key, producer_key.clone(), count, Instant::now(), producer)
+        }))
     }
 
-    pub(super) fn release(&mut self, key: ProofKey, chunks: Vec<Piece>) -> anyhow::Result<()> {
-        let proof = self
-            .proofs
-            .get_mut(&key)
-            .expect("registered producer commitment");
+    /// Signs the Merkle root and starts pushing the chunks.
+    pub(crate) fn release(
+        &mut self,
+        key: ProofKey,
+        root: Root,
+        chunks: Vec<Piece>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            key.producer == self.node_id,
+            "only its producer releases a proof"
+        );
+        let signature = sign_commitment(&self.keypair, key, root)?;
+        let proof = self.proof(key).context("proof is not on the roster")?;
+        proof.commitment = Commitment::signed(root, signature);
         let now = Instant::now();
-        for chunk in chunks {
-            proof.insert(chunk.index, codec().serialize(&chunk)?, now);
+        for piece in chunks {
+            proof.insert(piece.index, codec().serialize(&piece)?, now);
         }
+        let proof = self.proofs.get_mut(&key).expect("just created");
         proof.push(&self.senders, (0..self.count).collect(), now, &mut self.rng);
         Ok(())
     }
@@ -459,6 +552,13 @@ impl ProofWaggle {
                 proof.announce_at = Some(now);
                 proof.nudge_pull(now);
             }
+        } else {
+            // A signature queued on the replaced stream may never have arrived.
+            for proof in self.proofs.values_mut() {
+                if let Some(state) = proof.peers.get_mut(&peer) {
+                    state.signature_sent = false;
+                }
+            }
         }
     }
 
@@ -477,14 +577,14 @@ impl ProofWaggle {
         }
     }
 
-    pub(super) fn disconnected(&mut self, peer: PeerId, id: ConnectionId) {
+    pub(crate) fn disconnected(&mut self, peer: PeerId, id: ConnectionId) {
         if self.links.get(&peer).is_some_and(|l| l.id == id) {
             self.links.remove(&peer);
             self.not_ready(peer);
         }
     }
 
-    pub(super) fn on_behaviour(&mut self, event: Event) {
+    pub(crate) fn on_behaviour(&mut self, event: Event) {
         match event {
             Event::Subscribed {
                 peer_id,
@@ -515,7 +615,7 @@ impl ProofWaggle {
         }
     }
 
-    pub(super) fn on_topic(&mut self, event: TopicEvent) -> Option<ProofKey> {
+    pub(crate) fn on_topic(&mut self, event: TopicEvent) -> Option<ProofKey> {
         match event {
             TopicEvent::Opened {
                 peer_id,
@@ -553,7 +653,8 @@ impl ProofWaggle {
                     return None;
                 }
                 let key = codec().deserialize::<ProofKey>(&pieces.object_id).ok()?;
-                let proof = self.proofs.get_mut(&key)?;
+                self.proof(key)?;
+                let proof = self.proofs.get_mut(&key).expect("just created");
                 if proof.receive(
                     peer_id,
                     pieces,
@@ -569,7 +670,7 @@ impl ProofWaggle {
         None
     }
 
-    pub(super) fn drive(&mut self) {
+    pub(crate) fn drive(&mut self) {
         let now = Instant::now();
         let timeout = Duration::from_millis(500)
             + Duration::from_micros(16 * self.bytes.div_ceil(self.count) as u64);
@@ -581,6 +682,13 @@ impl ProofWaggle {
                 proof.pull(&self.senders, now, timeout, &mut self.rng);
             }
         }
+    }
+
+    /// Chunk messages sent without and with the root signature.
+    pub(super) fn signatures(&self) -> [u64; 2] {
+        self.proofs.values().fold([0; 2], |sum, proof| {
+            [sum[0] + proof.signatures[0], sum[1] + proof.signatures[1]]
+        })
     }
 
     pub(super) fn pending(&self) -> usize {
@@ -595,7 +703,23 @@ impl ProofWaggle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::subnet_proofs::pieces;
+    use crate::network::swarm::node_keypair;
+    use crate::node::subnet_proofs::{pieces, sign_commitment};
+
+    /// A chunk message as a relay would send it: the chunk with its Merkle path, and
+    /// the producer's root signature only if `signer` is given.
+    fn chunk(signer: Option<u32>, root: Root, piece: &Piece) -> ObjectPieces {
+        let signature =
+            signer.map(|id| sign_commitment(&node_keypair(id), piece.key, root).unwrap());
+        ObjectPieces {
+            object_id: codec().serialize(&piece.key).unwrap(),
+            metadata: None,
+            pieces: Some(encode_chunk(
+                &codec().serialize(piece).unwrap(),
+                signature.as_deref(),
+            )),
+        }
+    }
 
     #[test]
     fn only_distinct_authenticated_pieces_complete_a_proof() {
@@ -605,17 +729,19 @@ mod tests {
         };
         let (root, chunks) = pieces(key, b"abcd", 2);
         let now = Instant::now();
-        let mut proof = Proof::new(key, root, 2, now, false);
+        let mut proof = Proof::new(key, node_keypair(2).public(), 2, now, false);
         let peer = PeerId::random();
         let mut rng = StdRng::seed_from_u64(9);
         let senders = BTreeMap::new();
         let mut receive = |piece: &Piece| {
-            let msg = ObjectPieces {
-                object_id: proof.object_id.clone(),
-                metadata: None,
-                pieces: Some(codec().serialize(piece).unwrap()),
-            };
-            proof.receive(peer, msg, &senders, 4, now, &mut rng)
+            proof.receive(
+                peer,
+                chunk(Some(2), root, piece),
+                &senders,
+                4,
+                now,
+                &mut rng,
+            )
         };
         let mut wrong = chunks[0].clone();
         wrong.data[0] ^= 1;
@@ -624,6 +750,63 @@ mod tests {
         assert!(!receive(&chunks[1]));
         assert!(receive(&chunks[0]));
         assert!(!receive(&chunks[0]));
+    }
+
+    #[test]
+    fn a_chunk_without_the_signature_is_accepted_only_after_a_signed_one() {
+        let key = ProofKey {
+            subnet: 1,
+            producer: 2,
+        };
+        let (root, chunks) = pieces(key, b"abcd", 2);
+        let (other_root, other) = pieces(key, b"wxyz", 2);
+        let now = Instant::now();
+        let mut proof = Proof::new(key, node_keypair(2).public(), 2, now, false);
+        let peer = PeerId::random();
+        let mut rng = StdRng::seed_from_u64(9);
+        let senders = BTreeMap::new();
+        let mut receive = |msg: ObjectPieces| proof.receive(peer, msg, &senders, 4, now, &mut rng);
+        // Nothing holds this proof to a root yet, so a bare Merkle path proves nothing.
+        assert!(!receive(chunk(None, root, &chunks[1])));
+        // Signed by a host that is not the producer, or over another root.
+        assert!(!receive(chunk(Some(3), root, &chunks[0])));
+        assert!(!receive(chunk(Some(2), other_root, &chunks[0])));
+        assert!(!receive(chunk(Some(2), root, &chunks[0])));
+        // The signed root is known now: the Merkle path alone authenticates the next chunk,
+        // and a chunk of another tree fails with or without a signature.
+        assert!(!receive(chunk(None, other_root, &other[1])));
+        assert!(!receive(chunk(Some(2), other_root, &other[1])));
+        let unsigned = chunk(None, root, &chunks[1]);
+        let signed = chunk(Some(2), root, &chunks[1]);
+        assert_eq!(
+            signed.pieces.as_ref().unwrap().len(),
+            unsigned.pieces.as_ref().unwrap().len() + 2400
+        );
+        assert!(receive(unsigned));
+        assert!(proof.peers[&peer].received_from);
+    }
+
+    #[test]
+    fn the_signature_goes_only_to_a_peer_that_may_lack_it() {
+        let mut peer = PeerProof::default();
+        assert!(peer.needs_signature());
+        // An empty inventory does not show that the peer has verified anything.
+        peer.has = Some(Bitmap::default());
+        assert!(peer.needs_signature());
+        let mut holding = Bitmap::default();
+        holding.set(3);
+        peer.has = Some(holding);
+        assert!(!peer.needs_signature());
+        let sent = PeerProof {
+            signature_sent: true,
+            ..PeerProof::default()
+        };
+        assert!(!sent.needs_signature());
+        let received = PeerProof {
+            received_from: true,
+            ..PeerProof::default()
+        };
+        assert!(!received.needs_signature());
     }
 
     #[test]
