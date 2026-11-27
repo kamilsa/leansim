@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Propagating committee proofs: four strategies compared</title>
+<title>Propagating committee proofs: five strategies in the second slot</title>
 
 <style>
 :root {
@@ -66,6 +66,7 @@ svg .d-out { font-size: 13px; font-weight: 650; fill: var(--ink); }
 .small { font-size: 14px; color: var(--muted); }
 @media (max-width: 720px) { .tiles, .two { grid-template-columns: 1fr; } h1 { font-size: 28px; } }
 tr.grp td { text-align: left; font-weight: 600; background: var(--soft); white-space: normal; }
+tr.neg td { color: #a5401b; }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 14px 0 18px; }
 .stat { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .stat .k { color: var(--muted); font-size: 13.5px; }
@@ -88,45 +89,61 @@ i.sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; mar
 <body>
 <main>
 
-<h1>Propagating committee proofs: four strategies compared</h1>
-<p class="sub">leansim experiments on branch <code>feature/subnet-proof-strategies</code> · updated 23 November 2026 · Shadow simulations of 16 committees on 3,713 hosts</p>
+<h1>Propagating committee proofs: five strategies in the second slot</h1>
+<p class="sub">leansim experiments on branch <code>feature/seacast-proofs</code> · updated 27 November 2026 · Shadow simulations of 16 committees on 3,713 hosts, two proof rounds a slot apart</p>
 
 <div class="summary">
-<p><b>Summary.</b> Every proof of every committee has to reach every host. We compared four ways of spreading
-200 kB proofs: announce and pull, the whole proof on GossipSub, signed Merkle pieces on GossipSub (EIP-8411 style), and
-the same pieces on Waggle. <b>Waggle was the fastest at the 95th percentile in all six matched cases</b> and the only
-strategy with every host ready within 4 s. Announce and pull sent the fewest bytes, 2% above one copy, and trailed
-Waggle by 0.19 s with four proofs per committee. Pieces on GossipSub
-were the slowest and the heaviest.</p>
+<p><b>Summary.</b> Every proof of every committee has to reach every host. We compared five ways of spreading 200 kB
+proofs: announce and pull, the whole proof on GossipSub, signed Merkle pieces on GossipSub (EIP-8411 style), the same
+pieces on Waggle, and SEACAST with Reed–Solomon coded chunks on Waggle. Each run now has two rounds: proofs are released
+6 s into the run and new proofs from the same producers 12 s later, and <b>all numbers are from the second round</b>.
+The second round was faster than the first for every strategy except pieces on GossipSub, by
+0.22 to 0.41 s for Waggle and
+0.76 to 1.25 s for announce and pull at the 95th percentile.
+<b>Waggle pieces stayed fastest with one and two proofs per committee. With four, announce and pull took the lead</b>
+(2.05 against 2.87 s) while sending
+45% fewer bytes; Waggle kept the shorter tail in one of the two
+seeds and the only full coverage by 4 s in every run. SEACAST trailed Waggle pieces in every case, and pieces on
+GossipSub were still the slowest and the heaviest.</p>
 <div class="tiles">
-  <div class="tile"><div class="big">3.78 <span>→</span> 3.10 s</div><div class="what">until 95% of hosts hold a proof for every committee</div></div>
-  <div class="tile"><div class="big">8.00 <span>→</span> 3.71 s</div><div class="what">until the last host does</div></div>
-  <div class="tile"><div class="big">91.4 <span>→</span> 23.2 MB</div><div class="what">sent per host for the 64 proofs</div></div>
+  <div class="tile"><div class="big">3.15 <span>→</span> 2.05 s</div><div class="what">95% of hosts hold a proof for every committee: whole proof → announce and pull</div></div>
+  <div class="tile"><div class="big">2.87 s</div><div class="what">the same for Waggle pieces, with every host ready by 4 s</div></div>
+  <div class="tile"><div class="big">85.6 <span>→</span> 13.1 MB</div><div class="what">sent per host for the 64 proofs; Waggle 23.7 MB</div></div>
 </div>
-<p class="small" style="margin-bottom:0">Baseline: the whole proof on GossipSub at the mesh-8 setting. Best: Waggle, as set
-out in <a href="#conclusion">the conclusion</a>. Four proofs per committee, mean of two seeds, proof traffic only on a
-lossless network.</p>
+<p class="small" style="margin-bottom:0">Four proofs per committee, second round, mean of two seeds, proof traffic only on
+a lossless network. Baseline: the whole proof on GossipSub at the mesh-8 setting.</p>
 </div>
 
 <figure>
-<p class="chart-title">Seconds until 95% of hosts hold a proof for every committee, four proofs per committee</p>
+<p class="chart-title">Seconds until 95% of hosts hold a proof for every committee, four proofs per committee, second round</p>
 <div id="c-head"></div>
-<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
-<figcaption>3,713 hosts, 64 proofs of 200,000 bytes released at the same instant, mean of two seeds. Mesh settings are
-GossipSub's low / target / high. Announce and pull and Waggle send nothing over a GossipSub mesh.</figcaption>
+<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#CC79A7"></i>SEACAST on Waggle</span><span><i style="background:#009E73"></i>pieces on Waggle</span><span><i style="background:#E69F00"></i>announce and pull</span></div>
+<figcaption>3,713 hosts, 64 proofs of 200,000 bytes released at the same instant, 12 s after a first round of 64 other
+proofs from the same producers. Mean of two seeds. Mesh settings are GossipSub's low / target / high. Announce and pull,
+Waggle pieces and SEACAST send nothing over a GossipSub mesh.</figcaption>
 </figure>
 
 <h2 id="setup">1. What we simulate and what we measure</h2>
-<p>Each run is one round of proof dissemination. It starts when the proofs exist: these runs send no signatures and do
-no proving.</p>
+<p>The earlier version of this report measured one round of proofs, released 5 s after the hosts started. A suspicion
+was that GossipSub had not settled by then. Every run now carries two rounds a 12 s slot apart and reports the
+second. These runs send no signatures and do no proving.</p>
 <ul>
-<li><b>Workload.</b> 16 committees. Each has 1, 2 or 4 producers, so a run carries 16, 32 or 64 proofs. Every producer
-releases its own 200,000-byte synthetic proof at the same instant, and nothing is sent ahead of that instant. The
-proofs of one committee differ from each other, and every one of them is meant to reach every host. Producers are
-distinct hosts holding validators of their committee; the roster for one producer per committee is the first round of
-the roster for two, and so on.</li>
-<li><b>Coverage.</b> Every host became ready in every run. All runs but two delivered every proof to every host. The
-two runs of pieces on GossipSub ended 3 and 1 deliveries short of 237,568.</li>
+<li><b>Two rounds.</b> 16 committees, each with 1, 2 or 4 producers, so a round carries 16, 32 or 64 proofs. Every
+producer releases a 200,000-byte synthetic proof 6 s into the run and a new one from the same host at 18 s, in the
+middle of the next 12 s slot. The second round's proofs are new objects with their own data, Merkle root and
+signature; only the connections and each strategy's own state (GossipSub meshes, SEACAST's push relations) carry over.
+The proof runner has no separate warm-up phase: with a 300 ms heartbeat, GossipSub had run about 20 heartbeats at the
+first release and 60 at the second. Release times are counted from host start. Runs last 40 s.</li>
+<li><b>Each round on its own clock.</b> Times are from that round's release. Bytes are counted from 0.5 s before a
+release to 0.5 s before the next one (or the end of the run), so traffic of one round that runs past the next release
+counts in the next round. This matters only for pieces on GossipSub, whose first round was still running at 18 s.</li>
+<li><b>The first round reproduces the earlier report.</b> Its 95th percentiles are within 0.16 s of the
+published single-round numbers for the 22 runs of the four strategies the earlier report had, on the same hosts,
+links, connections and producers.</li>
+<li><b>Coverage.</b> Every host became ready in every round of every run, except one round of pieces on GossipSub in
+which 2 hosts were not. All strategies but pieces on GossipSub delivered every proof to every
+host in both rounds; pieces on GossipSub ended their second rounds 33 and 117
+deliveries short of 237,568.</li>
 </ul>
 
 <h3 id="network">Network</h3>
@@ -147,35 +164,33 @@ two runs of pieces on GossipSub ended 3 and 1 deliveries short of 237,568.</li>
 <tr><td><i class="sw" style="background:#0072B2"></i>Supernodes</td><td>671</td><td>18.1%</td><td>1,000 Mbps</td><td>1,000 Mbps</td><td>31,580 / 31,648</td><td>96.4% / 96.6%</td></tr>
 <tr><td><i class="sw" style="background:#D55E00"></i>Regular nodes</td><td>3,042</td><td>81.9%</td><td>50 Mbps</td><td>100 Mbps</td><td>1,188 / 1,120</td><td>3.6% / 3.4%</td></tr>
 </table></div>
-<p class="small">Supernodes are hosts with at least 10 validators in the node map. Validator counts are seed 42 / seed 43:
-each seed places the 32,768 simulated validators anew, on the same hosts and links. With four proofs per committee,
-54 and 55 of the 64 producers are supernodes.</p>
+<p class="small">Validator counts are seed 42 / seed 43: each seed places the 32,768 simulated validators anew, on the
+same hosts and links. With four proofs per committee, 54 and 55 of the 64
+producers are supernodes.</p>
 <div class="two">
 <figure><p class="chart-title">Validators per host</p><div id="c-vph"></div>
 <div class="legend"><span><i style="background:var(--blue)"></i>supernodes</span><span><i style="background:var(--red)"></i>regular nodes</span></div></figure>
 <figure><p class="chart-title">Hosts and validators by country</p><div id="c-ctry"></div>
 <div class="legend"><span><i style="background:var(--blue)"></i>supernodes</span><span><i style="background:var(--red)"></i>regular nodes</span><span><i style="background:#5f6b7a"></i>validators</span></div></figure>
 </div>
-<p class="small">Charts are seed 42. Seed 42 reuses the placement and peer graph of the signature runs on this map; seed
-43 draws a new placement and graph. Within a seed and producer count, all strategies use the same hosts, links,
-connections, producers and release time.</p>
+<p class="small">Charts are seed 42. Within a seed and producer count, all strategies use the same hosts, links,
+connections, producers and release times; the audit checked the topology, every host's dial list, the bandwidths and the
+producer roster across all arms of each case.</p>
 <h3>Metrics</h3>
 <ul>
-<li><b>Ready</b>: time from the release until a host holds at least one complete proof for every one of the 16
-committees, which is what a proposer would need before it can combine them. A host's own proof counts. Median, 95th
-percentile and last host, over all 3,713 hosts.</li>
+<li><b>Ready</b>: time from the round's release until a host holds at least one complete proof of that round for every
+one of the 16 committees, which is what a proposer would need before it can combine them. A host's own proof counts.
+Median, 95th percentile and last host, over all 3,713 hosts.</li>
 <li><b>Ready by 4 s</b>: how many of the 3,713 hosts were ready 4 s after the release.</li>
-<li><b>MB sent per host</b>: bytes written to QUIC streams, averaged over hosts: proof data including duplicates,
-signatures, framing and control messages. It leaves out UDP/IP and QUIC packet overhead and retransmissions, so it is
-not wire bytes.</li>
+<li><b>MB sent per host</b>: bytes written to QUIC streams in the round's window, averaged over hosts: proof data
+including duplicates, signatures, framing and control messages. It leaves out UDP/IP and QUIC packet overhead and
+retransmissions, so it is not wire bytes. Over the whole run, bytes sent equal bytes received.</li>
 <li><b>× one copy</b>: the same bytes divided by one transfer of every proof to every other host, which is
 3.20, 6.40 and 12.80 MB per host for 16, 32 and 64 proofs. A strategy that delivers every
 proof cannot go below 1.</li>
 </ul>
-<p class="small">The clock starts at the release, not at the start of a slot. These numbers do not show by themselves
-that a slot schedule holds.</p>
 
-<h2 id="strategies">2. The four strategies</h2>
+<h2 id="strategies">2. The five strategies</h2>
 <figure>
 <svg viewBox="0 0 720 510" role="img" aria-labelledby="st-title st-desc">
   <title id="st-title">What two neighbouring hosts exchange under each strategy</title>
@@ -218,7 +233,7 @@ that a slot schedule holds.</p>
     <circle cx="180" cy="142" r="5" fill="#1f2933"/>
     <line x1="290" y1="90" x2="187" y2="178" stroke="#D55E00" stroke-width="5" marker-end="url(#p4o)"/>
     <line x1="180" y1="148" x2="284" y2="198" stroke="#D55E00" stroke-width="5" marker-end="url(#p4o)"/>
-    <text x="180" y="226" text-anchor="middle" class="d-out">7.1 to 7.2 × the one-copy bytes</text>
+    <text x="180" y="226" text-anchor="middle" class="d-out">6.3 to 6.8 × the one-copy bytes</text>
     <text x="180" y="243" text-anchor="middle" class="d-muted">every mesh peer forwards the whole proof</text>
   </g>
 
@@ -232,7 +247,7 @@ that a slot schedule holds.</p>
     <g stroke="#D55E00" stroke-width="3" marker-end="url(#m4o)">
       <line x1="290" y1="80" x2="186" y2="104"/><line x1="290" y1="98" x2="186" y2="122"/><line x1="290" y1="116" x2="186" y2="140"/><line x1="290" y1="134" x2="186" y2="158"/><line x1="290" y1="152" x2="186" y2="176"/>
     </g>
-    <text x="180" y="226" text-anchor="middle" class="d-out">9.2 × the one-copy bytes</text>
+    <text x="180" y="226" text-anchor="middle" class="d-out">8.8 × the one-copy bytes</text>
     <text x="180" y="243" text-anchor="middle" class="d-muted">64 pieces per proof, each with the root signature</text>
   </g>
 
@@ -250,7 +265,7 @@ that a slot schedule holds.</p>
     <text x="184" y="162" class="d-muted">request, rarest piece first</text>
     <line x1="60" y1="172" x2="165" y2="190" stroke="#0072B2" stroke-width="1.5" marker-end="url(#s4b)"/>
     <text x="184" y="190" class="d-muted">the piece</text>
-    <text x="180" y="226" text-anchor="middle" class="d-out">1.7 to 1.8 × the one-copy bytes</text>
+    <text x="180" y="226" text-anchor="middle" class="d-out">1.8 to 1.9 × the one-copy bytes</text>
     <text x="180" y="243" text-anchor="middle" class="d-muted">relays push for 250 ms, then only answer requests</text>
   </g>
 </svg>
@@ -258,7 +273,7 @@ that a slot schedule holds.</p>
 <figcaption>Neighbouring hosts and one proof, time running downwards. A dot is the moment a host holds the whole proof.
 The thickest arrows are the whole proof, medium arrows are pieces that carry the root signature, thin arrows are pieces
 with their Merkle path only, and dashed arrows are small control messages. The byte ratios are the measured ranges of
-section 3.</figcaption>
+section 4, round 2. SEACAST, the fifth strategy, is described below.</figcaption>
 </figure>
 <ul>
 <li><b>Announce and pull.</b> A host that holds a complete proof announces it to all its connected peers. A peer
@@ -283,206 +298,259 @@ send queues. A relay pushes only during the 250 ms after its first verified piec
 advertise the pieces they hold every 50 ms. From 100 ms after it first hears of a proof, a host requests missing pieces,
 rarest first, with one open request per peer per proof. A request that is not answered within 550 ms goes to another
 peer. The policy sits in the application; the vendored Waggle library is unchanged.</li>
+<li><b>SEACAST on Waggle.</b> <a href="https://github.com/cskiraly/seacast-spec">SEACAST</a> v0.12.0 in its tier 4
+setting, carried on its Waggle binding: one <code>ObjectPieces</code> per SEACAST message (JOIN, GRAFT, PRUNE, HAVE,
+WANT, CHUNK) on one topic, nothing on GossipSub. A proof is a group: the producer cuts it into 64 data chunks of 3,125
+bytes, adds 64 Reed–Solomon parity chunks (rate 1/2, as SEACAST Lite measured), builds a Merkle tree over the 128 chunks
+(a 224-byte path each) and signs the root. Any 64 distinct chunks rebuild the proof; the host then claims every chunk,
+stops asking, re-encodes, checks the root and pushes rebuilt chunks to neighbours still short of 64.
+Each host keeps a symmetric push relation of 6 to 12 peers (target 8), grafted and pruned like a GossipSub mesh; it pushes
+a new chunk to at most 2 relation peers (6 on a 1 Gbit/s host) that do not hold it, furthest behind first, and offers it
+to the others. Holdings and offers are bitmaps. A host asks one announcer per chunk at a time, moves on after 200 ms and
+parks a peer that has not answered within 400 ms. A byte window of about one round trip of the uplink bounds chunks in
+flight; queued chunks a peer has meanwhile claimed are cancelled, and pushes to a peer projected to reach 64 without them
+are skipped. A 1 Gbit/s producer stripes its first copies over every connection. Heartbeat gossip (700 ms) offers recent
+chunks to a sample of the other links, paced. <b>The root signature goes to a peer at most once per proof:</b> with
+the first chunk queued to it, and not at all once the peer has sent us a chunk, a holding or an offer of that proof,
+since it then holds the signed root. Waggle pieces follow the same rule.
+Simplifications: the per-peer queue never refuses, card 16's guard, scoring and group expiry are left out, and chunks are
+not compressed (the proof bytes are random).</li>
 </ul>
 
-<h2 id="results">3. Results with one, two and four proofs per committee</h2>
+<h2 id="warmup">3. Is the second slot faster?</h2>
+<figure>
+<p class="chart-title">How much earlier the 95th-percentile host is ready in round 2 than in round 1 (s), four proofs per committee</p>
+<div id="c-warm"></div>
+<figcaption>Mean of two seeds. Pieces on GossipSub are left out: their second round was later, not earlier (table
+below).</figcaption>
+</figure>
+<div class="scroll"><table><tr><th>Strategy</th><th>Round 1, 95th-<br>percentile host (s)</th><th>Round 2, 95th-<br>percentile host (s)</th><th>Change (s)</th><th>Change in<br>MB sent</th></tr>
+<tr class="grp"><td colspan="5">One proof per committee</td></tr>
+<tr><td>Announce and pull</td><td>3.81 / 3.62</td><td>3.05 / 2.83</td><td>−0.76 / −0.79</td><td>+0.1% / +0.1%</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>3.16 / 3.07</td><td>1.80 / 1.84</td><td>−1.36 / −1.23</td><td>−11.2% / −10.8%</td></tr>
+<tr><td>Pieces on Waggle</td><td>1.83 / 1.83</td><td>1.44 / 1.43</td><td>−0.39 / −0.41</td><td>+5.7% / +6.1%</td></tr>
+<tr><td>SEACAST on Waggle</td><td>2.05 / 2.03</td><td>1.86 / 1.82</td><td>−0.19 / −0.21</td><td>−6.5% / −5.7%</td></tr>
+<tr class="gap"><td colspan="5"></td></tr>
+<tr class="grp"><td colspan="5">Two proofs per committee</td></tr>
+<tr><td>Announce and pull</td><td>3.35 / 3.41</td><td>2.33 / 2.33</td><td>−1.02 / −1.08</td><td>+0.1% / +0.1%</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>3.37 / 3.53</td><td>2.24 / 2.35</td><td>−1.14 / −1.18</td><td>−4.6% / −5.1%</td></tr>
+<tr><td>Pieces on Waggle</td><td>2.09 / 2.09</td><td>1.86 / 1.84</td><td>−0.23 / −0.25</td><td>+5.0% / +5.0%</td></tr>
+<tr><td>SEACAST on Waggle</td><td>2.96 / 3.00</td><td>2.60 / 2.65</td><td>−0.36 / −0.35</td><td>−5.5% / −5.9%</td></tr>
+<tr class="gap"><td colspan="5"></td></tr>
+<tr class="grp"><td colspan="5">Four proofs per committee</td></tr>
+<tr><td>Announce and pull</td><td>3.28 / 3.28</td><td>2.03 / 2.07</td><td>−1.25 / −1.20</td><td>+0.1% / +0.1%</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>3.66 / 3.98</td><td>3.17 / 3.14</td><td>−0.50 / −0.84</td><td>−6.0% / −5.0%</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;3/4/6</td><td>4.22 / 4.33</td><td>3.14 / 3.27</td><td>−1.08 / −1.06</td><td>−1.5% / −1.7%</td></tr>
+<tr class="neg"><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>11.05 / 11.34</td><td>12.46 / 12.53</td><td>+1.41 / +1.19</td><td>+3.5% / +3.3%</td></tr>
+<tr><td>Pieces on Waggle</td><td>3.10 / 3.10</td><td>2.87 / 2.88</td><td>−0.23 / −0.22</td><td>+2.3% / +2.4%</td></tr>
+<tr><td>SEACAST on Waggle</td><td>4.29 / 4.28</td><td>3.80 / 3.81</td><td>−0.49 / −0.47</td><td>−2.4% / −2.7%</td></tr>
+</table></div>
+<p class="small">Each cell is seed 42 / seed 43. A negative change means round 2 was faster. Red rows were slower in round 2.</p>
+<div class="finding"><b>Every strategy but pieces on GossipSub was faster in the second round, in every case and
+seed, and the gain is not specific to GossipSub.</b> The whole proof on GossipSub gained
+0.50 to 1.36 s at the 95th percentile, but announce and pull, which uses
+no mesh, gained 0.76 to 1.25 s. SEACAST gained
+0.19 to 0.49 s and Waggle pieces 0.22 to
+0.41 s.</div>
+<ul>
+<li><b>What the second round inherits.</b> The connections have already carried a round of proofs. Our QUIC
+implementation (quinn-proto 0.11.14, CUBIC) starts every connection with a congestion window of 14,720 bytes and does
+not shrink it after an idle period, so a connection that moved 200 kB in round 1 starts round 2 with a larger window.
+Strategies that move a whole proof over few connections (announce and pull, the whole proof) would gain the most from
+that, and they did. We did not record congestion windows, so this is our explanation, not a measurement.</li>
+<li><b>The GossipSub mesh.</b> At the first release GossipSub had run about 20 heartbeats. If an unsettled mesh were
+the main cost, the whole proof would gain clearly more than announce and pull, which uses no mesh; the two ranges
+overlap.
+The whole proof also sent 5 to 11% fewer bytes in round 2,
+which fits fewer duplicate forwards, but we did not count mesh sizes or duplicates per round.</li>
+<li><b>The ranking moves.</b> In round 1 Waggle had the lowest 95th percentile in all six cases, as in the earlier
+report. In round 2 announce and pull overtook it with four proofs per committee in both seeds, and with one proof per
+committee the whole proof on GossipSub, third in round 1, tied SEACAST for second.</li>
+<li><b>Pieces on GossipSub got slower</b>, by 1.19 and
+1.41 s. Their first round was not over: its last host was ready
+30.2 s and 32.0 s after the release, past the
+second release at 12 s, so the two rounds competed for the same uplinks. Every other strategy finished its first round
+within 9.68 s.</li>
+</ul>
+
+<h2 id="results">4. Results in the second slot</h2>
 <div class="two">
 <figure><p class="chart-title">95th-percentile host ready (s)</p><div id="c-p95"></div></figure>
 <figure><p class="chart-title">MB sent per host</p><div id="c-mb"></div></figure>
 </div>
-<div class="legend" style="margin-bottom:14px"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
-<p class="small">Mean of two seeds, GossipSub at the mesh-8 setting. The horizontal axis is the number of proofs per
-committee. Pieces on GossipSub were run with four proofs per committee only and are in the table.</p>
-<div class="scroll"><table><tr><th>Strategy</th><th>Median<br>host (s)</th><th>95th-percentile<br>host (s)</th><th>MB sent<br>per host</th><th>× one<br>copy</th></tr>
-<tr class="grp"><td colspan="5">One proof per committee: 16 proofs, 3.20 MB per host for one copy of each</td></tr>
-<tr><td>Announce and pull</td><td>2.99 / 2.76</td><td>3.84 / 3.60</td><td>3.28 / 3.28</td><td>1.02 / 1.02</td></tr>
-<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.30</td><td>3.16 / 3.05</td><td>22.89 / 22.63</td><td>7.16 / 7.07</td></tr>
-<tr class="best"><td>Pieces on Waggle</td><td>1.46 / 1.44</td><td>1.84 / 1.85</td><td>5.52 / 5.49</td><td>1.72 / 1.72</td></tr>
-<tr class="gap"><td colspan="5"></td></tr>
-<tr class="grp"><td colspan="5">Two proofs per committee: 32 proofs, 6.40 MB per host for one copy of each</td></tr>
-<tr><td>Announce and pull</td><td>2.44 / 2.26</td><td>3.33 / 3.39</td><td>6.55 / 6.55</td><td>1.02 / 1.02</td></tr>
-<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.40</td><td>3.40 / 3.59</td><td>45.83 / 45.79</td><td>7.16 / 7.16</td></tr>
-<tr class="best"><td>Pieces on Waggle</td><td>1.79 / 1.79</td><td>2.09 / 2.10</td><td>10.76 / 10.70</td><td>1.68 / 1.67</td></tr>
-<tr class="gap"><td colspan="5"></td></tr>
-<tr class="grp"><td colspan="5">Four proofs per committee: 64 proofs, 12.80 MB per host for one copy of each</td></tr>
-<tr><td>Announce and pull</td><td>2.12 / 2.15</td><td>3.28 / 3.29</td><td>13.11 / 13.11</td><td>1.02 / 1.02</td></tr>
-<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.31 / 2.38</td><td>3.73 / 3.83</td><td>92.18 / 90.64</td><td>7.20 / 7.08</td></tr>
-<tr><td>Whole proof on GossipSub, mesh&nbsp;3/4/6</td><td>2.58 / 2.68</td><td>4.19 / 4.42</td><td>72.02 / 72.11</td><td>5.63 / 5.64</td></tr>
-<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>6.46 / 6.74</td><td>11.03 / 11.22</td><td>117.78 / 117.89</td><td>9.20 / 9.21</td></tr>
-<tr class="best"><td>Pieces on Waggle</td><td>2.66 / 2.66</td><td>3.10 / 3.10</td><td>23.20 / 23.12</td><td>1.81 / 1.81</td></tr>
+<div class="legend" style="margin-bottom:14px"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#CC79A7"></i>SEACAST on Waggle</span><span><i style="background:#009E73"></i>pieces on Waggle</span><span><i style="background:#E69F00"></i>announce and pull</span></div>
+<p class="small">Round 2, mean of two seeds, GossipSub at the mesh-8 setting. The horizontal axis is the number of
+proofs per committee. Pieces on GossipSub were run with four proofs per committee only and are in the table.</p>
+<div class="scroll"><table><tr><th>Strategy</th><th>Median<br>host (s)</th><th>95th-percentile<br>host (s)</th><th>Last<br>host (s)</th><th>MB sent<br>per host</th><th>× one<br>copy</th></tr>
+<tr class="grp"><td colspan="6">One proof per committee: 16 proofs, 3.20 MB per host for one copy of each</td></tr>
+<tr><td>Announce and pull</td><td>2.16 / 2.00</td><td>3.05 / 2.83</td><td>3.96 / 3.67</td><td>3.3 / 3.3</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>1.07 / 1.18</td><td>1.80 / 1.84</td><td>3.73 / 2.91</td><td>20.3 / 20.2</td><td>6.36 / 6.32</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>1.24 / 1.23</td><td>1.44 / 1.43</td><td>1.90 / 2.06</td><td>5.8 / 5.8</td><td>1.82 / 1.82</td></tr>
+<tr><td>SEACAST on Waggle</td><td>1.62 / 1.52</td><td>1.86 / 1.82</td><td>2.79 / 2.88</td><td>7.6 / 7.7</td><td>2.38 / 2.41</td></tr>
+<tr class="gap"><td colspan="6"></td></tr>
+<tr class="grp"><td colspan="6">Two proofs per committee: 32 proofs, 6.40 MB per host for one copy of each</td></tr>
+<tr><td>Announce and pull</td><td>1.70 / 1.74</td><td>2.33 / 2.33</td><td>3.35 / 3.60</td><td>6.6 / 6.6</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>1.28 / 1.34</td><td>2.24 / 2.35</td><td>4.50 / 5.76</td><td>43.7 / 43.5</td><td>6.83 / 6.79</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>1.65 / 1.64</td><td>1.86 / 1.84</td><td>2.26 / 2.17</td><td>11.3 / 11.2</td><td>1.77 / 1.76</td></tr>
+<tr><td>SEACAST on Waggle</td><td>2.02 / 2.06</td><td>2.60 / 2.65</td><td>3.76 / 3.88</td><td>16.0 / 16.1</td><td>2.50 / 2.51</td></tr>
+<tr class="gap"><td colspan="6"></td></tr>
+<tr class="grp"><td colspan="6">Four proofs per committee: 64 proofs, 12.80 MB per host for one copy of each</td></tr>
+<tr class="best"><td>Announce and pull</td><td>1.43 / 1.48</td><td>2.03 / 2.07</td><td>4.44 / 2.94</td><td>13.1 / 13.1</td><td>1.02 / 1.02</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>1.67 / 1.72</td><td>3.17 / 3.14</td><td>6.93 / 6.39</td><td>85.9 / 85.4</td><td>6.71 / 6.67</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;3/4/6</td><td>1.77 / 1.75</td><td>3.14 / 3.27</td><td>9.95 / 7.06</td><td>70.9 / 70.7</td><td>5.54 / 5.53</td></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>7.11 / 6.80</td><td>12.46 / 12.53</td><td>19.48 / 18.73</td><td>112.7 / 112.3</td><td>8.81 / 8.77</td></tr>
+<tr><td>Pieces on Waggle</td><td>2.43 / 2.44</td><td>2.87 / 2.88</td><td>3.38 / 3.45</td><td>23.7 / 23.7</td><td>1.86 / 1.85</td></tr>
+<tr><td>SEACAST on Waggle</td><td>2.99 / 2.92</td><td>3.80 / 3.81</td><td>5.89 / 5.05</td><td>35.7 / 35.7</td><td>2.79 / 2.79</td></tr>
 </table></div>
-<p class="small">Each cell is seed 42 / seed 43. Mesh settings are GossipSub's low/target/high. 3,713 hosts. The
-shaded row has the lowest 95th percentile of its group.</p>
-<div class="finding"><b>Waggle had the lowest 95th percentile in all six cases, and the shortest tail.</b> Its
-95th-percentile host was ready after 1.85, 2.10 and 3.10 s
-with one, two and four proofs per committee, and its last host after at most 3.75 s. No other strategy
-had every host ready by 4 s in all of its runs.</div>
+<p class="small">Round 2. Each cell is seed 42 / seed 43. Mesh settings are GossipSub's low/target/high. 3,713 hosts.
+The shaded row has the lowest 95th percentile of its group.</p>
+<div class="finding"><b>Waggle pieces had the lowest 95th percentile with one and two proofs per committee, and the
+only full coverage by 4 s in every run.</b> Its 95th-percentile host was ready after 1.43,
+1.85 and 2.87 s with one, two and four proofs per committee, and its last host
+after at most 3.45 s.</div>
+<div class="finding"><b>With four proofs per committee announce and pull was fastest at the median and the 95th
+percentile</b>: 1.43 / 1.48 s and 2.03 / 2.07 s against
+2.43 / 2.44 s and 2.87 / 2.88 s for Waggle, at 2.5%
+above one copy. Its tail is less even: its last host was ready after 4.44 / 2.94 s against
+3.38 / 3.45 s, and 3,712 and 3,713 hosts were
+ready by 4 s.</div>
 <ul>
-<li><b>Announce and pull is the cheapest, and it gets faster with more proofs.</b> It sends 2.4%
-more than one copy of each proof. Its 95th percentile falls from 3.72 to
-3.28 s as producers are added, probably because a host needs only one proof per committee
-and more producers put one closer; we did not measure hop counts. With four proofs per committee its median host
-(2.12 / 2.15 s) is ahead of Waggle's (2.66 / 2.66 s), its 95th percentile is
-0.19 s behind, and it sends 43% fewer bytes.</li>
-<li><b>Waggle's lead shrinks as proofs are added.</b> Its 95th percentile grows by 1.25 s
-from one to four proofs per committee, while announce and pull improves by 0.44 s.
-The gap between them goes from 1.87 s to
-0.19 s. We did not test more than four.</li>
-<li><b>The whole proof on GossipSub sends about seven times the one-copy bytes.</b> 22.8,
-45.8 and 91.4 MB per host, and the 95th percentile rises from
-3.10 to 3.78 s. With four proofs per committee the last host needs
-about 8 s.</li>
-<li><b>Pieces on GossipSub are the slowest and the heaviest.</b> With four proofs per committee the 95th-percentile
-host needs 11.03 / 11.22 s and the last host 19.0 / 19.3 s, within a second of the end of the run.
-Only 764 and 656 of the 3,713 hosts are ready by 4 s, and a host
-sends 118 MB.</li>
+<li><b>Announce and pull gets faster with more proofs.</b> Its 95th percentile falls from
+2.94 to 2.05 s as producers are added, probably because a host
+needs only one proof per committee and more producers put one closer; we did not measure hop counts. Waggle goes the
+other way, from 1.43 to 2.87 s. We did not test more than four.</li>
+<li><b>The whole proof on GossipSub</b> sends 6.3 to 6.8 times
+the one-copy bytes. In the second round it ties SEACAST for second with one proof per committee, ties announce and pull
+for second with two (each ahead in one seed), and with four comes after announce and pull and Waggle, at 3.17 / 3.14 s; its last host needs
+6.93 / 6.39 s.</li>
+<li><b>SEACAST trails Waggle pieces in every case and seed</b>, at 1.86 / 1.82, 2.60 / 2.65 and
+3.80 / 3.81 s against 1.44 / 1.43, 1.86 / 1.84 and 2.87 / 2.88 s, and
+35.7 against 23.7 MB per host with four proofs per committee. With two and four
+proofs it is the slowest strategy apart from pieces on GossipSub; with one it ties the whole proof (ahead in one seed,
+behind in the other).</li>
+<li><b>Pieces on GossipSub are the slowest and the heaviest.</b> With four proofs per committee the 95th-percentile host
+needs 12.46 / 12.53 s and the last 19.5 / 18.7 s; only 669 and
+682 hosts are ready by 4 s, and a host sends 112 MB. Part of that is the
+first round still running (section 3).</li>
 </ul>
-<div class="finding note">We report the result of pieces on GossipSub for this setup: 64 pieces, the signature in every
-piece, four proofs per committee, the mesh-4 setting, simultaneous release. We have not run it with fewer proofs or at
-the mesh-8 setting, and we do not attribute its loss to a particular mechanism.
-<a href="#signature">Section 5</a> shows how much of it the signature accounts for.</div>
+<div class="finding note">SEACAST was run with its reference constants; nothing was tuned for 200 kB proofs on this
+network. Several of them are sized for a 1 MiB payload (the window, the 200 ms ask window, the 400 ms promise). In the
+second round 59 to 77% of its chunk messages were answers to asks rather
+than pushes, a host parked an unresponsive peer 11 to 103 times per delivered proof,
+and received 0.91 to 1.26 duplicate chunks for every chunk a
+delivered proof needs. Its push relation settled at about 6 peers, the low mark, not the target of 8. We have not run
+the sweep that would show which of these costs the time.</div>
 
-<h2 id="bytes">4. How many bytes each strategy sends</h2>
+<h2 id="bytes">5. How many bytes each strategy sends</h2>
 <figure>
-<p class="chart-title">Bytes sent per host, as a multiple of one copy of every proof (four proofs per committee)</p>
+<p class="chart-title">Bytes sent per host, as a multiple of one copy of every proof (four proofs per committee, round 2)</p>
 <div id="c-ratio"></div>
-<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#E69F00"></i>announce and pull</span><span><i style="background:#009E73"></i>pieces on Waggle</span></div>
+<div class="legend"><span><i style="background:#8a8f98"></i>whole proof on GossipSub</span><span><i style="background:#0072B2"></i>pieces on GossipSub</span><span><i style="background:#CC79A7"></i>SEACAST on Waggle</span><span><i style="background:#009E73"></i>pieces on Waggle</span><span><i style="background:#E69F00"></i>announce and pull</span></div>
 <figcaption>One copy of each of the 64 proofs for every other host is 12.80 MB per host. Mean of two
 seeds.</figcaption>
 </figure>
+<div class="scroll"><table><tr><th>Bytes above one copy, per host and proof (kB)</th><th>One proof per<br>committee</th><th>Two</th><th>Four</th></tr>
+<tr><td>Announce and pull</td><td>5 / 5</td><td>5 / 5</td><td>5 / 5</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>1071 / 1064</td><td>1166 / 1158</td><td>1143 / 1134</td></tr>
+<tr><td>Whole proof on GossipSub, mesh&nbsp;3/4/6</td><td>–</td><td>–</td><td>908 / 905</td></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>–</td><td>–</td><td>1561 / 1554</td></tr>
+<tr><td>Pieces on Waggle</td><td>165 / 164</td><td>153 / 151</td><td>171 / 170</td></tr>
+<tr><td>SEACAST on Waggle</td><td>276 / 282</td><td>300 / 302</td><td>358 / 358</td></tr>
+</table></div>
+<p class="small">Round 2, seed 42 / seed 43. The proof itself is 200 kB. Overhead is everything else a host sends
+per proof: duplicates, Merkle paths, signatures, framing and control messages.</p>
 <ul>
-<li><b>Announce and pull: 1.024.</b> A host fetches each proof once, so nothing arrives twice. The remaining
-2.4% is announcements, requests and framing.</li>
-<li><b>Whole proof on GossipSub: 7.1 to 7.2</b> at the mesh-8
-setting, with IDONTWANT enabled. We did not measure the mesh degree of the proof topic or the copies per mesh link in
-these runs, so we cannot say how the excess splits between mesh forwards and gossip.</li>
-<li><b>Pieces on GossipSub: 9.21</b> at the mesh-4 setting. A piece message is 5,717
-bytes for 3,125 bytes of proof, so one copy of every piece already costs 1.83 times the proof.</li>
-<li><b>Waggle: 1.67 to 1.81.</b> The Merkle paths add 6.1% to every
-piece. The signature rides on 11 to 14% of the piece messages, which
-is 11 to 13 signed messages sent per host and proof, and makes up
-7 to 9% of the bytes. The rest of the excess is pieces pushed to a host
-that already held them, inventories and requests. We have not instrumented how it splits.</li>
+<li><b>Announce and pull: 1.025.</b> A host fetches each proof once, so nothing arrives twice; the rest is
+announcements, requests and framing.</li>
+<li><b>Whole proof on GossipSub: 6.3 to 6.8</b> at the mesh-8
+setting, with IDONTWANT enabled. We did not measure how the excess splits between mesh forwards and gossip.</li>
+<li><b>Pieces on GossipSub: 8.79</b> at the mesh-4 setting. A piece message is 5,717
+bytes for 3,125 bytes of proof, so one copy of every piece already costs 1.83 times the proof. This round's window also
+holds the tail of the first round.</li>
+<li><b>SEACAST: 2.38 to 2.79.</b> A chunk message carries a 224-byte
+Merkle path on 3,125 bytes of data. The root signature rides on 5.8 to
+7.0% of the chunk messages, 7.0 to
+9.6 per host and proof against about 33 connections per host, and makes up
+3.6 to 4.2% of the bytes. The rest is mostly duplicate
+chunks, holdings, offers and asks; we have not split the bytes by message kind.</li>
+<li><b>Waggle: 1.76 to 1.86.</b> The Merkle paths add 6.1% to every
+piece. The signature rides on 12 to 15% of the piece
+messages, 11.8 to 13.8 per host and proof, and makes up
+7.6 to 9.1% of the bytes. Waggle sent
+2 to 6% more in round 2 than in round 1; we have not looked into why.</li>
 </ul>
 <p>For scale, a 50 Mbit/s uplink moves 6.25 MB per second. With four proofs per committee the whole proof on GossipSub
-sends 91 MB per host on average and pieces on GossipSub 118 MB, about
-15 and 19 s of such an uplink, against
-2.1 s for announce and pull and 3.7 s for Waggle. The
-strategies that send the most also have the longest tails, which is what we would expect if uplinks are the bottleneck.
-We infer this from the totals; we recorded neither queues nor per-host bytes, and the hosts with 1 Gbit/s likely send
-more than the average.</p>
-
-<h2 id="signature">5. What the root signature costs</h2>
-<p>Two more piece formats were run on the same network, to see what the 2,400-byte signature does and where it should
-travel.</p>
-<ul>
-<li><b>Pieces on GossipSub without the root signature.</b> Each piece carries the Merkle root, and the producer's
-ordinary pubsub message signature covers it. A piece message is 3,349 bytes instead of 5,717.</li>
-<li><b>Waggle with the signature in every piece.</b> 16 pieces of 12,500 bytes, each with the root, the signature and
-its Merkle path, so that the signature is 19% of a piece and not 77%.</li>
-</ul>
-<div class="scroll"><table><tr><th>Four proofs per committee</th><th>Median<br>host (s)</th><th>95th-percentile<br>host (s)</th><th>MB sent<br>per host</th><th>× one<br>copy</th></tr>
-<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6: no root signature</td><td>3.75 / 4.02</td><td>6.48 / 6.90</td><td>79.62 / 79.64</td><td>6.22 / 6.22</td></tr>
-<tr class="best"><td>Pieces on GossipSub, mesh&nbsp;3/4/6: signature in every piece</td><td>6.46 / 6.74</td><td>11.03 / 11.22</td><td>117.78 / 117.89</td><td>9.20 / 9.21</td></tr>
-<tr><td>Pieces on Waggle: 16 pieces, signature in every piece</td><td>2.76 / 2.80</td><td>3.45 / 3.50</td><td>28.38 / 28.46</td><td>2.22 / 2.22</td></tr>
-<tr class="best"><td>Pieces on Waggle: 64 pieces, signature only when needed</td><td>2.66 / 2.66</td><td>3.10 / 3.10</td><td>23.20 / 23.12</td><td>1.81 / 1.81</td></tr>
-</table></div>
-<p class="small">Each cell is seed 42 / seed 43. The shaded rows are the formats of sections 2 to 4.</p>
-<div class="finding neg"><b>On GossipSub the signature in every piece costs
-48% more bytes and
-4.4 s at the 95th percentile.</b> Without it the
-95th-percentile host is ready after 6.48 / 6.90 s; with it after 11.03 / 11.22 s,
-and the number of hosts ready by 4 s falls from about 2,000 to about
-700.</div>
-<div class="finding"><b>On Waggle, 64 pieces with the signature sent only when needed beat 16 pieces with the signature
-in each.</b> With four proofs per committee the 95th-percentile host is
-0.38 s earlier and a host sends
-19% fewer bytes. With one and two proofs the differences are
-0.38 and 0.34 s, and
-21 and 19%.
-The two formats differ in piece count and in signature placement, so this does not separate the two.</div>
-<ul>
-<li><b>Even without the signature, pieces on GossipSub trail Waggle.</b> We also ran the unsigned format at the mesh-8
-setting. Its 95th-percentile host was ready after 2.70 / 2.63 s with one proof per
-committee, 4.08 / 4.23 s with two and 6.82 / 6.88 s with
-four, at 25, 50 and
-98 MB per host. Signed Waggle needs 1.85,
-2.10 and 3.10 s.</li>
-<li><b>With one proof per committee the unsigned pieces beat the whole proof</b> at the 95th percentile
-(2.66 against 3.10 s); with two and four they do not.
-We have not run the signed format with one or two proofs.</li>
-<li><b>With four proofs, Waggle with the signature in every piece loses its lead:</b> 3.45 / 3.50 s
-against 3.28 / 3.29 s for announce and pull, and 3,676 and
-3,674 hosts ready by 4 s.</li>
-</ul>
+sends 86 MB per host on average and pieces on GossipSub 112 MB, about
+14 and 18 s of such an uplink, against
+2.1 s for announce and pull and 3.8 s for Waggle. These are
+averages; we recorded neither queues nor per-host bytes, and the 1 Gbit/s hosts likely send more.</p>
 
 <h2 id="mesh">6. A smaller GossipSub mesh</h2>
-<p>In the signature runs the mesh size was the largest single lever on duplicates. For proofs we ran the whole proof
-with four proofs per committee at both the mesh-8 setting (low 4, target 8, high 12) and the mesh-4 setting (low 3,
-target 4, high 6). The connections, placement and producers are the same; only the three mesh settings differ. The rows
-are in the last group of the table in section 3.</p>
-<div class="finding note"><b>The mesh-4 setting saves about a fifth of the bytes and does not make the whole proof
-competitive.</b> It sends 21% less, its 95th-percentile
-host is 0.53 s later, fewer hosts are ready by 4 s, and it still
-sends more than five times the one-copy bytes.</div>
-<p>Pieces on GossipSub with the signature were run at the mesh-4 setting only. For the unsigned format of section 5 the
-mesh-4 setting sent 19% fewer
-bytes than mesh-8, and its 95th percentile was 6.48 / 6.90 s against
-6.82 / 6.88 s.</p>
+<p>We ran the whole proof with four proofs per committee at both the mesh-8 setting (low 4, target 8, high 12) and the
+mesh-4 setting (low 3, target 4, high 6), on the same connections, placement and producers. The rows are in the last
+group of the table in section 4.</p>
+<div class="finding note"><b>In the second round the mesh-4 setting saves about a sixth of the bytes at almost no cost
+in time.</b> It sends 17% less and its 95th-percentile host
+is 0.05 s later. In the first round it was
+0.45 s later. Its tail is longer in both rounds (last host
+9.95 / 7.06 s against 6.93 / 6.39 s in round 2), and it still sends more than five
+times the one-copy bytes.</div>
 
-<h2 id="conclusion">7. Conclusion: the best setup so far</h2>
-<p>Move authenticated pieces on Waggle: 64 pieces with their Merkle paths, the signature over the root sent to a peer
-only while it may lack it, a short push followed by rarest-first requests.</p>
-<pre><code># proof and pieces (campaign flags)
---proof-bytes 200000 --chunks 64          # 3,125-byte pieces, 192-byte Merkle path each
-
-# src/node/subnet_proofs.rs
-COMMITMENT_SIGNATURE_BYTES = 2400         # one signature over the Merkle root per proof
-
-# src/node/subnet_proof_waggle.rs
-FANOUT            = 2        # peers a piece is pushed to, shortest send queues first
-PUSH_WINDOW       = 250 ms   # a relay pushes only this long after its first verified piece
-ANNOUNCE_INTERVAL = 50 ms    # inventories are coalesced over this interval
-REQUEST_DELAY     = 100 ms   # earliest request after a host first hears of a proof
-QUEUE_RETRY       = 100 ms   # retry after a send that failed
-request timeout   = 550 ms   # 500 ms + 16 µs per piece byte; then another peer</code></pre>
-<div class="scroll"><table><tr><th>Four proofs per committee, mean of two seeds</th><th>Median host</th><th>95th-percentile host</th><th>MB sent per host</th></tr>
-<tr class="base"><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>2.34 s</td><td>3.78 s</td><td>91.4</td></tr>
-<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>6.60 s</td><td>11.13 s</td><td>117.8</td></tr>
-<tr><td>Announce and pull</td><td>2.13 s</td><td>3.28 s</td><td>13.1</td></tr>
-<tr class="best"><td>Pieces on Waggle</td><td>2.66 s</td><td>3.10 s</td><td>23.2</td></tr>
+<h2 id="conclusion">7. Conclusion</h2>
+<p>In a warmed-up network the choice between Waggle pieces and announce and pull depends on the number of proofs and on
+what matters: the 95th percentile, the tail or the bytes.</p>
+<div class="scroll"><table><tr><th>Four proofs per committee, round 2, mean of two seeds</th><th>Median host</th><th>95th-percentile host</th><th>Last host</th><th>MB sent per host</th></tr>
+<tr class="base"><td>Whole proof on GossipSub, mesh&nbsp;4/8/12</td><td>1.69 s</td><td>3.15 s</td><td>6.66 s</td><td>85.6</td></tr>
+<tr><td>Pieces on GossipSub, mesh&nbsp;3/4/6</td><td>6.96 s</td><td>12.49 s</td><td>19.11 s</td><td>112.5</td></tr>
+<tr><td>SEACAST on Waggle</td><td>2.96 s</td><td>3.81 s</td><td>5.47 s</td><td>35.7</td></tr>
+<tr class="best"><td>Pieces on Waggle</td><td>2.44 s</td><td>2.87 s</td><td>3.41 s</td><td>23.7</td></tr>
+<tr class="best"><td>Announce and pull</td><td>1.46 s</td><td>2.05 s</td><td>3.69 s</td><td>13.1</td></tr>
 </table></div>
-<div class="finding note"><b>Waggle buys the tail with bytes.</b> Against announce and pull it brings the
-95th-percentile host forward by 0.19 s and the last host by
-1.78 s, and sends 77%
-more. Against the whole proof on GossipSub it is faster and sends about a quarter of the bytes.</div>
-<h3>Variants</h3>
 <ul>
-<li><b>If bytes matter more than the tail</b>, use announce and pull: within 2.4% of the one-copy floor, and its
-median host is ahead of Waggle's with four proofs per committee. With one proof per committee its 95th percentile is
-1.87 s behind Waggle.</li>
-<li><b>If the proofs must stay on GossipSub</b>, send them whole. With the signature in every piece, pieces took about
-three times as long at the 95th percentile with four proofs per committee.</li>
+<li><b>Announce and pull</b> is the cheapest, within 2.5% of one copy, and with four proofs per
+committee also the fastest at the median and the 95th percentile. With one proof per committee it is
+1.51 s behind Waggle at the 95th percentile, and its last host varies
+more from seed to seed.</li>
+<li><b>Waggle pieces</b> (64 pieces with their Merkle paths, the root signature sent to a peer only while it may lack it,
+a short push followed by rarest-first requests) are the fastest with one and two proofs per committee and the only
+strategy with every host ready by 4 s in every run, at 1.8 to 1.9 times
+the one-copy bytes.</li>
+<li><b>The whole proof on GossipSub</b> gains, with announce and pull, the most from the warm network, but sends more
+than six times the one-copy bytes. <b>SEACAST as specified</b> trails Waggle pieces; it is the one to tune if erasure coding matters, for example
+against withholding producers, which none of these runs model. <b>Pieces on GossipSub</b> with the signature in every
+piece do not keep up with a 12 s slot at four proofs per committee.</li>
 </ul>
+<p class="small">The earlier single-round report found Waggle fastest in all six cases. That still holds for the first
+round of these runs; the second round changes the result with four proofs per committee. These are proof transfers
+only: neither round carries signature traffic or proving, which would compete for the same uplinks in a real slot.</p>
+<pre><code># src/node/subnet_proof_waggle.rs (Waggle pieces)
+FANOUT = 2; PUSH_WINDOW = 250 ms; ANNOUNCE_INTERVAL = 50 ms; REQUEST_DELAY = 100 ms; request timeout = 550 ms
+
+# src/node/seacast.rs (SEACAST reference values)
+K, N = 64, 128 (Reed–Solomon, rate 1/2); R = 2, R_FAST = 6 at >= 500 Mbit/s; relation 6..12, target 8
+IWANT_WINDOW = 200 ms; PROMISE = 400 ms; PARK_TTL = 30 s; WINDOW_TIMEOUT = 500 ms; heartbeat 700 ms</code></pre>
 
 <h2 id="appendix">Appendix: settings and data</h2>
-<p>Everything is on branch <code>feature/subnet-proof-strategies</code>. Announce and pull and the whole proof are at
-commit <code>180148d</code>; the piece formats are in the worktree and not committed yet.</p>
+<p>All runs are on branch <code>feature/seacast-proofs</code> with binary <code>fdbd667ee63d5e6b…</code>, which adds proof rounds to
+the proof-only runner: round <i>r</i> releases at <code>release_ms + r × slot_ms</code>, and its proofs are numbered
+apart from earlier rounds' so they are new objects. Each host logs its bytes and counters separately per round.</p>
 <div class="scroll"><table><tr><th>Where</th><th>Setting</th><th>Meaning</th></tr>
-<tr><td><code>scripts/subnet-proof-campaign.py</code></td><td><code>--modes</code></td><td style="text-align:left;white-space:normal"><code>announce_pull</code>, <code>gossipsub</code>, <code>eip8411</code> (pieces on GossipSub), <code>waggle</code></td></tr>
-<tr><td></td><td><code>--network-config</code></td><td style="text-align:left;white-space:normal">Reuse an experiment's hosts, placement, links and peer graph; here <code>sweeps/32k-mix/jobs/gossip-m8.toml</code> with <code>nodes_3713_mix.csv</code></td></tr>
+<tr><td><code>scripts/subnet-proof-campaign.py</code></td><td><code>--modes</code></td><td style="text-align:left;white-space:normal"><code>announce_pull</code>, <code>gossipsub</code>, <code>eip8411</code> (pieces on GossipSub), <code>waggle</code>, <code>seacast</code></td></tr>
+<tr><td></td><td><code>--network-config</code></td><td style="text-align:left;white-space:normal">Reuse an experiment's hosts, placement, links and peer graph; here the 32k-mix network with <code>nodes_3713_mix.csv</code></td></tr>
 <tr><td></td><td><code>--copies 1 2 4</code></td><td style="text-align:left;white-space:normal">Producers per committee</td></tr>
-<tr><td></td><td><code>--proof-bytes 200000 --chunks 64</code></td><td style="text-align:left;white-space:normal">Proof size and number of pieces; the script's default is 16 pieces</td></tr>
-<tr><td></td><td><code>--release-ms 5000 --stagger-ms 0</code></td><td style="text-align:left;white-space:normal">All producers release 5 s into the run</td></tr>
-<tr><td></td><td><code>--commitment-lead-ms 500</code></td><td style="text-align:left;white-space:normal">The byte count starts this long before the release; nothing is sent in between</td></tr>
+<tr><td></td><td><code>--proof-bytes 200000 --chunks 64</code></td><td style="text-align:left;white-space:normal">Proof size and number of pieces; for SEACAST the number of data chunks, to which it adds as many parity chunks</td></tr>
+<tr><td></td><td><code>--rounds 2 --slot-ms 12000 --release-ms 6000</code></td><td style="text-align:left;white-space:normal">Releases at 6 s and 18 s</td></tr>
+<tr><td></td><td><code>--commitment-lead-ms 500</code></td><td style="text-align:left;white-space:normal">A round's byte count starts this long before its release; nothing is sent ahead of a release</td></tr>
 <tr><td></td><td><code>--idontwant-bytes 1000</code></td><td style="text-align:left;white-space:normal">IDONTWANT threshold for the GossipSub strategies</td></tr>
 <tr><td></td><td><code>--gossip-mesh 3 4 6</code></td><td style="text-align:left;white-space:normal">Mesh low, target and high, applied after the peer graph is built; default 4 8 12</td></tr>
-<tr><td></td><td><code>--seeds 42 43 --seconds 25</code></td><td style="text-align:left;white-space:normal">Seeds and run length; the release is 5 s in</td></tr>
+<tr><td></td><td><code>--seeds 42 43 --seconds 40</code></td><td style="text-align:left;white-space:normal">Seeds and run length</td></tr>
 </table></div>
-<p>The numbers in this report are in <a href="proof-propagation-data.json"><code>proof-propagation-data.json</code></a>, next to this page. They were taken from the campaigns'
-<code>comparison.json</code> files and host logs when the runs finished. Shadow 3.3.0. The runs of sections 3 and 4
-used 24 Shadow workers on 24 of the server's 48 cores, one run at a time. Some runs of section 5 used 12 or 40 workers
-and ran side by side; we assume the worker count does not change simulated results and did not test it.</p>
+<p>The numbers, for both rounds, are in <a href="proof-propagation-data.json"><code>proof-propagation-data.json</code></a>,
+next to this page; it also has the time until 95% of hosts hold every proof of a round. They were taken from the host
+logs after the runs. A 16-host smoke run of all five strategies delivered every proof in both rounds and gave identical
+times with the byte count starting 500 ms and 0 ms before the release. Shadow 3.3.0, 24 Shadow workers on 24 logical
+CPUs, one run at a time, while another user's simulation held the other half of the server. The two signature formats of
+the earlier report's section 5 were not rerun.</p>
 
 </main>
 <script>
@@ -572,16 +640,18 @@ function countries(id, rows) {
   document.getElementById(id).innerHTML = s + '</svg>';
 }
 
+
 const two = v => v.toFixed(2);
 
-// All numbers: proof-propagation-data.json. Charts are means of seeds 42 and 43 on 3,713 hosts.
-hbar('c-head', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 3.78, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 4.31, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 11.13, "color": "#0072B2"}, {"label": "announce and pull", "value": 3.28, "color": "#E69F00"}, {"label": "pieces on Waggle", "value": 3.1, "color": "#009E73"}], { fmt: two, max: 12.4, labelW: 300 });
+// All numbers: proof-propagation-data.json. Charts are means of seeds 42 and 43 on 3,713 hosts, round 2.
+hbar('c-head', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 3.15, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 3.2, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 12.49, "color": "#0072B2"}, {"label": "SEACAST on Waggle", "value": 3.81, "color": "#CC79A7"}, {"label": "pieces on Waggle", "value": 2.87, "color": "#009E73"}, {"label": "announce and pull", "value": 2.05, "color": "#E69F00"}], { fmt: two, max: 13.2, labelW: 300 });
+hbar('c-warm', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 0.67, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 1.07, "color": "#8a8f98"}, {"label": "SEACAST on Waggle", "value": 0.48, "color": "#CC79A7"}, {"label": "pieces on Waggle", "value": 0.23, "color": "#009E73"}, {"label": "announce and pull", "value": 1.22, "color": "#E69F00"}], { fmt: two, max: 1.4, labelW: 300 });
 
 const copies = ['1', '2', '4'];
-lines('c-p95', copies, [{"name": "whole", "color": "#8a8f98", "values": [3.1, 3.49, 3.78]}, {"name": "A&amp;P", "color": "#E69F00", "values": [3.72, 3.36, 3.28]}, {"name": "Waggle", "color": "#009E73", "values": [1.85, 2.1, 3.1]}], { ymin: 1.5, ymax: 4, ystep: 0.5, xlabel: 'proofs per committee' });
-lines('c-mb', copies, [{"name": "whole", "color": "#8a8f98", "values": [22.8, 45.8, 91.4]}, {"name": "A&amp;P", "color": "#E69F00", "values": [3.3, 6.6, 13.1]}, {"name": "Waggle", "color": "#009E73", "values": [5.5, 10.7, 23.2]}], { ymin: 0, ymax: 100, ystep: 20, xlabel: 'proofs per committee' });
+lines('c-p95', copies, [{"name": "whole", "color": "#8a8f98", "values": [1.82, 2.29, 3.15]}, {"name": "A&amp;P", "color": "#E69F00", "values": [2.94, 2.33, 2.05]}, {"name": "SEACAST", "color": "#CC79A7", "values": [1.84, 2.62, 3.81]}, {"name": "Waggle", "color": "#009E73", "values": [1.43, 1.85, 2.87]}], { ymin: 1, ymax: 4, ystep: 0.5, xlabel: 'proofs per committee' });
+lines('c-mb', copies, [{"name": "whole", "color": "#8a8f98", "values": [20.3, 43.6, 85.6]}, {"name": "A&amp;P", "color": "#E69F00", "values": [3.3, 6.6, 13.1]}, {"name": "SEACAST", "color": "#CC79A7", "values": [7.7, 16.0, 35.7]}, {"name": "Waggle", "color": "#009E73", "values": [5.8, 11.3, 23.7]}], { ymin: 0, ymax: 100, ystep: 20, xlabel: 'proofs per committee' });
 
-hbar('c-ratio', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 7.14, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 5.63, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 9.21, "color": "#0072B2"}, {"label": "announce and pull", "value": 1.02, "color": "#E69F00"}, {"label": "pieces on Waggle", "value": 1.81, "color": "#009E73"}], { fmt: two, max: 10.2, labelW: 300 });
+hbar('c-ratio', [{"label": "whole proof on GossipSub, mesh 4 / 8 / 12", "value": 6.69, "color": "#8a8f98"}, {"label": "whole proof on GossipSub, mesh 3 / 4 / 6", "value": 5.53, "color": "#8a8f98"}, {"label": "pieces on GossipSub, mesh 3 / 4 / 6", "value": 8.79, "color": "#0072B2"}, {"label": "SEACAST on Waggle", "value": 2.79, "color": "#CC79A7"}, {"label": "pieces on Waggle", "value": 1.85, "color": "#009E73"}, {"label": "announce and pull", "value": 1.02, "color": "#E69F00"}], { fmt: two, max: 9.2, labelW: 300 });
 
 vstack('c-vph', [{"bin": "0", "super": 35, "regular": 2130}, {"bin": "1", "super": 74, "regular": 693}, {"bin": "2–3", "super": 146, "regular": 211}, {"bin": "4–7", "super": 114, "regular": 8}, {"bin": "8–15", "super": 72, "regular": 0}, {"bin": "16–31", "super": 68, "regular": 0}, {"bin": "32–63", "super": 54, "regular": 0}, {"bin": "64–127", "super": 47, "regular": 0}, {"bin": "128–255", "super": 31, "regular": 0}, {"bin": "256–511", "super": 18, "regular": 0}, {"bin": "512–1023", "super": 12, "regular": 0}]);
 countries('c-ctry', [{"name": "United States", "super": 259, "regular": 1089, "validators": 9327}, {"name": "Germany", "super": 91, "regular": 496, "validators": 4040}, {"name": "Finland", "super": 44, "regular": 212, "validators": 2588}, {"name": "France", "super": 41, "regular": 208, "validators": 3222}, {"name": "Canada", "super": 34, "regular": 167, "validators": 1940}, {"name": "Singapore", "super": 31, "regular": 144, "validators": 607}, {"name": "United Kingdom", "super": 43, "regular": 123, "validators": 3179}, {"name": "Netherlands", "super": 28, "regular": 117, "validators": 1320}, {"name": "Japan", "super": 36, "regular": 91, "validators": 2579}, {"name": "South Korea", "super": 12, "regular": 68, "validators": 892}, {"name": "Hong Kong", "super": 6, "regular": 67, "validators": 212}, {"name": "Austria", "super": 13, "regular": 55, "validators": 616}, {"name": "Switzerland", "super": 10, "regular": 56, "validators": 1008}, {"name": "China", "super": 9, "regular": 56, "validators": 207}, {"name": "Australia", "super": 9, "regular": 54, "validators": 967}, {"name": "Ireland", "super": 5, "regular": 39, "validators": 64}]);
