@@ -49,7 +49,7 @@ class SubnetProofCampaignTest(unittest.TestCase):
     def test_all_arms_share_the_network_and_producers(self):
         args = SimpleNamespace(nodes=16, subnets=4, seconds=15, proof_bytes=200_000, dials=3,
                                idontwant_bytes=1000, release_ms=5000, stagger_ms=0,
-                               commitment_lead_ms=500, chunks=64)
+                               commitment_lead_ms=500, chunks=64, rounds=2, slot_ms=12000)
         case = CAMPAIGN["make_case"](args, 42, 2)
         with tempfile.TemporaryDirectory() as tmp:
             paths = [Path(tmp) / mode for mode in CAMPAIGN["MODES"]]
@@ -93,6 +93,33 @@ class SubnetProofCampaignTest(unittest.TestCase):
             self.assertEqual(result["ready_by_ms"][1000], 1)
             self.assertEqual(result["distinct_deliveries"], 3)
             self.assertEqual(result["bytes_over_one_copy_per_delivery"], 1)
+
+    def test_each_round_is_summarized_from_its_own_release_and_traffic(self):
+        exp = {"subnet_count": 1, "geo_seed": 42, "aggregate_proof_bytes": 100}
+        nodes = [{"node_id": node, "seed_addrs": []} for node in range(2)]
+        later = CAMPAIGN["ROUND_SUBNETS"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            CAMPAIGN["json_write"](path / "network.json", {"experiment": exp, "edges": [], "nodes": nodes})
+            CAMPAIGN["json_write"](path / "proof-settings.json", {
+                "mode": "waggle", "producers": [{"subnet": 0, "producer": 0}], "rounds": 2, "slot_ms": 12000})
+            events = {
+                0: [("proof_release", 0, 6000), ("proof_complete", 0, 6000),
+                    ("proof_release", later, 18000), ("proof_complete", later, 18000)],
+                1: [("proof_complete", 0, 9000), ("proof_complete", later, 18500)],
+            }
+            for node, entries in events.items():
+                host = path / "shadow.data" / "hosts" / f"node-{node}"
+                host.mkdir(parents=True)
+                rows = [dict(event=kind, node_id=node, subnet=s, producer=0, ms=ms) for kind, s, ms in entries]
+                rows += [dict(event="proof_traffic", node_id=node, round=r, bytes=b, peers=1, pending_fetches=0)
+                         for r, b in ((0, 300), (1, 100))]
+                (host / "leansim.1.stdout").write_text("\n".join(map(json.dumps, rows)))
+            result = CAMPAIGN["summarize"](path)
+            self.assertEqual([r["ready_last_ms"] for r in result["rounds"]], [3000, 500])
+            self.assertEqual((result["round"], result["release_ms"], result["ready_last_ms"]), (1, 18000, 500))
+            self.assertEqual(result["bytes_over_one_copy_per_delivery"], 2)
+            self.assertTrue((path / "receivers-round1.csv").exists())
 
     def test_proofs_are_cut_into_16_chunks_by_default(self):
         args = CAMPAIGN["build_parser"]().parse_args(["out"])

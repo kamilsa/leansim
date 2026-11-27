@@ -1,5 +1,6 @@
-//! Single-round subnet proof transport benchmark. No signature traffic or proving.
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+//! Subnet proof transport benchmark, one or more rounds a slot apart. No signature
+//! traffic or proving.
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -50,20 +51,112 @@ pub struct Settings {
     /// 1 Gbit/s also striping, card 13). Only the SEACAST arm reads it.
     #[serde(default)]
     fast_hosts: Vec<u32>,
+    /// Proof rounds: the same producers release new proofs every `slot_ms`, round `r`
+    /// at `release_ms + r * slot_ms`. Round `r` names its proofs `subnet + r * ROUND_SUBNETS`,
+    /// so each round's proofs are new objects with their own data and root.
+    #[serde(default = "one_round")]
+    rounds: u32,
+    #[serde(default)]
+    slot_ms: u64,
+}
+
+/// Subnet numbers of round `r` start at `r * ROUND_SUBNETS`.
+pub const ROUND_SUBNETS: u32 = 1 << 16;
+
+fn one_round() -> u32 {
+    1
+}
+
+impl Settings {
+    fn round_start(&self, round: u32) -> u64 {
+        self.release_ms + u64::from(round) * self.slot_ms
+    }
+
+    /// Every proof of every round, with its round.
+    fn roster(&self) -> Vec<(u32, ProofKey)> {
+        (0..self.rounds)
+            .flat_map(|round| {
+                self.producers.iter().map(move |p| {
+                    (
+                        round,
+                        ProofKey {
+                            subnet: p.subnet + round * ROUND_SUBNETS,
+                            producer: p.producer,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// When each round's traffic count starts.
+    fn marks(&self) -> Vec<u64> {
+        (0..self.rounds)
+            .map(|round| self.round_start(round) - self.commitment_lead_ms)
+            .collect()
+    }
 }
 
 fn release_schedule(settings: &Settings, node_id: u32) -> BTreeSet<(u64, ProofKey)> {
     settings
-        .producers
-        .iter()
-        .filter(|p| p.producer == node_id)
-        .map(|&key| {
+        .roster()
+        .into_iter()
+        .filter(|(_, p)| p.producer == node_id)
+        .map(|(round, key)| {
             let stagger = (u64::from(key.producer).wrapping_mul(2654435761)
-                ^ u64::from(key.subnet))
+                ^ u64::from(key.subnet % ROUND_SUBNETS))
                 % (settings.stagger_ms + 1);
-            (settings.release_ms + stagger, key)
+            (settings.round_start(round) + stagger, key)
         })
         .collect()
+}
+
+/// Bytes written and chunk counters so far; a round's traffic is the difference
+/// between two of these.
+fn counters(run: &Run<'_>) -> Result<serde_json::Value> {
+    let bytes = zero_copy_write::stats();
+    let mut signatures = run.waggle.as_ref().map_or([0; 2], ProofWaggle::signatures);
+    let mut seacast_stats = serde_json::Value::Null;
+    if let Some(seacast) = &run.seacast {
+        let stats = seacast.stats();
+        signatures = [
+            stats.pushes + stats.answers - stats.headers_sent,
+            stats.headers_sent,
+        ];
+        seacast_stats = serde_json::to_value(&stats)?;
+        seacast_stats["mesh_at_end"] = seacast.mesh_size().into();
+    }
+    Ok(
+        serde_json::json!({"bytes": bytes.shared_bytes + bytes.copied_bytes,
+        "chunks_unsigned": signatures[0], "chunks_signed": signatures[1], "seacast": seacast_stats}),
+    )
+}
+
+/// `after - before` for counters; gauges (mesh sizes) keep their `after` value.
+fn difference(after: &serde_json::Value, before: &serde_json::Value) -> serde_json::Value {
+    const GAUGES: [&str; 3] = ["max_mesh", "min_mesh_at_release", "mesh_at_end"];
+    match (after, before) {
+        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => a
+            .iter()
+            .map(|(k, v)| {
+                let d = match (v, b.get(k)) {
+                    _ if GAUGES.contains(&k.as_str()) => v.clone(),
+                    (serde_json::Value::Number(x), Some(serde_json::Value::Number(y))) => {
+                        match (x.as_u64(), y.as_u64()) {
+                            (Some(x), Some(y)) => {
+                                x.checked_sub(y).expect("counter decreased").into()
+                            }
+                            _ => v.clone(),
+                        }
+                    }
+                    (_, Some(y)) => difference(v, y),
+                    (_, None) => v.clone(),
+                };
+                (k.clone(), d)
+            })
+            .collect(),
+        _ => after.clone(),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -310,7 +403,16 @@ pub fn run(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
         "commitment must be sent after startup"
     );
     ensure!(
-        settings.release_ms.saturating_add(settings.stagger_ms)
+        settings.rounds >= 1
+            && (settings.rounds == 1
+                || settings.slot_ms > settings.stagger_ms + settings.commitment_lead_ms)
+            && settings.producers.iter().all(|p| p.subnet < ROUND_SUBNETS),
+        "invalid proof rounds"
+    );
+    ensure!(
+        settings
+            .round_start(settings.rounds - 1)
+            .saturating_add(settings.stagger_ms)
             < experiment.run_timeout_secs.saturating_mul(1000),
         "proof release exceeds run duration"
     );
@@ -335,6 +437,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     let experiment = &cfg.experiment;
     let key = node_keypair(cfg.node_id);
     let waggle_topic = format!("/leansim/{}/subnet-proof-waggle/1", experiment.run_id).into_bytes();
+    let roster: Vec<ProofKey> = settings.roster().into_iter().map(|(_, key)| key).collect();
     let seacast = (settings.mode == Mode::Seacast).then(|| {
         let fast = settings.fast_hosts.contains(&cfg.node_id);
         ProofSeacast::new(
@@ -348,7 +451,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 } else {
                     experiment.network_defaults.uplink_mbps
                 },
-                settings.producers.iter().copied(),
+                roster.iter().copied(),
             ),
             waggle_topic.clone(),
         )
@@ -403,13 +506,11 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
         pulls: Pulls::default(),
         whole: BTreeMap::new(),
         pending: HashMap::new(),
-        allowed: settings
-            .producers
+        allowed: roster
             .iter()
             .map(|&key| (key, peer_id_for(key.producer)))
             .collect(),
-        keys: settings
-            .producers
+        keys: roster
             .iter()
             .map(|&key| (key, node_keypair(key.producer).public()))
             .collect(),
@@ -420,7 +521,7 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
                 settings.chunks,
                 experiment.aggregate_proof_bytes,
                 waggle_topic.clone(),
-                settings.producers.iter().copied(),
+                roster.iter().copied(),
             )
         }),
         seacast,
@@ -441,23 +542,21 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
     let mut releases = release_schedule(settings, cfg.node_id);
 
     let timeout = experiment.run_timeout_secs * 1000;
-    let mut sent_before = None;
-    let measure_at = settings.release_ms - settings.commitment_lead_ms;
-    let mut drive = interval_at(start + Duration::from_millis(measure_at), DRIVE_INTERVAL);
+    // One snapshot of the counters at the start of each round's traffic count.
+    let mut marks: VecDeque<u64> = settings.marks().into();
+    let mut snapshots = Vec::new();
+    let mut drive = interval_at(start + Duration::from_millis(marks[0]), DRIVE_INTERVAL);
     drive.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let waggle_proofs = settings.mode == Mode::Waggle;
     loop {
         let due = releases.first().map_or(timeout, |k| k.0);
-        let due = if sent_before.is_none() {
-            due.min(measure_at)
-        } else {
-            due
-        };
+        let due = marks.front().map_or(due, |&mark| due.min(mark));
         tokio::select! {
             biased;
             _ = sleep_until(start + Duration::from_millis(due)) => {
-                if sent_before.is_none() && due == measure_at {
-                    sent_before = Some(zero_copy_write::stats());
+                if marks.front() == Some(&due) {
+                    marks.pop_front();
+                    snapshots.push(counters(&run)?);
                 }
                 if due == timeout { break; }
                 while releases.first().is_some_and(|k| k.0 == due) {
@@ -539,31 +638,26 @@ async fn run_async(cfg: &NodeConfig, settings: &Settings) -> Result<()> {
             }
         }
     }
-    let after = zero_copy_write::stats();
-    let before = sent_before.context("measurement never started")?;
-    let mut signatures = run.waggle.as_ref().map_or([0; 2], ProofWaggle::signatures);
-    let mut pending = run
-        .waggle
-        .as_ref()
-        .map_or(run.pending.len(), ProofWaggle::pending);
-    let mut seacast_stats = serde_json::Value::Null;
-    if let Some(seacast) = &run.seacast {
-        let stats = seacast.stats();
-        signatures = [
-            stats.pushes + stats.answers - stats.headers_sent,
-            stats.headers_sent,
-        ];
-        pending = seacast.pending();
-        seacast_stats = serde_json::to_value(&stats)?;
-        seacast_stats["mesh_at_end"] = seacast.mesh_size().into();
-    }
-    log(
-        serde_json::json!({"event":"proof_traffic", "node_id":cfg.node_id,
-        "bytes":after.shared_bytes + after.copied_bytes - before.shared_bytes - before.copied_bytes,
-        "peers":swarm.connected_peers().count(),
-        "pending_fetches":pending,
-        "chunks_unsigned":signatures[0], "chunks_signed":signatures[1], "seacast":seacast_stats}),
+    ensure!(
+        snapshots.len() == settings.rounds as usize,
+        "measurement never started"
     );
+    snapshots.push(counters(&run)?);
+    let pending = match (&run.waggle, &run.seacast) {
+        (Some(waggle), _) => waggle.pending(),
+        (None, Some(seacast)) => seacast.pending(),
+        (None, None) => run.pending.len(),
+    };
+    // Round r's traffic runs from its mark to the next round's, the last to the end.
+    for (round, pair) in snapshots.windows(2).enumerate() {
+        let mut event = difference(&pair[1], &pair[0]);
+        event["event"] = "proof_traffic".into();
+        event["node_id"] = cfg.node_id.into();
+        event["round"] = round.into();
+        event["peers"] = swarm.connected_peers().count().into();
+        event["pending_fetches"] = pending.into();
+        log(event);
+    }
     Ok(())
 }
 
@@ -592,6 +686,8 @@ mod tests {
                 chunks: 64,
                 producers: vec![key],
                 fast_hosts: Vec::new(),
+                rounds: 1,
+                slot_ms: 0,
             };
             assert_eq!(
                 release_schedule(&settings, 7)
@@ -601,5 +697,47 @@ mod tests {
             );
             assert!(release_schedule(&settings, 8).is_empty());
         }
+    }
+
+    #[test]
+    fn each_round_releases_new_proofs_one_slot_later() {
+        let key = ProofKey {
+            subnet: 2,
+            producer: 7,
+        };
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "mode": "waggle", "release_ms": 6000, "stagger_ms": 0, "commitment_lead_ms": 500,
+            "chunks": 64, "producers": [key], "rounds": 2, "slot_ms": 12000}))
+        .unwrap();
+        let later = ProofKey {
+            subnet: 2 + ROUND_SUBNETS,
+            producer: 7,
+        };
+        assert_eq!(
+            release_schedule(&settings, 7)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![(6000, key), (18000, later)]
+        );
+        assert_eq!(settings.marks(), vec![5500, 17500]);
+        // Settings written before rounds existed still mean one round.
+        let old: Settings = serde_json::from_value(serde_json::json!({
+            "mode": "waggle", "release_ms": 5000, "stagger_ms": 0, "commitment_lead_ms": 500,
+            "chunks": 64, "producers": [key]}))
+        .unwrap();
+        assert_eq!(old.roster(), vec![(0, key)]);
+    }
+
+    #[test]
+    fn a_round_counts_only_its_own_traffic() {
+        let before = serde_json::json!({"bytes": 100, "chunks_signed": 3,
+            "seacast": {"pushes": 10, "max_mesh": 9, "min_mesh_at_release": 6}});
+        let after = serde_json::json!({"bytes": 250, "chunks_signed": 5,
+            "seacast": {"pushes": 40, "max_mesh": 11, "min_mesh_at_release": 7}});
+        assert_eq!(
+            difference(&after, &before),
+            serde_json::json!({"bytes": 150, "chunks_signed": 2,
+                "seacast": {"pushes": 30, "max_mesh": 11, "min_mesh_at_release": 7}})
+        );
     }
 }

@@ -17,6 +17,8 @@ SHADOW = runpy.run_path(str(ROOT / "shadow-sim.py"))
 MODES = ("announce_pull", "gossipsub", "eip8411", "waggle", "seacast")
 DEADLINES = (1000, 2000, 4000, 6000, 8000, 12000)
 IMAGE = "leansim-shadow:subnet-proofs"
+# Round r names its proofs subnet + r * ROUND_SUBNETS (src/node/subnet_proof_run.rs).
+ROUND_SUBNETS = 1 << 16
 
 
 def json_write(path, value):
@@ -131,7 +133,8 @@ def generate(path, mode, case, args):
     settings = {"mode": mode, "release_ms": args.release_ms, "stagger_ms": args.stagger_ms,
                 "commitment_lead_ms": args.commitment_lead_ms, "chunks": args.chunks, "producers": producers,
                 # SEACAST's fast class (card 17, and striping at 1 Gbit/s): the supernodes.
-                "fast_hosts": sorted(n["node_id"] for n in nodes if n.get("uplink_mbps", 0) >= 500)}
+                "fast_hosts": sorted(n["node_id"] for n in nodes if n.get("uplink_mbps", 0) >= 500),
+                "rounds": args.rounds, "slot_ms": args.slot_ms}
     json_write(path / "proof-settings.json", settings)
     json_write(path / "network.json", {"nodes": nodes, "edges": edges, "experiment": exp})
     # Physical latency graph, separate from the libp2p overlay.
@@ -166,15 +169,9 @@ def percentile(values, pct):
     return sorted(values)[math.ceil(len(values) * pct) - 1] if values else None
 
 
-def summarize(path):
-    settings = json.loads((path / "proof-settings.json").read_text())
-    network = json.loads((path / "network.json").read_text())
-    exp = network["experiment"]
-    nodes = {n["node_id"] for n in network["nodes"]}
-    subnets = set(range(exp["subnet_count"]))
-    proofs = {(p["subnet"], p["producer"]) for p in settings["producers"]}
-    release, completion, traffic = {}, {}, {}
-    seacast = defaultdict(int)
+def read_events(path, rounds):
+    """Per round: releases, completions and per-host traffic, with round-local subnet numbers."""
+    out = [({}, {}, {}) for _ in range(rounds)]
     for stdout in (path / "shadow.data" / "hosts").glob("node-*/*.stdout"):
         for line in stdout.read_text().splitlines():
             if not line.startswith('{"'):
@@ -184,21 +181,43 @@ def summarize(path):
             assert node == int(stdout.parent.name.removeprefix("node-"))
             kind = event["event"]
             if kind == "proof_traffic":
+                release, completion, traffic = out[event.get("round", 0)]
                 assert node not in traffic
-                if event.get("seacast"):
-                    for name, value in event["seacast"].items():
-                        if isinstance(value, int):
-                            seacast[name] += value
                 traffic[node] = event
                 continue
-            subnet, producer = event["subnet"], event["producer"]
-            assert (subnet, producer) in proofs
+            round_, subnet = divmod(event["subnet"], ROUND_SUBNETS)
+            release, completion, traffic = out[round_]
+            key = (subnet, event["producer"])
             if kind == "proof_release":
-                assert node == producer and (subnet, producer) not in release
-                release[subnet, producer] = event["ms"]
+                assert node == key[1] and key not in release
+                release[key] = event["ms"]
             elif kind == "proof_complete":
-                assert (node, subnet, producer) not in completion
-                completion[node, subnet, producer] = event["ms"]
+                assert (node, *key) not in completion
+                completion[node, *key] = event["ms"]
+    return out
+
+
+def summarize(path):
+    settings = json.loads((path / "proof-settings.json").read_text())
+    rounds = [summarize_round(path, settings, r, events)
+              for r, events in enumerate(read_events(path, settings.get("rounds", 1)))]
+    # The top level is the last round: with several rounds, the first warms the network up.
+    return {**rounds[-1], "rounds": rounds} if len(rounds) > 1 else rounds[0]
+
+
+def summarize_round(path, settings, round_, events):
+    network = json.loads((path / "network.json").read_text())
+    exp = network["experiment"]
+    nodes = {n["node_id"] for n in network["nodes"]}
+    subnets = set(range(exp["subnet_count"]))
+    proofs = {(p["subnet"], p["producer"]) for p in settings["producers"]}
+    release, completion, traffic = events
+    assert all(key in proofs for key in release) and all((s, p) in proofs for _, s, p in completion)
+    seacast = defaultdict(int)
+    for event in traffic.values():
+        for name, value in (event.get("seacast") or {}).items():
+            if isinstance(value, int):
+                seacast[name] += value
     assert set(traffic) == nodes, f"missing host traffic in {path}"
     assert set(release) == proofs, f"missing producers in {path}"
     assert all((p, s, p) in completion for s, p in proofs), f"missing local proof in {path}"
@@ -211,14 +230,15 @@ def summarize(path):
         if node != producer:
             deliveries.append(ms - release[subnet, producer])
     ready = {node: max(times.values()) - origin for node, times in first.items() if set(times) == subnets}
-    with (path / "receivers.csv").open("w", newline="", encoding="utf-8") as handle:
+    name = "receivers.csv" if round_ == 0 else f"receivers-round{round_}.csv"
+    with (path / name).open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["node_id", "ready_ms", "subnets_received", "quic_stream_bytes_sent", "connected_peers"])
         writer.writerows((node, ready.get(node), len(first[node]), traffic[node]["bytes"], traffic[node]["peers"])
                          for node in sorted(nodes))
     sent = sum(t["bytes"] for t in traffic.values())
     assert sum(len(n["seed_addrs"]) for n in network["nodes"]) == len(network["edges"])
-    return {"mode": settings["mode"], "seed": exp["geo_seed"], "nodes": len(nodes), "proofs": len(proofs),
+    return {"mode": settings["mode"], "round": round_, "release_ms": origin, "seed": exp["geo_seed"], "nodes": len(nodes), "proofs": len(proofs),
             "proof_bytes": exp["aggregate_proof_bytes"], "edges": len(network["edges"]),
             "mean_connected_peers": sum(t["peers"] for t in traffic.values()) / len(nodes),
             "ready": len(ready), "distinct_deliveries": len(deliveries), "possible_deliveries": len(proofs) * (len(nodes) - 1),
@@ -253,6 +273,9 @@ def build_parser():
     parser.add_argument("--stagger-ms", type=int, default=0)
     parser.add_argument("--commitment-lead-ms", type=int, default=500,
                         help="Start of the traffic count before the release; no arm sends a commitment ahead")
+    parser.add_argument("--rounds", type=int, default=1,
+                        help="Proof rounds a slot apart; every round has new proofs from the same producers")
+    parser.add_argument("--slot-ms", type=int, default=12000)
     parser.add_argument("--idontwant-bytes", type=int, default=1000)
     parser.add_argument("--seconds", type=int, default=30)
     parser.add_argument("--parallelism", type=int, default=8)
@@ -272,7 +295,9 @@ def main():
         parser.error("invalid synthetic network parameters")
     if not (1 <= min(args.copies) and 1 <= args.chunks <= 256 and args.chunks & (args.chunks - 1) == 0
             and 1 <= args.proof_bytes <= 2 * 1024 * 1024 - 1024 and 0 <= args.stagger_ms
-            and 0 <= args.commitment_lead_ms < args.release_ms < args.seconds * 1000 - args.stagger_ms):
+            and 1 <= args.rounds and (args.rounds == 1 or args.slot_ms > args.stagger_ms + args.commitment_lead_ms)
+            and 0 <= args.commitment_lead_ms < args.release_ms
+            and args.release_ms + (args.rounds - 1) * args.slot_ms < args.seconds * 1000 - args.stagger_ms):
         parser.error("invalid proof or timing parameters")
     if args.native_binary:
         args.native_binary = args.native_binary.resolve()
